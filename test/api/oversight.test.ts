@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/api/routes.js';
+import { listFeedback } from '../../src/core/feedback/events.js';
 import { recordPolicyEvent } from '../../src/core/policy/policyEvents.js';
 import type { Store } from '../../src/core/store/db.js';
 import { persistBusEvent } from '../../src/core/telemetry/busEvents.js';
@@ -12,8 +13,8 @@ afterEach(() => {
   for (const s of opened.splice(0)) s.close();
 });
 
-function setup() {
-  const t = researchSetup(opened);
+function setup(userId?: string) {
+  const t = researchSetup(opened, userId ? { config: (c) => (c.user = { id: userId }) } : {});
   const app = createApp({ store: t.store, artifacts: t.artifacts, events: t.events, config: t.config, research: t.deps });
   const json = async (method: string, path: string, body?: unknown) => {
     const init: RequestInit = { method };
@@ -40,6 +41,24 @@ function escalation(store: Store, workspaceId: string, extra: Partial<UserReques
 }
 
 describe('escalation answers API', () => {
+  it('integration: an escalation answer is a human action — actor, resolvedAt and a request_answer feedback event', async () => {
+    const t = setup('ana@acme');
+    const q = escalation(t.store, t.ws.id);
+    const ok = await t.json('POST', `/api/requests/${q.id}/escalation-answer`, { choice: 1, note: 'Q3 quote' });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ status: 'resolved', actor: 'ana@acme', optionsJson: { choice: 1 } });
+    expect(ok.body.resolvedAt).toBeTruthy();
+    expect(listFeedback(t.store, { kind: 'request_answer' })).toEqual([
+      expect.objectContaining({
+        actor: 'ana@acme', targetType: 'user_request', targetId: q.id,
+        beforeJson: expect.objectContaining({ status: 'pending', kind: 'escalation' }),
+        afterJson: expect.objectContaining({ status: 'resolved', choice: 1, response: ok.body.response }),
+      }),
+    ]);
+    expect((await t.json('POST', `/api/requests/${q.id}/escalation-answer`, { choice: 0 })).status).toBe(409);
+    expect(listFeedback(t.store, { kind: 'request_answer' })).toHaveLength(1);
+  });
+
   it('answers with an option, validates, and conflicts once answered', async () => {
     const t = setup();
     const q = escalation(t.store, t.ws.id);

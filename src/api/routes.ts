@@ -662,7 +662,7 @@ export function createApp(deps: AppDeps): Hono {
   mountOutcomeRoutes(app, { store }, workspace);
 
   // --- WP-D: escalation answers, policy-event and bus-event history -----------------------------
-  mountOversightRoutes(app, { store, events });
+  mountOversightRoutes(app, { store, events, config });
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

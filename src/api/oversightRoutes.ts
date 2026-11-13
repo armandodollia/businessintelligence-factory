@@ -1,7 +1,10 @@
 import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { ROLES } from '../core/config/schema.js';
-import { answerEscalation, EscalationError } from '../core/escalation/escalation.js';
+import type { BifConfig } from '../core/config/schema.js';
+import { EscalationError } from '../core/escalation/escalation.js';
+import { answerEscalationAsUser, FeedbackActionError } from '../core/feedback/actions.js';
+import { actorOf } from '../core/feedback/events.js';
 import type { EventBus } from '../core/events.js';
 import { listPolicyEvents, POLICY_EVENT_KINDS, type PolicyEventFilter } from '../core/policy/policyEvents.js';
 import type { Store } from '../core/store/db.js';
@@ -16,8 +19,8 @@ import { listBusEvents, PERSISTED_BUS_EVENT_TYPES, type BusEventQuery } from '..
  * - `GET /api/workspaces/:id/policy-events?scope=tree|workspace&role=&kind=&limit=`
  * - `GET /api/workspaces/:id/bus-events?type=&agentRunId=&taskId=&after=&limit=`
  */
-export function mountOversightRoutes(app: Hono, deps: { store: Store; events: EventBus }): void {
-  const { store, events } = deps;
+export function mountOversightRoutes(app: Hono, deps: { store: Store; events: EventBus; config: BifConfig }): void {
+  const { store, events, config } = deps;
   const err = (c: Context, status: 400 | 404 | 409, error: string) => c.json({ error }, status);
   const workspaceOr404 = (c: Context) => {
     const id = c.req.param('id') ?? '';
@@ -37,8 +40,10 @@ export function mountOversightRoutes(app: Hono, deps: { store: Store; events: Ev
     try {
       const answer: { choice: number; note?: string } = { choice: input.data.choice };
       if (input.data.note !== undefined) answer.note = input.data.note;
-      return c.json(answerEscalation({ store, events }, c.req.param('id'), answer));
+      // Integration with WP-A: answered by the configured actor, with a request_answer feedback event.
+      return c.json(answerEscalationAsUser({ store, events }, c.req.param('id'), answer, { actor: actorOf(config) }));
     } catch (e) {
+      if (e instanceof FeedbackActionError) return err(c, e.status, e.message);
       if (e instanceof EscalationError) return err(c, e.code === 'not_found' ? 404 : e.code === 'conflict' ? 409 : 400, e.message);
       throw e;
     }

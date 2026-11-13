@@ -6,6 +6,7 @@
  */
 import type { BifConfig } from '../config/schema.js';
 import type { EventBus } from '../events.js';
+import { answerEscalation } from '../escalation/escalation.js';
 import { setIncludeInSynthesis } from '../evidence/synthesis.js';
 import { resolveUserRequest } from '../harness/tools/handlers.js';
 import { PROTECTED_PROFILE_KEYS, mergePatch } from '../interview/interview.js';
@@ -231,13 +232,38 @@ export function answerUserRequest(
   response: string | undefined,
   opts: { actor?: string } = {},
 ): UserRequest {
-  const { store } = deps;
+  return answerWithProvenance(deps.store, id, opts, () => {
+    resolveUserRequest(deps, id, status, response);
+    return { status, ...(response !== undefined ? { response } : {}) };
+  });
+}
+
+/**
+ * The user's answer to an escalation question (WP-D `answerEscalation`: option index + optional
+ * note) with the same provenance as any request answer: `resolvedAt`, `actor` and a
+ * `request_answer` feedback event (`afterJson.choice` = the chosen option). `EscalationError`s
+ * propagate (the API maps them).
+ */
+export function answerEscalationAsUser(
+  deps: { store: Store; events: EventBus },
+  id: string,
+  input: { choice: number; note?: string },
+  opts: { actor?: string } = {},
+): UserRequest {
+  return answerWithProvenance(deps.store, id, opts, () => {
+    const answered = answerEscalation(deps, id, input);
+    return { status: 'resolved', ...(answered.response !== undefined ? { response: answered.response } : {}), choice: input.choice };
+  });
+}
+
+/** Runs `answer` on a pending user request and records who answered, when, and the feedback event. */
+function answerWithProvenance(store: Store, id: string, opts: { actor?: string }, answer: () => Record<string, unknown>): UserRequest {
   const who = actor(opts);
   return store.transaction(() => {
     const before = store.userRequests.get(id);
     if (!before) throw new FeedbackActionError(`user request '${id}' not found`, 404);
     if (before.status !== 'pending') throw new FeedbackActionError(`user request '${id}' is already ${before.status}`, 409);
-    resolveUserRequest(deps, id, status, response);
+    const after = answer();
     const resolvedAt = new Date().toISOString();
     const updated = store.userRequests.update(id, { resolvedAt, actor: who });
     recordFeedback(store, {
@@ -248,7 +274,7 @@ export function answerUserRequest(
       targetType: 'user_request',
       targetId: id,
       beforeJson: { status: before.status, kind: before.kind, ...(before.site ? { site: before.site } : {}), details: before.details },
-      afterJson: { status, ...(response !== undefined ? { response } : {}) },
+      afterJson: after,
     });
     return updated;
   });
