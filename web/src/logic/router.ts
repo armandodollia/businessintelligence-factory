@@ -14,6 +14,7 @@ export const WORKSPACE_PAGES = [
   { page: 'schedule', label: 'Schedule' },
   { page: 'usage', label: 'Usage & prompts' }, // learning loop WP-B
   { page: 'knowledge', label: 'Knowledge' }, // knowledge store KS-7
+  { page: 'metrics', label: 'Metrics' }, // learning loop WP-G
 ] as const;
 
 export type WorkspacePage = (typeof WORKSPACE_PAGES)[number]['page'];

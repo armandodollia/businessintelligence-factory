@@ -124,3 +124,54 @@ textarea.code { width: 100%; font-family: ui-monospace, monospace; font-size: 12
 .knowledge .fields dd { margin: 0 0 0.3em 0; white-space: pre-wrap; }
 .card-lines, .item-parts { padding-left: 1.2em; }
 /* --- end KS-7 --- */
+
+/* --- learning loop WP-G: metrics view (chart tokens: light, OS dark, data-theme dark) --- */
+.metrics {
+  --chart-surface: #fcfcfb;
+  --chart-ink: #0b0b0b;
+  --chart-ink-2: #52514e;
+  --chart-muted: #898781;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+  --chart-border: rgba(11, 11, 11, 0.1);
+  --chart-series-1: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .metrics {
+    --chart-surface: #1a1a19;
+    --chart-ink: #f0efec;
+    --chart-ink-2: #c3c2b7;
+    --chart-muted: #898781;
+    --chart-grid: #2c2c2a;
+    --chart-axis: #383835;
+    --chart-border: rgba(255, 255, 255, 0.1);
+    --chart-series-1: #3987e5;
+  }
+}
+:root[data-theme="dark"] .metrics {
+  --chart-surface: #1a1a19;
+  --chart-ink: #f0efec;
+  --chart-ink-2: #c3c2b7;
+  --chart-muted: #898781;
+  --chart-grid: #2c2c2a;
+  --chart-axis: #383835;
+  --chart-border: rgba(255, 255, 255, 0.1);
+  --chart-series-1: #3987e5;
+}
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.6em; margin: 0.6em 0; }
+.kpi { background: var(--chart-surface); color: var(--chart-ink); border: 1px solid var(--chart-border); border-radius: 4px; padding: 0.5em 0.7em; }
+.kpi-label, .kpi-sub { color: var(--chart-ink-2); font-size: 12px; }
+.kpi-value { font-size: 22px; font-weight: 600; }
+.metric-charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.8em; }
+.metric-chart { margin: 0; background: var(--chart-surface); color: var(--chart-ink); border: 1px solid var(--chart-border); border-radius: 4px; padding: 0.5em 0.7em; }
+.metric-chart figcaption { font-size: 13px; margin-bottom: 0.3em; }
+.metric-chart .chart-note { color: var(--chart-ink-2); font-size: 11px; }
+.metric-chart svg { display: block; width: 100%; height: 120px; overflow: visible; }
+.chart-grid { stroke: var(--chart-grid); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-axis { stroke: var(--chart-axis); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-line { fill: none; stroke: var(--chart-series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.chart-dot { fill: var(--chart-series-1); stroke: var(--chart-surface); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.chart-hit { fill: transparent; cursor: default; }
+.chart-hit:hover { fill: var(--chart-grid); fill-opacity: 0.5; }
+.chart-axis-labels { display: flex; justify-content: space-between; color: var(--chart-muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-top: 0.2em; }
+/* --- end WP-G --- */

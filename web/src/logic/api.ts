@@ -270,3 +270,10 @@ export const knowledgeApi = {
     post<{ pruned: string[]; bytes: number; decisionId: string }>(kn(wsId, '/gc/prune'), { artifactIds }),
 };
 // --- end knowledge store KS-7 --------------------------------------------------------------------
+
+// --- learning loop WP-G: metrics view ------------------------------------------------------------
+export const metricsApi = {
+  /** `query`: from `metricsQuery` (scope, groupBy, bucket, since, until, includeExperiments). */
+  getMetrics: (wsId: string, query: string) => get<import('./metrics.js').MetricsReport>(`${ws(wsId)}/metrics${query ? `?${query}` : ''}`),
+};
+// --- end WP-G ------------------------------------------------------------------------------------
