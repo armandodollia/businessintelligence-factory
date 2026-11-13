@@ -65,5 +65,6 @@
   },
   "scoring": { "personaWeight": 0, "weights": {} },
   "server": { "port": 4317 },
-  "dataDir": "data"
+  "dataDir": "data",
+  "user": { "id": "local-user" }
 }
