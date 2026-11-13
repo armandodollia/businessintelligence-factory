@@ -9,7 +9,7 @@ import { loadPrompt } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Criteria, Decision, InterviewTurn, Symptom, Workspace } from '../types.js';
-import { scopeOf } from './scope.js';
+import { audiencesOf, scopeOf } from '../workspace/tree.js';
 
 export const INTERVIEW_TOPICS = ['basics', 'revenue_model', 'customers', 'going_well', 'going_badly'] as const;
 export type InterviewTopic = (typeof INTERVIEW_TOPICS)[number];
@@ -80,7 +80,7 @@ export function buildInterviewPrompt(ws: Workspace, store: Store): string {
     `- level: ${scope.level}`,
     `- name: ${scope.name}`,
     `- description: ${scope.description || '(none)'}`,
-    `- audiences: ${scope.audiences.join(', ')}`,
+    `- audiences: ${audiencesOf(ws).join(', ')}`,
     '',
     '## Coverage checklist',
     ...INTERVIEW_TOPICS.map((t) => `- [${coverage[t] ? 'x' : ' '}] ${t}`),

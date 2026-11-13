@@ -13,7 +13,7 @@ import { loadPrompt } from '../../src/core/prompts/index.js';
 import { applyPromptPatch, calibrationReport, proposePromptPatch, proposeWeights } from '../../src/core/scoring/calibration.js';
 import { CRITERIA, PERSONA_FIELDS, RECOMMENDATION_KEYS } from '../../src/core/scoring/criteria.js';
 import { exportTrainingData } from '../../src/core/scoring/export.js';
-import { computePriority, scoreRecommendations, scoringToolHandlers } from '../../src/core/scoring/priority.js';
+import { checkRecommendationCriteria, computePriority, costScore, scoreRecommendations, scoringToolHandlers } from '../../src/core/scoring/priority.js';
 import { rateCriterion } from '../../src/core/scoring/ratings.js';
 import { openStore, type Store } from '../../src/core/store/db.js';
 import type { Decision, Finding, PersonaFeedback, Recommendation } from '../../src/core/types.js';
@@ -91,12 +91,42 @@ describe('priority', () => {
   });
 
   it('weights, pct confidence, range in 0–5 with 2 decimals', () => {
-    const p = computePriority(rec({ criteria: { upside: 5, confidence: 0.2 } }), { personaWeight: 0, weights: { upside: 3 } });
+    // confidence is a percent 0–100 for recommendations: 20 → 1 on the 0–5 scale.
+    const p = computePriority(rec({ criteria: { upside: 5, confidence: 20 } }), { personaWeight: 0, weights: { upside: 3 } });
     expect(p).toBe(Math.round(((3 * 5 + 1 * 1) / 4) * 100) / 100);
     expect(computePriority(rec({ criteria: {} }), { personaWeight: 0, weights: {} })).toBe(0);
     const any = computePriority(rec({ criteria: { ...crit, cost: '$10k-$50k' } }), { personaWeight: 0, weights: {} });
     expect(any).toBeGreaterThanOrEqual(0);
     expect(any).toBeLessThanOrEqual(5);
+  });
+
+  it('cost ranges parse to a midpoint on a log scale; higher cost → lower priority', () => {
+    expect(costScore('$1k')).toBe(1);
+    expect(costScore('$500')).toBe(1);
+    expect(costScore('10k-50k')).toBeCloseTo(Math.log10(30_000) - 2, 6);
+    expect(costScore('$10–$50')).toBe(1);
+    expect(costScore('$1M–$5M')).toBeCloseTo(Math.log10(3_000_000) - 2, 6);
+    expect(costScore('$1-5M')).toBeCloseTo(Math.log10(3_000_000) - 2, 6);
+    expect(costScore('$20M+')).toBe(5);
+    expect(costScore(250_000)).toBeCloseTo(Math.log10(250_000) - 2, 6);
+    expect(costScore(3)).toBe(3);
+    expect(costScore('2-3')).toBe(2.5);
+    expect(costScore('high')).toBe(4);
+    expect(costScore('a lot')).toBeUndefined();
+
+    const cfg = { personaWeight: 0, weights: {} };
+    const at = (cost: string | number) => computePriority(rec({ criteria: { upside: 4, cost } }), cfg);
+    const ladder = ['$5k', '10k-50k', '$200k', '$1M–$5M', '$50M'].map(at);
+    for (let i = 1; i < ladder.length; i++) expect(ladder[i]!).toBeLessThan(ladder[i - 1]!);
+    expect(at('$1M–$5M')).toBeLessThan(at('$10k–$50k'));
+  });
+
+  it('save_recommendation validates criteria scales (pct 0–100, 1–5, parseable cost)', () => {
+    expect(checkRecommendationCriteria(crit)).toBeUndefined();
+    expect(checkRecommendationCriteria({ ...crit, cost: '$10k–$50k' })).toBeUndefined();
+    expect(checkRecommendationCriteria({ confidence: 140 })).toMatch(/0–100/);
+    expect(checkRecommendationCriteria({ upside: 7 })).toMatch(/1–5/);
+    expect(checkRecommendationCriteria({ cost: 'pricey' })).toMatch(/cost/);
   });
 
   it('scoreRecommendations stores priority', () => {
@@ -175,7 +205,8 @@ describe('calibration', () => {
     rateCriterion({ ...base, verdict: 'agree' }, t);
     rateCriterion({ ...base, verdict: 'disagree', userValue: 2 }, t);
     const rep = calibrationReport('ws_a', t);
-    expect(rep.byCriterion).toEqual([{ targetType: 'recommendation', criterion: 'upside', n: 2, agreeRate: 0.5, meanDelta: -1 }]);
+    // meanDelta is normalized per scale: (2 − 4)/4 = −0.5 and an agree counts 0 → −0.25.
+    expect(rep.byCriterion).toEqual([{ targetType: 'recommendation', criterion: 'upside', n: 2, agreeRate: 0.5, meanDelta: -0.25 }]);
   });
 
   it('proposeWeights returns current when n<5', () => {
@@ -244,15 +275,43 @@ describe('export', () => {
     expect(all.map((r) => r.decision.id)).toEqual(['dec_pub', 'dec_up']);
   });
 
-  it('export joins ratings on payload ids and persona feedback', () => {
+  it('export joins ratings on payload ids; persona feedback ratings join only their persona', () => {
     const t = setup();
-    t.store.recommendations.insert(rec({ personaFeedback: [fb('per_1', 3)] }));
+    t.store.recommendations.insert(rec({ personaFeedback: [fb('per_1', 3), fb('per_2', 4)] }));
     t.store.decisions.insert(decision({ id: 'dec_rec', kind: 'score', payload: { tool: 'save_recommendation', recommendationId: 'rec_1' }, refs: ['rec_1'] }));
-    t.store.decisions.insert(decision({ id: 'dec_pf', kind: 'persona_feedback', role: 'persona', payload: { tool: 'submit_persona_feedback', input: { recommendation_id: 'rec_1' } }, refs: [] }));
+    const pf = (id: string, personaId: string) =>
+      decision({
+        id, kind: 'persona_feedback', role: 'persona',
+        payload: { tool: 'submit_persona_feedback', input: { recommendation_id: 'rec_1' }, personaId, targetId: `rec_1:${personaId}` },
+        refs: ['rec_1', personaId],
+      });
+    t.store.decisions.insert(pf('dec_pf1', 'per_1'));
+    t.store.decisions.insert(pf('dec_pf2', 'per_2'));
     rateCriterion({ workspaceId: 'ws_a', targetType: 'recommendation', targetId: 'rec_1', criterion: 'risk', verdict: 'agree' }, t);
     rateCriterion({ workspaceId: 'ws_a', targetType: 'persona_feedback', targetId: 'rec_1:per_1', criterion: 'appeal', verdict: 'agree' }, t);
+    rateCriterion({ workspaceId: 'ws_a', targetType: 'persona_feedback', targetId: 'rec_1:per_2', criterion: 'friction', verdict: 'disagree', userValue: 5 }, t);
     const rows = exportTrainingData('ws_a', t).trim().split('\n').map((l) => JSON.parse(l));
-    expect(rows.find((r) => r.decision.id === 'dec_rec').ratings.map((x: { criterion: string }) => x.criterion)).toEqual(['risk']);
-    expect(rows.find((r) => r.decision.id === 'dec_pf').ratings.map((x: { criterion: string }) => x.criterion)).toEqual(['appeal']);
+    const crits = (id: string) => rows.find((r) => r.decision.id === id).ratings.map((x: { criterion: string }) => x.criterion);
+    expect(crits('dec_rec')).toEqual(['risk']);
+    expect(crits('dec_pf1')).toEqual(['appeal']);
+    expect(crits('dec_pf2')).toEqual(['friction']);
+  });
+
+  it('export excludes decisions citing an ancestor workspace upload, or an artifact listed in profile.uploads', () => {
+    const t = setup();
+    t.store.workspaces.insert({ id: 'ws_child', name: 'Child', sector: 'saas', createdAt: 'now', parentWorkspaceId: 'ws_a' });
+    const parentUpload = uploadInternal('ws_a', { name: 'financials.xlsx', bytes: new TextEncoder().encode('secret'), mime: 'text/csv' }, t);
+    // Same bytes saved first as a 'document' → upload sha-dedupes onto it (kind stays document).
+    const doc = t.artifacts.save({ workspaceId: 'ws_child', kind: 'document', mime: 'text/plain', bytes: 'board deck' });
+    const deduped = uploadInternal('ws_child', { name: 'deck.txt', bytes: new TextEncoder().encode('board deck'), mime: 'text/plain' }, t);
+    expect(deduped.id).toBe(doc.id);
+    expect(deduped.kind).toBe('document');
+    const pub = t.artifacts.save({ workspaceId: 'ws_child', kind: 'text', mime: 'text/plain', bytes: 'public' });
+    t.store.decisions.insert(decision({ id: 'dec_parent_up', workspaceId: 'ws_child', refs: [parentUpload.id] }));
+    t.store.decisions.insert(decision({ id: 'dec_dedup_up', workspaceId: 'ws_child', refs: [doc.id] }));
+    t.store.decisions.insert(decision({ id: 'dec_pub', workspaceId: 'ws_child', refs: [pub.id] }));
+    const ids = (s: string) => s.trim().split('\n').map((l) => JSON.parse(l).decision.id);
+    expect(ids(exportTrainingData('ws_child', t))).toEqual(['dec_pub']);
+    expect(ids(exportTrainingData('ws_child', t, true))).toEqual(['dec_parent_up', 'dec_dedup_up', 'dec_pub']);
   });
 });

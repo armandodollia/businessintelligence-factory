@@ -16,7 +16,6 @@ import {
   sendInterviewMessage,
   type InterviewerFake,
 } from '../../src/core/interview/interview.js';
-import { scopeOf } from '../../src/core/interview/scope.js';
 import { listUploads, uploadInternal } from '../../src/core/internal/uploads.js';
 import { loadPrompt } from '../../src/core/prompts/index.js';
 import { openStore, type Store } from '../../src/core/store/db.js';
@@ -166,9 +165,12 @@ describe('interview', () => {
     expect(p).not.toContain('a,b');
   });
 
-  it('scopeOf defaults when workspace has no scope fields', () => {
+  it('prompt uses default scope (company, workspace name) and audiences (external) when unset', () => {
     const t = setup();
-    expect(scopeOf(t.ws)).toEqual({ level: 'company', name: 'Acme', description: '', audiences: ['external'] });
+    const p = buildInterviewPrompt(t.ws, t.store);
+    expect(p).toContain('- level: company');
+    expect(p).toContain('- name: Acme');
+    expect(p).toContain('- audiences: external\n');
   });
 });
 

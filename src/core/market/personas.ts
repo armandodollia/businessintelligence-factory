@@ -8,7 +8,7 @@ import { PERSONA_FIELDS } from '../scoring/criteria.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, Persona, PersonaProfileField } from '../types.js';
-import { scopeOf } from '../workspace/tree.js';
+import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { compileAgentMd } from './agentMd.js';
 
 export type MarketToolOptions = {
@@ -66,6 +66,11 @@ export function savePersonaHandler(opts: MarketToolOptions): ExtraToolHandler {
     const { store, artifacts, events } = deps;
     const slug = slugify(input.slug ?? input.segment);
     if (!slug) return fail('slug: cannot derive a slug (use letters or digits)');
+    const ws = store.workspaces.get(ctx.workspaceId);
+    const audiences = ws ? audiencesOf(ws) : [];
+    if (!audiences.includes(input.audience)) {
+      return fail(`audience '${input.audience}' is not an audience of this workspace (audiences: ${audiences.join(', ') || 'none'})`);
+    }
 
     const profile: Record<string, PersonaProfileField> = {};
     for (const f of PERSONA_FIELDS) {

@@ -19,15 +19,35 @@ export function calibrationDir(): string {
  * approved calibration patch changes the prompt version recorded on each run.
  */
 export function loadPrompt(name: string): { text: string; version: string } {
+  const text = withCalibration(promptTemplate(name), name);
+  return { text, version: promptVersion(text) };
+}
+
+/** Raw `<name>.md` template, without any calibration appendix. */
+export function promptTemplate(name: string): string {
   if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error(`invalid prompt name '${name}'`);
-  let text = readFileSync(join(PROMPTS_DIR, `${name}.md`), 'utf8');
-  const appendix = join(calibrationDir(), `${name}.md`);
-  if (existsSync(appendix)) {
-    const extra = readFileSync(appendix, 'utf8').trim();
-    if (extra) text = `${text.trimEnd()}\n\n${extra}\n`;
-  }
-  const version = createHash('sha256').update(text).digest('hex').slice(0, 8);
-  return { text, version };
+  return readFileSync(join(PROMPTS_DIR, `${name}.md`), 'utf8');
+}
+
+/**
+ * The approved calibration appendix for `name` (`calibration/<name>.md`, usually a role name),
+ * trimmed; `''` when there is none.
+ */
+export function calibrationAppendix(name: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error(`invalid calibration name '${name}'`);
+  const file = join(calibrationDir(), `${name}.md`);
+  return existsSync(file) ? readFileSync(file, 'utf8').trim() : '';
+}
+
+/**
+ * Appends `calibrationAppendix(name)` to an assembled system prompt (unchanged when there is no
+ * appendix). Use for prompts not loaded via `loadPrompt(name)` — e.g. persona agent.md (`persona`),
+ * synthesizer runs that share `worker.md` (`synthesizer`) — so the recorded prompt version changes
+ * when a calibration patch is applied.
+ */
+export function withCalibration(text: string, name: string): string {
+  const extra = calibrationAppendix(name);
+  return extra ? `${text.trimEnd()}\n\n${extra}\n` : text;
 }
 
 /** First 8 hex chars of the sha256 of `text` (same scheme as `loadPrompt().version`). */

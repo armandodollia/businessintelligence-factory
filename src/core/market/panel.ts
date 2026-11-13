@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import type { ToolInput } from '../harness/tools/registry.js';
-import { loadPrompt, promptVersion, renderTemplate } from '../prompts/index.js';
+import { loadPrompt, promptVersion, renderTemplate, withCalibration } from '../prompts/index.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type ResearchDeps } from '../research/deps.js';
 import { PERSONA_FEEDBACK_KEYS } from '../scoring/criteria.js';
-import type { Persona, PersonaFeedback, Recommendation } from '../types.js';
+import type { Decision, Persona, PersonaFeedback, Recommendation } from '../types.js';
 import { scopeOf } from '../workspace/tree.js';
 import { writeAgentMd } from './personas.js';
 
@@ -77,14 +77,28 @@ function panelPrompt(template: string, rec: Recommendation, scope: string): stri
   });
 }
 
-/** Last valid `submit_persona_feedback` of a run for `recId` (from the dispatcher's Decision). */
-function feedbackOfRun(deps: ResearchDeps, agentRunId: string, recId: string): ToolInput<'submit_persona_feedback'> | undefined {
+/** Last valid `submit_persona_feedback` decision of a run for `recId` (written by the dispatcher). */
+function feedbackOfRun(
+  deps: ResearchDeps,
+  agentRunId: string,
+  recId: string,
+): { decision: Decision; input: ToolInput<'submit_persona_feedback'> } | undefined {
   const ds = deps.store.decisions.list({ agentRunId, kind: 'persona_feedback' });
   for (let i = ds.length - 1; i >= 0; i--) {
     const p = ds[i]!.payload as { tool?: string; input?: ToolInput<'submit_persona_feedback'> } | null;
-    if (p?.tool === 'submit_persona_feedback' && p.input?.recommendation_id === recId) return p.input;
+    if (p?.tool === 'submit_persona_feedback' && p.input?.recommendation_id === recId) return { decision: ds[i]!, input: p.input };
   }
   return undefined;
+}
+
+/**
+ * Stamps the originating persona on the dispatcher's persona_feedback Decision (`payload.personaId`,
+ * `payload.targetId = <recId>:<personaId>`, refs += rec + persona) so ratings of that feedback join
+ * exactly this decision in the training export.
+ */
+function stampPersona(deps: ResearchDeps, decision: Decision, recId: string, personaId: string): void {
+  const payload = { ...((decision.payload ?? {}) as Record<string, unknown>), personaId, targetId: `${recId}:${personaId}` };
+  deps.store.decisions.update(decision.id, { payload, refs: [...new Set([...decision.refs, recId, personaId])] });
 }
 
 function toFeedback(personaId: string, input: ToolInput<'submit_persona_feedback'>): PersonaFeedback {
@@ -144,9 +158,10 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
         model, needsBrowser: false, promptVersion: version,
       });
       throwIfAborted(deps.signal);
-      const input = feedbackOfRun(deps, outcome.agentRunId, rec.id);
-      if (input) {
-        attach(deps, rec.id, toFeedback(persona.id, input));
+      const found = feedbackOfRun(deps, outcome.agentRunId, rec.id);
+      if (found) {
+        stampPersona(deps, found.decision, rec.id, persona.id);
+        attach(deps, rec.id, toFeedback(persona.id, found.input));
         report.feedback++;
         return;
       }
@@ -164,7 +179,8 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
 
   const jobs: Array<Promise<void>> = [];
   for (const persona of personas) {
-    const systemPrompt = agentMdOf(deps, persona);
+    // Approved persona calibration (calibration/persona.md) goes after every persona's agent.md.
+    const systemPrompt = withCalibration(agentMdOf(deps, persona), 'persona');
     for (const rec of recs) jobs.push(one(rec, persona, systemPrompt));
   }
   const results = await Promise.allSettled(jobs);

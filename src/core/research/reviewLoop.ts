@@ -137,7 +137,7 @@ async function workerStep(
   const { store, config } = deps;
   const initial = store.tasks.get(taskId)!;
   const role = roleForTask(initial);
-  const system = workerSystemPrompt(config, role, initial.needsBrowser);
+  const system = workerSystemPrompt(config, role, initial.needsBrowser, initial.type);
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
