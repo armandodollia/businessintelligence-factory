@@ -1,7 +1,6 @@
 import type { Store } from '../store/db.js';
 import type { Finding } from '../types.js';
 import { descendants, rootOf, sameTree } from '../workspace/tree.js';
-import { recordOverrideOutcome } from '../learning/outcomes.js';
 
 /**
  * Whether a finding may feed recommendation synthesis (spec §7.2): verified findings only, unless
@@ -40,7 +39,6 @@ export function ineligibleFindingIds(store: Store, workspaceId: string, ids: str
 /** User override (API): include or exclude a finding from synthesis. Throws if unknown. */
 export function setIncludeInSynthesis(store: Store, findingId: string, include: boolean | null): Finding {
   if (!store.findings.get(findingId)) throw new Error(`finding '${findingId}' not found`);
-  recordOverrideOutcome(store, { targetType: 'finding', targetId: findingId, include }); // learning loop WP-C
   // null resets to the default (verified findings only); `undefined` clears the column.
   return store.findings.update(findingId, { includeInSynthesis: include ?? undefined });
 }

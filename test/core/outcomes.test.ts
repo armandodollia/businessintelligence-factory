@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { learningRepos } from '../../src/core/learning/store.js';
 import {
   listOutcomes,
@@ -8,6 +8,8 @@ import {
   recordOverrideOutcome,
 } from '../../src/core/learning/outcomes.js';
 import { setIncludeInSynthesis } from '../../src/core/evidence/synthesis.js';
+import { decideUnitProposal, setIncludeOverride } from '../../src/core/feedback/actions.js';
+import { feedbackOutcomesRegistered, registerFeedbackOutcomes } from '../../src/core/learning/feedbackOutcomes.js';
 import { resumeInterrupted } from '../../src/core/research/orchestrator.js';
 import { setOutputInclude } from '../../src/core/research/outputs.js';
 import { runTaskWithReview } from '../../src/core/research/reviewLoop.js';
@@ -164,7 +166,13 @@ describe('task end outcomes (review loop)', () => {
   });
 });
 
-describe('user override / reject outcomes', () => {
+describe('user override / reject outcomes (one path: feedback events → onFeedback listener → recordOutcome)', () => {
+  let unregister: () => void = () => {};
+  beforeAll(() => {
+    unregister = registerFeedbackOutcomes();
+  });
+  afterAll(() => unregister());
+
   async function verifiedTask() {
     const s = researchSetup(opened, { pick: (r) => (r.kind === 'work' ? submitWork() : review(9)) });
     const task = addTask(s.store);
@@ -172,20 +180,40 @@ describe('user override / reject outcomes', () => {
     learningRepos(s.store).decisionOutcomes.list(); // task-end outcome exists
     return { s, task, finding: s.store.findings.list({ taskId: task.id })[0]! };
   }
+  const userOutcomes = (store: Store) => outcomesOf(store).filter((o) => o.source === 'user_override' || o.source === 'user_reject');
 
-  it('excluding a verified finding → user-rejected on its save decision + weak-review on the passing review', async () => {
+  it('registration is idempotent', () => {
+    expect(feedbackOutcomesRegistered()).toBe(true);
+    const again = registerFeedbackOutcomes();
+    again();
+    expect(feedbackOutcomesRegistered()).toBe(true);
+  });
+
+  it('excluding a verified finding → user-rejected on its save decision + weak-review on the passing review, by the actor', async () => {
     const { s, finding, task } = await verifiedTask();
-    setIncludeInSynthesis(s.store, finding.id, false);
-    const user = outcomesOf(s.store).filter((o) => o.source === 'user_override');
+    setIncludeOverride(s.store, 'finding', finding.id, false, { actor: 'ana', reason: 'wrong company' });
+    const user = userOutcomes(s.store);
     expect(user.map((o) => [o.outcome, o.label, o.targetId])).toEqual([
       ['excluded', 'user-rejected', finding.id],
       ['excluded_after_pass', 'weak-review', finding.id],
     ]);
     expect(user[0]!.decisionId).toBe(outputSaveDecision(s.store, 'finding', finding.id)?.id);
-    const reviewDecision = s.store.decisions.get(user[1]!.decisionId)!;
+    const reviewDecision = s.store.decisions.get(user[1]!.decisionId!)!;
     expect(reviewDecision).toMatchObject({ kind: 'review', role: 'reviewer' });
     expect(user[1]!.taskId).toBe(task.id);
-    expect(user.every((o) => o.actor === 'local-user')).toBe(true);
+    expect(user.every((o) => o.actor === 'ana')).toBe(true);
+    expect(user[0]!.evidenceJson).toMatchObject({ reason: 'wrong company', feedbackEventId: expect.any(String) });
+  });
+
+  it('one outcome per action: the same override again, the core primitive alone and a reset write nothing more', async () => {
+    const { s, finding } = await verifiedTask();
+    setIncludeOverride(s.store, 'finding', finding.id, false);
+    const n = userOutcomes(s.store).length;
+    expect(n).toBe(2); // excluded + excluded_after_pass, once
+    setIncludeOverride(s.store, 'finding', finding.id, false); // unchanged: no feedback event, no outcome
+    setIncludeInSynthesis(s.store, finding.id, true); // primitive, not a human action: no outcome
+    setIncludeOverride(s.store, 'finding', finding.id, null); // reset: records nothing
+    expect(userOutcomes(s.store)).toHaveLength(n);
   });
 
   it('including an unverified output → confirmed; null resets record nothing', async () => {
@@ -196,23 +224,38 @@ describe('user override / reject outcomes', () => {
     const task = addTask(s.store);
     await runTaskWithReview(task, s.deps);
     const finding = s.store.findings.list({ taskId: task.id })[0]!;
-    setIncludeInSynthesis(s.store, finding.id, true);
-    setIncludeInSynthesis(s.store, finding.id, null);
-    expect(outcomesOf(s.store).filter((o) => o.source === 'user_override').map((o) => [o.outcome, o.label])).toEqual([
-      ['included', 'confirmed'],
-    ]);
+    setIncludeOverride(s.store, 'finding', finding.id, true);
+    setIncludeOverride(s.store, 'finding', finding.id, null);
+    expect(userOutcomes(s.store).map((o) => [o.outcome, o.label])).toEqual([['included', 'confirmed']]);
   });
 
-  it('recommendation / persona / competitor include overrides record outcomes via setOutputInclude', () => {
+  it('recommendation include overrides record exactly one outcome', () => {
     const s = researchSetup(opened);
     s.store.recommendations.insert({
       id: 'rec_1', workspaceId: 'ws_a', title: 'Cut price', summary: 's', criteria: {}, findingIds: [], personaFeedback: [],
       priority: 1, createdAt: new Date().toISOString(), status: 'verified',
     });
     const save = agentDecision(s.store, { role: 'synthesizer', kind: 'decision', payload: { tool: 'save_recommendation', recommendationId: 'rec_1' }, refs: ['rec_1'] });
-    setOutputInclude(s.store, 'recommendation', 'rec_1', false);
+    setIncludeOverride(s.store, 'recommendation', 'rec_1', false);
+    setOutputInclude(s.store, 'recommendation', 'rec_1', true); // primitive: no outcome
     expect(outcomesOf(s.store).map((o) => [o.decisionId, o.outcome, o.label, o.targetType])).toEqual([
       [save.id, 'excluded', 'user-rejected', 'recommendation'],
+    ]);
+  });
+
+  it('hypothesis include overrides → outcome on its save_hypothesis decision (targetType hypothesis)', () => {
+    const s = researchSetup(opened);
+    s.store.symptoms.insert({ id: 'sym_1', workspaceId: 'ws_a', kind: 'symptom', title: 'Churn up', detail: 'd', criteria: { severity: 4 }, evidence: [] });
+    s.store.symptomHypotheses.insert({
+      id: 'hyp_1', workspaceId: 'ws_a', symptomId: 'sym_1', hypothesis: 'Price rise drives churn', confidence: 60, evidence: [],
+      createdAt: new Date().toISOString(), status: 'unverified',
+    });
+    const save = agentDecision(s.store, { kind: 'score', payload: { tool: 'save_hypothesis', hypothesisId: 'hyp_1', symptomId: 'sym_1' }, refs: ['hyp_1'] });
+    setIncludeOverride(s.store, 'hypothesis', 'hyp_1', true, { actor: 'ana' });
+    setIncludeOverride(s.store, 'hypothesis', 'hyp_1', false, { actor: 'ana' });
+    expect(outcomesOf(s.store).map((o) => [o.decisionId, o.outcome, o.label, o.targetType, o.actor])).toEqual([
+      [save.id, 'included', 'confirmed', 'hypothesis', 'ana'],
+      [save.id, 'excluded', 'user-rejected', 'hypothesis', 'ana'],
     ]);
   });
 
@@ -221,19 +264,23 @@ describe('user override / reject outcomes', () => {
     expect(recordOverrideOutcome(s.store, { targetType: 'finding', targetId: 'fnd_none', include: false })).toEqual([]);
   });
 
-  it('rejecting a unit proposal → user-rejected on its proposal decision', () => {
+  it('rejecting a unit proposal → exactly one user-rejected outcome on its proposal decision', () => {
     const s = researchSetup(opened);
     const ws = createWorkspace(s.store, { name: 'Acme', sector: 'saas' });
     const d = agentDecision(s.store, { workspaceId: ws.id, payload: { tool: 'propose_business_unit', name: 'Payments' } });
-    s.store.unitProposals.insert({
-      id: 'up_1', workspaceId: ws.id, name: 'Payments', description: 'd', level: 'division', audiences: ['external'],
+    const proposal = (id: string) => s.store.unitProposals.insert({
+      id, workspaceId: ws.id, name: 'Payments', description: 'd', level: 'division', audiences: ['external'],
       evidence: [], reasoning: 'r', status: 'proposed', decisionId: d.id, createdAt: new Date().toISOString(),
     });
-    rejectUnitProposal(s.store, 'up_1', 'not a real unit');
-    expect(outcomesOf(s.store).map((o) => [o.decisionId, o.outcome, o.label, o.source, o.targetType])).toEqual([
-      [d.id, 'rejected', 'user-rejected', 'user_reject', 'unit_proposal'],
+    proposal('up_1');
+    decideUnitProposal(s.store, 'up_1', { action: 'reject', reason: 'not a real unit' }, { actor: 'ana' });
+    expect(outcomesOf(s.store).map((o) => [o.decisionId, o.outcome, o.label, o.source, o.targetType, o.actor])).toEqual([
+      [d.id, 'rejected', 'user-rejected', 'user_reject', 'unit_proposal', 'ana'],
     ]);
     expect(outcomesOf(s.store)[0]!.evidenceJson).toMatchObject({ reason: 'not a real unit' });
+    proposal('up_2');
+    rejectUnitProposal(s.store, 'up_2', 'primitive'); // not a human action path: no outcome
+    expect(outcomesOf(s.store)).toHaveLength(1);
   });
 });
 

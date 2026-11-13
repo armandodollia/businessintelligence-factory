@@ -234,7 +234,8 @@ function ownedOutputs(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): Arr
 // user include overrides and rejects
 
 /**
- * Outcomes of a user include override on an output. `false` (exclude) → `excluded` /
+ * Outcomes of a user include override on an output. Called only by the feedback listener
+ * (`feedbackOutcomes.ts`) for `include_override` events, never by the core setters. `false` (exclude) → `excluded` /
  * `user-rejected` on the output's save decision, plus `excluded_after_pass` / `weak-review` on the
  * passing review when the output was `verified`. `true` on an output that is not verified →
  * `included` / `confirmed`. `null` (reset) and `true` on a verified output record nothing; outputs
@@ -242,7 +243,7 @@ function ownedOutputs(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): Arr
  */
 export function recordOverrideOutcome(
   store: Store,
-  input: { targetType: OutputKind; targetId: string; include: boolean | null; actor?: string; reason?: string },
+  input: { targetType: OutputKind; targetId: string; include: boolean | null; actor?: string; reason?: string; feedbackEventId?: string },
 ): DecisionOutcome[] {
   const { targetType, targetId, include } = input;
   if (include === null) return [];
@@ -254,6 +255,7 @@ export function recordOverrideOutcome(
   if (!save) return [];
   const evidence: Record<string, unknown> = { include, status };
   if (input.reason) evidence.reason = input.reason;
+  if (input.feedbackEventId) evidence.feedbackEventId = input.feedbackEventId;
   const common = { source: 'user_override' as const, targetType, targetId, ...(input.actor ? { actor: input.actor } : {}) };
   const taskId = output.taskId;
   const out: DecisionOutcome[] = [];
@@ -282,11 +284,12 @@ export function recordUnitProposalRejected(
   proposal: { id: string; decisionId?: string | undefined },
   reason: string,
   actor?: string,
+  feedbackEventId?: string,
 ): DecisionOutcome | undefined {
   if (!proposal.decisionId) return undefined;
   return recordOutcome(store, {
     decisionId: proposal.decisionId, outcome: 'rejected', label: 'user-rejected', source: 'user_reject',
-    evidence: reason ? { reason } : {}, targetType: 'unit_proposal', targetId: proposal.id, ...(actor ? { actor } : {}),
+    evidence: { ...(reason ? { reason } : {}), ...(feedbackEventId ? { feedbackEventId } : {}) }, targetType: 'unit_proposal', targetId: proposal.id, ...(actor ? { actor } : {}),
   });
 }
 

@@ -24,6 +24,7 @@ import { createApp } from './routes.js';
 // WP-D
 import { escalationToolHandlers, startEscalations, type EscalationService } from '../core/escalation/escalation.js';
 import { attachEventRecorders, type EventRecorders } from '../core/telemetry/recorders.js';
+import { registerFeedbackOutcomes } from '../core/learning/feedbackOutcomes.js';
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -72,6 +73,8 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
   const port = config.server.port;
 
   const store = openStore(join(dataDir, 'bif.db'));
+  // Learning loop: human actions (feedback events) become decision outcomes through one listener.
+  registerFeedbackOutcomes();
   const artifacts = new ArtifactStore(store, dataDir);
   const events = new EventBus();
   const tokens = new TokenRegistry(store);

@@ -1,5 +1,4 @@
 import type { Store } from '../store/db.js';
-import { recordOverrideOutcome } from '../learning/outcomes.js';
 import type { Competitor, Finding, OutputStatus, Persona, Recommendation, SymptomHypothesis, Task } from '../types.js';
 
 /**
@@ -167,7 +166,6 @@ export function setOutputInclude(
   include: boolean | null,
 ): Recommendation | Persona | Competitor {
   const includeOverride = include ?? undefined;
-  recordOverrideOutcome(store, { targetType: kind, targetId: id, include }); // learning loop WP-C (no-op for unknown ids)
   if (kind === 'recommendation') {
     if (!store.recommendations.get(id)) throw new Error(`recommendation '${id}' not found`);
     return store.recommendations.update(id, { includeOverride });

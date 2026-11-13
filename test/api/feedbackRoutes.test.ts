@@ -1,7 +1,9 @@
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/api/routes.js';
 import { listFeedback } from '../../src/core/feedback/events.js';
+import { registerFeedbackOutcomes } from '../../src/core/learning/feedbackOutcomes.js';
+import { listOutcomes } from '../../src/core/learning/outcomes.js';
 import type { Store } from '../../src/core/store/db.js';
 import { newId } from '../../src/core/store/repos.js';
 import { createWorkspace } from '../../src/core/workspace/tree.js';
@@ -177,5 +179,45 @@ describe('WP-A routes: actor and feedback events', () => {
       }),
     ]);
     expect(t.store.decisions.list().filter((d) => d.agentRunId === 'user')).toEqual([]);
+  });
+});
+
+describe('integration: one outcome per human action through the API (feedback → onFeedback → recordOutcome)', () => {
+  let release: () => void = () => {};
+  beforeAll(() => {
+    release = registerFeedbackOutcomes(); // what boot (createRuntime) does
+  });
+  afterAll(() => release());
+
+  it('finding exclude, hypothesis include and unit-proposal reject each write their outcomes once, by the configured actor', async () => {
+    const t = setup();
+    const fid = addFinding(t);
+    addHypothesis(t);
+    t.store.decisions.insert({
+      id: 'dec_hyp', workspaceId: t.ws.id, agentRunId: 'arun_w', role: 'worker', model: { provider: 'claude', model: 'sonnet' },
+      kind: 'score', payload: { tool: 'save_hypothesis', hypothesisId: 'hyp_1', symptomId: 'sym_1' }, refs: ['hyp_1'], promptVersion: 'pv_w1', createdAt: NOW,
+    });
+    t.store.decisions.insert({
+      id: 'dec_unit', workspaceId: t.ws.id, agentRunId: 'arun_w', role: 'orchestrator', model: { provider: 'claude', model: 'sonnet' },
+      kind: 'decision', payload: { tool: 'propose_business_unit', name: 'Platform' }, refs: [], promptVersion: 'pv_o', createdAt: NOW,
+    });
+    t.store.unitProposals.insert({
+      id: 'unit_1', workspaceId: t.ws.id, name: 'Platform', description: 'd', level: 'slice', audiences: ['internal'], evidence: [],
+      reasoning: 'r', status: 'proposed', decisionId: 'dec_unit', createdAt: NOW,
+    });
+
+    expect((await t.json('POST', `/api/findings/${fid}/include`, { include: false })).status).toBe(200);
+    expect((await t.json('POST', `/api/findings/${fid}/include`, { include: false })).status).toBe(200); // unchanged: no action
+    expect((await t.json('POST', '/api/hypotheses/hyp_1/include', { include: true })).status).toBe(200);
+    expect((await t.json('POST', '/api/unit-proposals/unit_1', { action: 'reject', reason: 'no' })).status).toBe(200);
+
+    const user = listOutcomes(t.store, { workspaceIds: [t.ws.id] }).filter((o) => o.source.startsWith('user_'));
+    expect(user.map((o) => [o.targetType, o.targetId, o.outcome, o.label, o.actor])).toEqual([
+      ['finding', fid, 'excluded', 'user-rejected', 'ana@acme'],
+      ['hypothesis', 'hyp_1', 'included', 'confirmed', 'ana@acme'],
+      ['unit_proposal', 'unit_1', 'rejected', 'user-rejected', 'ana@acme'],
+    ]);
+    const events = listFeedback(t.store, { workspaceId: t.ws.id });
+    expect(user.map((o) => o.evidenceJson.feedbackEventId)).toEqual(events.map((e) => e.id));
   });
 });

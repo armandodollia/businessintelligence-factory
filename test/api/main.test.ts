@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { boot } from '../../src/api/main.js';
+import { feedbackOutcomesRegistered } from '../../src/core/learning/feedbackOutcomes.js';
 
 describe('boot', () => {
   it('serves the API and MCP over real HTTP with every phase runner wired', async () => {
@@ -18,6 +19,8 @@ describe('boot', () => {
       expect(mcp.status).toBe(401);
       expect(Object.keys(b.runtime.research.phaseRunners ?? {}).sort()).toEqual(['persona_panel', 'scoring']);
       expect(b.runtime.dataDir).toBe(join(dir, 'data'));
+      // Learning loop: the feedback → outcome listener is registered at boot.
+      expect(feedbackOutcomesRegistered()).toBe(true);
       // WP-D: bus events are persisted and the escalation tool is wired.
       b.runtime.events.emit({ type: 'task_status', workspaceId: 'ws_boot', taskId: 'tsk_none', status: 'verified' });
       const persisted = await fetch(`http://127.0.0.1:${port}/api/workspaces/ws_boot/bus-events`);
