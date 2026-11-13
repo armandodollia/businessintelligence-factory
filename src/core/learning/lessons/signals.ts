@@ -37,6 +37,7 @@ import { listOutcomes } from '../outcomes.js';
 import { auditMisses } from '../reviewerAudit.js'; // wave-2 integration: audit misses feed lessons
 import { issueRecurrence, listReviewIssues } from '../reviewIssues.js';
 import type { OutcomeLabel } from '../types.js';
+import { LessonPrivacy } from './privacy.js';
 import { lessonRepos } from './store.js';
 import type { LessonSignalRecord } from './types.js';
 
@@ -272,7 +273,8 @@ export function collectLessonSignals(
       ...(s.taskId ? { taskId: s.taskId } : {}),
       ...(s.agentRunId ? { agentRunId: s.agentRunId } : {}),
       ...(s.promptVersion ? { promptVersion: s.promptVersion } : {}),
-      ...(s.note ? { text: s.note, textRefs: [s.refId ?? s.id] } : {}),
+      // Ruling R2: a note without provenance (older rows) is never quoted; ids are re-checked when quoted.
+      ...(s.note && (s.taskId || s.agentRunId || s.refId) ? { text: s.note, textRefs: [s.refId ?? s.id] } : {}),
     });
   }
   return out;
@@ -296,7 +298,10 @@ export type RecordLessonSignalInput = {
   agentRunId?: string;
   promptVersion?: string;
   refId?: string;
-  /** Text for the user (never in a rule; quoted as an example only under the upload rules). */
+  /**
+   * Text for the user (never in a rule; quoted as an example only under the upload rules). Ruling R2:
+   * dropped unless a task, run or ref id is given and none of them is upload-derived or exposed.
+   */
   note?: string;
   createdAt?: string;
 };
@@ -330,9 +335,17 @@ export function recordLessonSignal(store: Store, input: RecordLessonSignalInput)
     source: input.source,
     createdAt: input.createdAt ?? new Date().toISOString(),
   };
-  for (const k of ['sourceKey', 'taskId', 'agentRunId', 'promptVersion', 'refId', 'note'] as const) {
+  for (const k of ['sourceKey', 'taskId', 'agentRunId', 'promptVersion', 'refId'] as const) {
     const v = input[k]?.trim();
     if (v) row[k] = v;
+  }
+  // Ruling R2: a note needs provenance. Without a task, run or ref id only the category is kept; with
+  // ids, the note is kept only when none of them is upload-derived or upload-exposed (export rule).
+  const note = input.note?.trim();
+  const ids = [row.taskId, row.agentRunId, row.refId].filter((x): x is string => !!x);
+  if (note && ids.length) {
+    const privacy = new LessonPrivacy(store);
+    if (!ids.some((id) => privacy.blocked(id))) row.note = note;
   }
   return repo.insert(row);
 }
