@@ -1,13 +1,17 @@
 import type { Rating } from '../types.js';
 
 /**
- * `1-5`: score 1–5. `pct`: percent. Recommendation `confidence` and symptom `causeConfidence` are
- * 0–100 (validated by save_recommendation / save_symptom); persona field and log_decision confidences
- * are 0–1 fractions, so rating comparisons (`pctFraction`) read values ≤ 1 as fractions.
- * `trend`: one of ↑ → ↓. `range`: free numeric value or range (e.g. cost "$10k–$50k", review 0–10).
+ * `1-5`: score 1–5. `pct`: a share, in the unit the criterion declares (`unit`; never inferred from
+ * magnitude). `trend`: one of ↑ → ↓. `range`: free numeric value or range (e.g. cost "$10k–$50k",
+ * review score 0–10).
  */
 export type Scale = '1-5' | 'pct' | 'trend' | 'range';
-export type CriterionDef = { key: string; scale: Scale };
+/**
+ * Unit of a `pct` criterion: `percent` = 0–100 (recommendation `confidence`, symptom
+ * `causeConfidence`); `fraction` = 0–1 (persona field confidence, log_decision `confidence`).
+ */
+export type PctUnit = 'percent' | 'fraction';
+export type CriterionDef = { key: string; scale: Scale; unit?: PctUnit };
 export type TargetType = Rating['targetType'];
 
 /** Persona profile fields (spec §8b). Each is ratable on its confidence (criterion = field name). */
@@ -46,15 +50,15 @@ export const INVERTED_KEYS: ReadonlySet<string> = new Set(['difficulty', 'cost',
 
 export const PERSONA_FEEDBACK_KEYS = ['appeal', 'adoption', 'willingnessToPay', 'friction'] as const;
 
-const RECOMMENDATION_SCALES: Record<RecommendationKey, Scale> = {
-  upside: '1-5',
-  difficulty: '1-5',
-  cost: 'range',
-  timeToValue: '1-5',
-  risk: '1-5',
-  confidence: 'pct',
-  strategicFit: '1-5',
-  competitiveUrgency: '1-5',
+const RECOMMENDATION_DEFS: Record<RecommendationKey, Omit<CriterionDef, 'key'>> = {
+  upside: { scale: '1-5' },
+  difficulty: { scale: '1-5' },
+  cost: { scale: 'range' },
+  timeToValue: { scale: '1-5' },
+  risk: { scale: '1-5' },
+  confidence: { scale: 'pct', unit: 'percent' },
+  strategicFit: { scale: '1-5' },
+  competitiveUrgency: { scale: '1-5' },
 };
 
 /**
@@ -65,7 +69,7 @@ export const CRITERIA: Record<TargetType, CriterionDef[]> = {
   symptom: [
     { key: 'severity', scale: '1-5' },
     { key: 'trend', scale: 'trend' },
-    { key: 'causeConfidence', scale: 'pct' },
+    { key: 'causeConfidence', scale: 'pct', unit: 'percent' },
   ],
   competitor: [
     { key: 'threat', scale: '1-5' },
@@ -81,13 +85,13 @@ export const CRITERIA: Record<TargetType, CriterionDef[]> = {
     { key: 'novelty', scale: '1-5' },
   ],
   recommendation: [
-    ...RECOMMENDATION_KEYS.map((key) => ({ key, scale: RECOMMENDATION_SCALES[key] })),
+    ...RECOMMENDATION_KEYS.map((key) => ({ key, ...RECOMMENDATION_DEFS[key] })),
     { key: 'priority', scale: 'range' },
   ],
-  persona: PERSONA_FIELDS.map((key) => ({ key, scale: 'pct' as const })),
+  persona: PERSONA_FIELDS.map((key) => ({ key, scale: 'pct' as const, unit: 'fraction' as const })),
   persona_feedback: PERSONA_FEEDBACK_KEYS.map((key) => ({ key, scale: '1-5' as const })),
   decision: [
-    { key: 'confidence', scale: 'pct' },
+    { key: 'confidence', scale: 'pct', unit: 'fraction' },
     { key: 'score', scale: 'range' },
   ],
 };
@@ -106,20 +110,21 @@ export function toNumber(v: unknown): number | undefined {
   return undefined;
 }
 
-/** Percent → 0–1 fraction (values ≤ 1 are already fractions). */
-export function pctFraction(v: number): number {
-  return Math.min(1, Math.max(0, v > 1 ? v / 100 : v));
+/** A `pct` value as a 0–1 fraction by the criterion's declared unit (default `percent`), clamped. */
+export function pctFraction(v: number, unit: PctUnit = 'percent'): number {
+  return Math.min(1, Math.max(0, unit === 'percent' ? v / 100 : v));
 }
 
 const TREND_NUM: Record<string, number> = { '↓': -1, down: -1, '→': 0, flat: 0, '↑': 1, up: 1 };
 
 /**
- * Signed disagreement between two values of a criterion as a fraction of the scale's span, so
- * deltas are comparable across criteria (1-5 → /4, pct → /1 after fraction, trend → /2,
- * range → relative). Undefined when either side is not comparable.
+ * Signed disagreement (user − agent) between two values of a criterion as a fraction of the
+ * scale's span, so deltas are comparable across criteria: 1-5 → /4; pct → difference of the
+ * 0–1 fractions in the criterion's declared unit; trend → /2; range → relative. Undefined when
+ * either side is not comparable.
  */
-export function normalizedDelta(scale: Scale, agent: unknown, user: unknown): number | undefined {
-  if (scale === 'trend') {
+export function normalizedDelta(def: Pick<CriterionDef, 'scale' | 'unit'>, agent: unknown, user: unknown): number | undefined {
+  if (def.scale === 'trend') {
     const a = TREND_NUM[String(agent ?? '').trim().toLowerCase()];
     const u = TREND_NUM[String(user ?? '').trim().toLowerCase()];
     return a === undefined || u === undefined ? undefined : (u - a) / 2;
@@ -127,11 +132,11 @@ export function normalizedDelta(scale: Scale, agent: unknown, user: unknown): nu
   const a = toNumber(agent);
   const u = toNumber(user);
   if (a === undefined || u === undefined) return undefined;
-  switch (scale) {
+  switch (def.scale) {
     case '1-5':
       return (u - a) / 4;
     case 'pct':
-      return pctFraction(u) - pctFraction(a);
+      return pctFraction(u, def.unit) - pctFraction(a, def.unit);
     case 'range':
       return (u - a) / Math.max(Math.abs(a), Math.abs(u), 1);
   }

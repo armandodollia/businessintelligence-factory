@@ -6,6 +6,7 @@ import { isOurProcessGroup } from '../harness/procinfo.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
 import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
+import { listUploads } from '../internal/uploads.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
@@ -149,7 +150,8 @@ export function workspaceContext(store: Store, ws: Workspace): string[] {
   const symptoms = store.symptoms.list({ workspaceId: ws.id });
   const findings = store.findings.list({ workspaceId: ws.id });
   const personas = store.personas.list({ workspaceId: ws.id });
-  const uploads = store.artifacts.list({ workspaceId: ws.id, kind: 'upload' });
+  // Uploads as id + title only (profile.uploads, incl. sha-deduped ones); contents via read_artifact.
+  const uploads = listUploads(ws.id, { store });
   return [
     `# Workspace ${ws.id}\nName: ${ws.name}\nSector: ${ws.sector}`,
     `## Profile\n\`\`\`json\n${JSON.stringify(profile, null, 2)}\n\`\`\``,
@@ -160,7 +162,7 @@ export function workspaceContext(store: Store, ws: Workspace): string[] {
       findings.map((f) => `- [${f.id}] (${f.status}) ${f.subject}: ${trunc(f.claim, 200)}`).join('\n') || '- (none yet)'
     }`,
     `## Internal uploads (cite by id when relevant)\n${
-      uploads.map((a) => `- [${a.id}] ${a.title ?? a.mime}`).join('\n') || '- (none)'
+      uploads.map((u) => `- [${u.id}] ${u.title}`).join('\n') || '- (none)'
     }`,
     `## Personas\n${personas.map((p) => `- [${p.id}] ${p.slug} (${p.segment})`).join('\n') || '- (none yet)'}`,
   ];

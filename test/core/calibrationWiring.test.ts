@@ -114,6 +114,45 @@ describe('persona feedback identity', () => {
     expect(forPersona(p1!.id).ratings.map((r) => r.targetId)).toEqual([`rec_1:${p1!.id}`]);
     expect(forPersona(p2!.id).ratings).toEqual([]);
   });
+
+  it('every persona_feedback decision of a run is stamped (repeat and off-target submissions too)', async () => {
+    const t = await panelSeeded();
+    t.store.recommendations.insert(rec('rec_2'));
+    const one = (recommendation_id: string, appeal: number) => ({
+      recommendation_id, scores: { appeal, adoption: 3, willingness_to_pay: 2, friction: 4 },
+      concerns: [], reasoning: 'r', would_change_mind: 'w',
+    });
+    // Each run answers its own recommendation twice and also the other one.
+    t.state.pick = (req) => {
+      if (req.role !== 'persona') return undefined;
+      const recId = /Recommendation id: (\S+)/.exec(req.prompt)![1]!;
+      const other = recId === 'rec_1' ? 'rec_2' : 'rec_1';
+      return async (tools) => {
+        await tools.call('submit_persona_feedback', one(recId, 2));
+        await tools.call('submit_persona_feedback', one(other, 3));
+        await tools.call('submit_persona_feedback', one(recId, 4));
+      };
+    };
+    await runPersonaPanel('ws_a', t.deps);
+    const personaOfRun = new Map(t.store.agentRuns.list({ workspaceId: 'ws_a', role: 'persona' }).map((r) => [r.id, r]));
+    const pf = t.store.decisions.list({ workspaceId: 'ws_a', kind: 'persona_feedback' });
+    expect(pf).toHaveLength(2 * 2 * 3); // 2 personas × 2 recs × 3 submissions
+    for (const d of pf) {
+      const p = d.payload as { personaId?: string; targetId?: string; input: { recommendation_id: string } };
+      expect(p.personaId).toBeDefined();
+      expect(p.targetId).toBe(`${p.input.recommendation_id}:${p.personaId}`);
+      expect(d.refs).toEqual(expect.arrayContaining([p.input.recommendation_id, p.personaId]));
+      expect(personaOfRun.has(d.agentRunId)).toBe(true);
+    }
+    // All decisions of one run carry the same persona.
+    const byRun = new Map<string, Set<string>>();
+    for (const d of pf) {
+      const s = byRun.get(d.agentRunId) ?? new Set();
+      s.add((d.payload as { personaId: string }).personaId);
+      byRun.set(d.agentRunId, s);
+    }
+    for (const s of byRun.values()) expect(s.size).toBe(1);
+  });
 });
 
 describe('calibration reaches loaded prompts', () => {

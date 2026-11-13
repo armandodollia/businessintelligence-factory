@@ -8,13 +8,15 @@ import type { Role, TaskType } from '../types.js';
 const PERSONA_TASK_TYPES: ReadonlySet<TaskType> = new Set(['persona_profile', 'audience_segments']);
 
 /**
- * System prompt of worker / synthesizer runs: `worker.md` + `persona_profile.md` (persona task
+ * System prompt of worker / synthesizer runs: `worker.md` + `synthesizer.md` (synthesizer role:
+ * recommendation criteria and accepted cost formats) + `persona_profile.md` (persona task
  * types only) + the action policy rendered from config (always) + the browser note (browser-using
  * tasks only) + the role's approved calibration appendix (`calibration/<role>.md`), so applying a
  * calibration patch changes the prompt version of worker and synthesizer runs alike.
  */
 export function workerSystemPrompt(config: BifConfig, role: Role = 'worker', needsBrowser = false, taskType?: TaskType): string {
   const parts = [promptTemplate('worker').trimEnd()];
+  if (role === 'synthesizer') parts.push(promptTemplate('synthesizer').trimEnd());
   if (taskType && PERSONA_TASK_TYPES.has(taskType)) parts.push(promptTemplate('persona_profile').trimEnd());
   parts.push(policyPrompt(config));
   if (needsBrowser) parts.push(browserPromptNote(config));

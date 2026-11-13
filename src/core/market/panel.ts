@@ -92,13 +92,19 @@ function feedbackOfRun(
 }
 
 /**
- * Stamps the originating persona on the dispatcher's persona_feedback Decision (`payload.personaId`,
- * `payload.targetId = <recId>:<personaId>`, refs += rec + persona) so ratings of that feedback join
- * exactly this decision in the training export.
+ * Stamps the originating persona on EVERY persona_feedback Decision of a panel run (`payload.personaId`,
+ * `payload.targetId = <recId>:<personaId>` from the decision's own recommendation, refs += rec +
+ * persona) — including repeated or off-target submissions — so ratings of that feedback join exactly
+ * the right decisions in the training export and no decision is left without its persona.
  */
-function stampPersona(deps: ResearchDeps, decision: Decision, recId: string, personaId: string): void {
-  const payload = { ...((decision.payload ?? {}) as Record<string, unknown>), personaId, targetId: `${recId}:${personaId}` };
-  deps.store.decisions.update(decision.id, { payload, refs: [...new Set([...decision.refs, recId, personaId])] });
+function stampPersona(deps: ResearchDeps, agentRunId: string, personaId: string): void {
+  for (const d of deps.store.decisions.list({ agentRunId, kind: 'persona_feedback' })) {
+    const p = (d.payload ?? {}) as Record<string, unknown>;
+    const recId = (p.input as { recommendation_id?: unknown } | undefined)?.recommendation_id;
+    if (typeof recId !== 'string') continue;
+    const payload = { ...p, personaId, targetId: `${recId}:${personaId}` };
+    deps.store.decisions.update(d.id, { payload, refs: [...new Set([...d.refs, recId, personaId])] });
+  }
 }
 
 function toFeedback(personaId: string, input: ToolInput<'submit_persona_feedback'>): PersonaFeedback {
@@ -157,10 +163,10 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
         kind: 'work', role: 'persona', workspaceId, round: 1, attempt, prompt, systemPrompt,
         model, needsBrowser: false, promptVersion: version,
       });
+      stampPersona(deps, outcome.agentRunId, persona.id);
       throwIfAborted(deps.signal);
       const found = feedbackOfRun(deps, outcome.agentRunId, rec.id);
       if (found) {
-        stampPersona(deps, found.decision, rec.id, persona.id);
         attach(deps, rec.id, toFeedback(persona.id, found.input));
         report.feedback++;
         return;
