@@ -9,6 +9,7 @@ import { newId } from '../store/repos.js';
 import type { AgentRun, Role } from '../types.js';
 import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
+import { browserMcpServers } from './browser.js';
 import { Semaphore } from './semaphore.js';
 import type { RunContext, TokenRegistry } from './tokens.js';
 import type { HandleTool } from './tools/handlers.js';
@@ -354,7 +355,7 @@ export class Supervisor {
       systemPrompt: opts.systemPrompt,
       model: ctx.model.model,
       mcpUrl: `${mcpBaseUrl.replace(/\/+$/, '')}/mcp/${token}`,
-      extraMcpServers: opts.needsBrowser ? config.browser.mcpServers : {},
+      extraMcpServers: opts.needsBrowser ? browserMcpServers(config) : {},
       cwd,
     };
     const built = adapter.buildCommand(spec);

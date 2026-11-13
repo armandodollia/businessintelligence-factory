@@ -29,3 +29,13 @@ export function loadPrompt(name: string): { text: string; version: string } {
   const version = createHash('sha256').update(text).digest('hex').slice(0, 8);
   return { text, version };
 }
+
+/** First 8 hex chars of the sha256 of `text` (same scheme as `loadPrompt().version`). */
+export function promptVersion(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 8);
+}
+
+/** Replaces `{{key}}` placeholders; unknown keys are left as-is. */
+export function renderTemplate(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (m, k: string) => (Object.hasOwn(vars, k) ? vars[k]! : m));
+}

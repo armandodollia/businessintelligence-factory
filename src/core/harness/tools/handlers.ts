@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import type { BifConfig } from '../../config/schema.js';
 import { AbortError, type EventBus } from '../../events.js';
 import type { ArtifactStore } from '../../evidence/artifacts.js';
+import { redactIdentitySecrets } from '../../identity/identities.js';
 import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
 import type { Decision, Finding, Task, UserRequest } from '../../types.js';
@@ -91,7 +92,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       role: ctx.role,
       model: ctx.model,
       kind,
-      payload,
+      // Identity passwords never reach the decision log, whatever the agent wrote.
+      payload: redactIdentitySecrets(store, ctx.workspaceId, payload),
       refs: [...new Set(refs)],
       promptVersion: ctx.promptVersion,
       createdAt: new Date().toISOString(),
@@ -208,7 +210,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
 
     async read_artifact(ctx, input: ToolInput<'read_artifact'>) {
       const meta = store.artifacts.get(input.artifact_id);
-      if (!meta || meta.workspaceId !== ctx.workspaceId) return fail(`artifact '${input.artifact_id}' not found`);
+      // Artifacts of any workspace in the same business tree are readable; other trees are not.
+      if (!meta || artifacts.exists(ctx.workspaceId, [meta.id]).length) return fail(`artifact '${input.artifact_id}' not found`);
       const { artifact, bytes } = artifacts.read(meta.id);
       const base = artifact.mime.split(';')[0]!.trim();
       if (TEXT_MIME.test(base)) {
@@ -227,7 +230,17 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       if (!task) return fail('save_finding needs a task: this run has no task in this workspace');
       const missing = artifacts.exists(ctx.workspaceId, input.evidence);
       if (missing.length) {
-        return fail(`evidence references unknown artifacts (not in this workspace): ${missing.join(', ')}`);
+        return fail(`evidence references unknown artifacts (not in this workspace's business tree): ${missing.join(', ')}`);
+      }
+      // Idempotent per (task, claim): a rate-limit retry restarts the agent on the same run and may
+      // replay save_finding. The existing finding is kept and the new evidence merged into it.
+      const dup = store.findings
+        .list({ taskId: task.id, claim: input.claim })
+        .find((f) => f.workspaceId === ctx.workspaceId);
+      if (dup) {
+        const evidence = [...new Set([...dup.evidence, ...input.evidence])];
+        if (evidence.length !== dup.evidence.length) store.findings.update(dup.id, { evidence });
+        return okData({ findingId: dup.id, duplicate: true });
       }
       const finding: Finding = {
         id: newId('fnd'),

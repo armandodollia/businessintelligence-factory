@@ -154,7 +154,7 @@ describe('interview', () => {
     const t = setup();
     const up = uploadInternal('ws_a', { name: 'kpis.csv', bytes: new TextEncoder().encode('a,b\n1,2'), mime: 'text/csv' }, t);
     t.store.interview.insert({ id: 'it_1', workspaceId: 'ws_a', role: 'user', text: 'We sell widgets', createdAt: 'x' });
-    const ws = { ...t.ws, scope: { level: 'division', name: 'Widgets EU', description: 'EU widget unit' }, audiences: ['external', 'internal'] };
+    const ws = { ...t.ws, scope: { level: 'division' as const, name: 'Widgets EU', description: 'EU widget unit' }, audiences: ['external' as const, 'internal' as const] };
     const p = buildInterviewPrompt(ws, t.store);
     expect(p).toContain('division');
     expect(p).toContain('Widgets EU');
