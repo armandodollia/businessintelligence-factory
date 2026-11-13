@@ -8,9 +8,10 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
 import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-4
+import { tagRun } from '../learning/runTags.js'; // learning loop WP-F
 
 /** Which agent step a run is for (used by fake pickers and logs). */
-export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate'; // escalate: WP-D
+export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate' | 'audit'; // escalate: WP-D; audit: WP-F
 
 export type AgentRequest = {
   kind: AgentKind;
@@ -30,6 +31,11 @@ export type AgentRequest = {
    * `prompt_context` retrieval rows on the run before it starts (`recordPromptReads`).
    */
   promptReads?: PromptRead[];
+  /**
+   * Learning loop WP-F: tags written on the run once its id exists and before the agent starts (before
+   * the prompt reads), e.g. a reviewer audit's `auditId`. Decisions of the run inherit them.
+   */
+  runTags?: { auditId?: string; lessonsOff?: boolean };
 };
 
 /** Returns an in-process script for a run (tests / dry runs); `undefined` → spawn the real CLI. */
@@ -84,7 +90,13 @@ export async function runAgent(
   opts.meta = meta;
   // KS-4: prompt reads are logged once the run id exists and before the agent starts.
   const reads = req.promptReads ?? [];
-  if (reads.length) opts.beforeStart = (runCtx) => void recordPromptReads({ store: deps.store, events: deps.events }, runCtx, reads);
+  const tags = req.runTags; // learning loop WP-F
+  if (reads.length || tags) {
+    opts.beforeStart = (runCtx) => {
+      if (tags) tagRun(deps.store, runCtx.agentRunId, tags);
+      if (reads.length) recordPromptReads({ store: deps.store, events: deps.events }, runCtx, reads);
+    };
+  }
   return deps.supervisor.run(opts);
 }
 

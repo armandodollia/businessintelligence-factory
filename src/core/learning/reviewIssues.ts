@@ -6,6 +6,7 @@ import type { AgentRun, Role, Task, TaskType } from '../types.js';
 import { recordOutcome } from './outcomes.js';
 import { learningRepos } from './store.js';
 import type { IssueRecurrence, ReviewIssueRecord, ReviewIssueStatus } from './types.js';
+import { isAuditRun } from './runTags.js'; // learning loop WP-F
 
 /**
  * Review-issue history and review disputes (learning loop WP-C, migration 16).
@@ -67,7 +68,9 @@ const upheldCount = (rows: ReviewIssueRecord[], issueId: string) =>
   rows.filter((r) => r.issueId === issueId && r.status === 'upheld').length;
 
 const runsOf = (store: Store, task: Pick<Task, 'id' | 'workspaceId'>, roles: readonly Role[]): AgentRun[] =>
-  store.agentRuns.list({ taskId: task.id }).filter((r) => r.workspaceId === task.workspaceId && roles.includes(r.role));
+  store.agentRuns
+    .list({ taskId: task.id })
+    .filter((r) => r.workspaceId === task.workspaceId && roles.includes(r.role) && !isAuditRun(store, r.id)); // WP-F: audits excluded
 
 /** Pushed-back issues the reviewer of `round` must rule on (still under the reassert cap). */
 export function openDisputes(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, round: number, cap: number): ReviewIssueRecord[] {

@@ -8,6 +8,7 @@ import { descendants, rootOf } from '../workspace/tree.js';
 import { evidenceOf as recordEvidenceOf, itemIsUploadDerived } from '../knowledge/provenance.js'; // KS-2 (+ KS-6)
 import { runIsUploadExposed } from '../knowledge/retrievalLog.js'; // KS-6
 import { knowledgeRepos } from '../store/repos.js'; // KS-6
+import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
@@ -215,7 +216,9 @@ export function exportTrainingDataWithSummary(
       });
     }
     const status = finalReviewStatus(store, decision);
-    lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}) }));
+    // Learning loop WP-F: experiment / audit judgments are marked, so consumers can keep them apart.
+    const tags = decisionTags(store, decision.id);
+    lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}), ...tags }));
   }
   lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf, tally));
   lines.push(...knowledgeLines(store, workspaceId, uploads, tally)); // KS-6

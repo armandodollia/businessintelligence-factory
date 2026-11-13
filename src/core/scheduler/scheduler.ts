@@ -3,6 +3,7 @@ import type { ResearchDeps } from '../research/deps.js';
 import { currentResearchRun, runPipeline } from '../research/orchestrator.js';
 import type { Schedule } from '../types.js';
 import { isPipelineLocked } from '../research/lock.js';
+import { auditJobSource } from '../learning/reviewerAudit.js'; // learning loop WP-F
 
 /** How often schedules are checked (spec: every 60 s). */
 export const SCHEDULER_INTERVAL_MS = 60_000;
@@ -10,7 +11,25 @@ export const SCHEDULER_INTERVAL_MS = 60_000;
 export type SchedulerDeps = ResearchDeps & {
   /** Check interval; default 60 s. */
   intervalMs?: number;
+  /** Learning loop WP-F: more non-pipeline job sources (reviewer audits are always included). */
+  jobs?: ScheduledJobSource[];
 };
+
+// --- learning loop WP-F: non-pipeline scheduled jobs ----------------------------------------------
+/** A cron job that is not a research pipeline (e.g. a reviewer audit). Due by the same rule as schedules. */
+export type ScheduledJob = { id: string; cron: string; lastRunAt?: string; activatedAt?: string };
+
+/**
+ * A source of non-pipeline scheduled jobs. `list` returns its enabled jobs; when one is due the
+ * scheduler calls `started(id, at)` (persist `lastRunAt`) and then `run(id)`. A job never overlaps itself.
+ */
+export type ScheduledJobSource = {
+  name: string;
+  list(): ScheduledJob[];
+  started(id: string, at: string): void;
+  run(id: string): Promise<void>;
+};
+// --- end WP-F ------------------------------------------------------------------------------------
 
 export type SchedulerHandle = {
   stop(): void;
@@ -65,6 +84,7 @@ async function runSchedule(schedule: Schedule, deps: ResearchDeps): Promise<void
 export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now): SchedulerHandle {
   const startedAt = now();
   const busy = new Set<string>();
+  const sources: ScheduledJobSource[] = [auditJobSource(deps), ...(deps.jobs ?? [])]; // learning loop WP-F
   const jobs = new Set<Promise<void>>();
   let stopped = false;
   let ticking: Promise<void> = Promise.resolve();
@@ -99,6 +119,29 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
           jobs.delete(job);
         });
       jobs.add(job);
+    }
+    // Learning loop WP-F: non-pipeline jobs (reviewer audits, ...), each never overlapping itself.
+    for (const source of sources) {
+      for (const j of source.list()) {
+        const key = `${source.name}:${j.id}`;
+        if (busy.has(key)) continue;
+        try {
+          if (nextDue(j.cron, new Date(scheduleBaseline(j, startedAt))).getTime() > t) continue;
+        } catch (e) {
+          console.warn(`[bif] ${source.name} job ${j.id}: ${(e as Error).message}`);
+          continue;
+        }
+        busy.add(key);
+        source.started(j.id, new Date(t).toISOString());
+        const job = source
+          .run(j.id)
+          .catch((e) => console.error(`[bif] scheduled ${source.name} job ${j.id} failed: ${(e as Error).message}`))
+          .finally(() => {
+            busy.delete(key);
+            jobs.delete(job);
+          });
+        jobs.add(job);
+      }
     }
   };
 

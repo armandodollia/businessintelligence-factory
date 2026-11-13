@@ -1,5 +1,6 @@
 import type { Store } from '../store/db.js';
 import { applyObservations } from '../knowledge/facts.js'; // KS-2
+import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 import type { Competitor, Finding, OutputStatus, Persona, Recommendation, SymptomHypothesis, Task } from '../types.js';
 
 /**
@@ -104,6 +105,24 @@ export function applyTaskStatus(store: Store, task: Task, status: TaskOutcome): 
   applyObservations(store, task, status, { cited: citedOutputIds(task.result) });
 }
 
+// --- learning loop WP-F: experiment arm tasks ----------------------------------------------------
+/**
+ * End of an experiment arm task (instead of `applyTaskStatus`): every output it saved becomes
+ * `superseded` and its fact observations are superseded / rejected (never applied), so an experiment
+ * adds nothing to the workspace's findings, recommendations, knowledge or synthesis inputs. The task's
+ * own status (and its reviews) remain what the experiment compares. Run inside the caller's transaction.
+ */
+export function retireExperimentOutputs(store: Store, task: Task): void {
+  const outputs = taskOutputs(store, task);
+  for (const f of outputs.findings) store.findings.update(f.id, { status: 'superseded' });
+  for (const r of outputs.recommendations) store.recommendations.update(r.id, { status: 'superseded' });
+  for (const p of outputs.personas) store.personas.update(p.id, { status: 'superseded' });
+  for (const c of outputs.competitors) store.competitors.update(c.id, { status: 'superseded' });
+  for (const h of outputs.hypotheses) store.symptomHypotheses.update(h.id, { status: 'superseded' });
+  applyObservations(store, task, 'failed', { cited: new Set() });
+}
+// --- end WP-F ------------------------------------------------------------------------------------
+
 /** JSON of refs + payload of every Decision made by the task's runs (worker, reviewer, ...). */
 function taskDecisionTexts(store: Store, taskId: string): string[] {
   return store.agentRuns
@@ -203,6 +222,7 @@ export function lastReviewsByTask(store: Store, workspaceIds: string[]): Map<str
     if (!synthetic && p.tool !== 'submit_review') continue;
     if (typeof p.score !== 'number') continue;
     if (!synthetic && store.agentRuns.get(d.agentRunId)?.status !== 'done') continue;
+    if (decisionTags(store, d.id).auditId !== undefined) continue; // learning loop WP-F: an audit is not the task's review
     for (const taskId of d.refs) {
       out.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt, synthetic });
     }
