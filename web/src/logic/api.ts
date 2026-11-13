@@ -178,3 +178,25 @@ export const api = {
   getConfig: () => get<BifConfig>('/api/config'),
   putConfig: (config: BifConfig) => request<BifConfig>('PUT', '/api/config', config),
 };
+
+// ---------------------------------------------------------------------------
+// learning loop WP-B: costs, agent runs and events, prompt store, prompt-version metrics,
+// calibration history
+
+export const usageApi = {
+  /** Costs per workspace / task / role / model / prompt version; with a workspace also budget status. */
+  getCosts: (workspaceId?: string) =>
+    get<import('./types.js').CostReport>(`/api/costs${workspaceId ? `?workspaceId=${enc(workspaceId)}` : ''}`),
+  listAgentRuns: (wsId: string, limit?: number) =>
+    get<import('./types.js').AgentRunView[]>(`${ws(wsId)}/agent-runs${limit ? `?limit=${limit}` : ''}`),
+  getRun: (runId: string) => get<import('./types.js').AgentRunDetail>(`/api/runs/${enc(runId)}`),
+  getRunEvents: (runId: string, offset: number, limit: number) =>
+    get<import('./types.js').RunEventsPage>(`/api/runs/${enc(runId)}/events?offset=${offset}&limit=${limit}`),
+  getPrompt: (hash: string) => get<import('./types.js').PromptVersionRecord>(`/api/prompts/${enc(hash)}`),
+  getPromptVersionMetrics: (wsId: string, role?: string) =>
+    get<import('./types.js').PromptVersionMetrics[]>(`${ws(wsId)}/metrics/prompt-versions${role ? `?role=${enc(role)}` : ''}`),
+  listCalibrationVersions: (wsId: string, role?: string) =>
+    get<import('./types.js').CalibrationVersion[]>(`${ws(wsId)}/calibration/versions${role ? `?role=${enc(role)}` : ''}`),
+  revertCalibration: (wsId: string, versionId: string) =>
+    post<import('./types.js').RevertedCalibration>(`${ws(wsId)}/calibration/versions/${enc(versionId)}/revert`),
+};
