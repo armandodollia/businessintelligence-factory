@@ -97,4 +97,10 @@ describe('CodexAdapter', () => {
     expect(getAdapter('codex')).not.toBe(getAdapter('codex'));
     expect(getAdapter('codex', '/opt/codex').buildCommand(spec).cmd).toBe('/opt/codex');
   });
+
+  it('guards a dash-leading prompt when there is no system prompt', () => {
+    const { args } = new CodexAdapter().buildCommand({ ...spec, systemPrompt: '', prompt: '--oops' });
+    expect(args.at(-1)!.startsWith('-')).toBe(false);
+  });
 });
+

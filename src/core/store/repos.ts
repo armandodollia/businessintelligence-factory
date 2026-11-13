@@ -261,7 +261,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', agentRunId: 'text', taskId: 'text', kind: 'text', site: 'text',
-      details: 'text', status: 'text', response: 'text', createdAt: 'text',
+      details: 'text', status: 'text', response: 'text', createdAt: 'text', taskPriorStatus: 'text',
     },
   } satisfies TableSpec<UserRequest>,
   recommendations: {

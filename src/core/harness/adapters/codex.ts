@@ -4,6 +4,7 @@ import {
   obj,
   parseJsonObject,
   plainLineEvents,
+  safePositional,
   str,
   withSystemBlock,
   type BuiltCommand,
@@ -70,7 +71,7 @@ export class CodexAdapter implements CliAdapter {
         '--skip-git-repo-check',
         '-C', spec.cwd,
         ...config.flatMap((c) => ['-c', c]),
-        withSystemBlock(spec.systemPrompt, spec.prompt),
+        safePositional(withSystemBlock(spec.systemPrompt, spec.prompt)),
       ],
       files: [],
     };

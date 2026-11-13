@@ -379,27 +379,15 @@ export class Supervisor {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
       });
+      const pid = child.pid;
 
-      const signalGroup = (sig: NodeJS.Signals) => {
-        try {
-          if (child.pid !== undefined && process.platform !== 'win32') process.kill(-child.pid, sig);
-          else child.kill(sig);
-        } catch {
-          // already gone
-        }
-      };
-      // SIGTERM the whole group, then SIGKILL it after the grace period no matter what — even if
-      // the CLI itself already exited — so descendants that ignore SIGTERM die too.
-      const terminateGroup = () => {
-        signalGroup('SIGTERM');
-        if (killTimer) return;
-        killTimer = setTimeout(() => signalGroup('SIGKILL'), this.killGraceMs);
-        killTimer.unref();
-      };
+      // Kill the CLI if it ignores SIGTERM; descendants are reaped after it exits (reapGroup).
       const kill = (why: string) => {
         if (reason || settled) return;
         reason = why;
-        terminateGroup();
+        signalGroup(pid, 'SIGTERM', child);
+        killTimer = setTimeout(() => signalGroup(pid, 'SIGKILL', child), this.killGraceMs);
+        killTimer.unref();
       };
 
       const dog = this.watchdog(ctx, () => kill(`idle timeout: no output for ${config.limits.idleTimeoutMs} ms`));
@@ -407,12 +395,18 @@ export class Supervisor {
       opts.signal?.addEventListener('abort', onAbort, { once: true });
       if (opts.signal?.aborted) onAbort();
 
-      const finish = (exitCode: number, extraError?: string) => {
+      const out = createInterface({ input: child.stdout! });
+      const err = createInterface({ input: child.stderr! });
+
+      /** Synchronous tail: closes the stream, emits the final events, resolves. Idempotent. */
+      const finish = (exitCode: number) => {
         if (settled) return;
         settled = true;
         dog.stop();
+        if (killTimer) clearTimeout(killTimer);
         opts.signal?.removeEventListener('abort', onAbort);
-        if (extraError) emit({ t: 'error', message: extraError, rateLimited: false });
+        out.close();
+        err.close();
         if (reason) emit({ t: 'error', message: reason, rateLimited: false });
         // Process exit code wins when non-zero; otherwise trust the stream (OpenCode exits 0 on error).
         let code = exitCode !== 0 ? exitCode : (lastDone ?? 0);
@@ -423,50 +417,95 @@ export class Supervisor {
         resolve(res);
       };
 
-      child.on('error', (err) => {
-        reason ??= `spawn failed: ${err.message}`;
+      child.on('error', (e) => {
+        if (exitInfo) return;
+        reason ??= `spawn failed: ${e.message}`;
         finish(127);
       });
 
-      const out = createInterface({ input: child.stdout! });
       out.on('line', (line) => {
+        if (settled) return;
         dog.touch();
         appendFileSync(stdoutLog, line + '\n');
         for (const e of adapter.parseLine(line)) emit(e);
       });
-      const err = createInterface({ input: child.stderr! });
       err.on('line', (line) => {
+        if (settled) return;
         dog.touch();
         appendFileSync(stderrLog, line + '\n');
         // stderr is never JSON events; only scan it for rate-limit text.
-        if (isRateLimitText(line)) {
-          emit({ t: 'error', message: line.slice(0, 2000), rateLimited: true });
-        }
+        if (isRateLimitText(line)) emit({ t: 'error', message: line.slice(0, 2000), rateLimited: true });
       });
 
       let outClosed = false;
-      let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-      const maybeFinish = () => {
-        if (!outClosed || !exitInfo) return;
-        const { code, signal } = exitInfo;
-        const exitCode = code ?? (signal === 'SIGKILL' ? 137 : signal === 'SIGTERM' ? 143 : 1);
-        finish(exitCode);
-      };
+      let onOutClosed: (() => void) | undefined;
       out.on('close', () => {
         outClosed = true;
-        maybeFinish();
+        onOutClosed?.();
       });
+
+      let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
       child.on('exit', (code, signal) => {
         exitInfo = { code, signal };
-        // Kill leftovers in the group (e.g. MCP servers the CLI started).
-        terminateGroup();
-        maybeFinish();
-        // stdout may be held open by a grandchild; don't wait on it forever.
-        setTimeout(() => {
-          outClosed = true;
-          maybeFinish();
-        }, 2000).unref();
+        const exitCode = code ?? (signal === 'SIGKILL' ? 137 : signal === 'SIGTERM' ? 143 : 1);
+        void (async () => {
+          // Leftovers in the group (MCP servers, browsers) must be gone before the run resolves and
+          // its semaphore slots (e.g. the browser profile) are released.
+          await reapGroup(pid, this.killGraceMs);
+          // Group is dead, so stdout closes promptly; bound the wait anyway.
+          if (!outClosed) {
+            await new Promise<void>((r) => {
+              onOutClosed = r;
+              setTimeout(r, 1000).unref();
+            });
+          }
+          finish(exitCode);
+        })();
       });
     });
+  }
+}
+
+const isWin = process.platform === 'win32';
+
+function signalGroup(pid: number | undefined, sig: NodeJS.Signals, child?: { kill(sig: NodeJS.Signals): boolean }) {
+  try {
+    if (pid !== undefined && !isWin) process.kill(-pid, sig);
+    else child?.kill(sig);
+  } catch {
+    // already gone
+  }
+}
+
+/** True while any process in group `pid` exists (probe with signal 0). */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function waitGroupGone(pid: number, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (groupAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return true;
+}
+
+/**
+ * Terminates every remaining process in the CLI's process group: only if the group still exists
+ * (avoids signalling a recycled pgid), SIGTERM, wait up to `graceMs`, then SIGKILL and confirm.
+ */
+export async function reapGroup(pid: number | undefined, graceMs: number): Promise<void> {
+  if (pid === undefined || isWin || !groupAlive(pid)) return;
+  signalGroup(pid, 'SIGTERM');
+  if (await waitGroupGone(pid, graceMs)) return;
+  signalGroup(pid, 'SIGKILL');
+  if (!(await waitGroupGone(pid, 5000))) {
+    console.warn(`[bif] process group ${pid} still present after SIGKILL`);
   }
 }

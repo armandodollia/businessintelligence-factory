@@ -176,7 +176,8 @@ describe('tool handlers', () => {
     const p = handle(c, 'request_user_action', { kind: 'register', site: 'acme.test', instructions: 'needs phone' });
     await tick();
     const [req] = store.userRequests.list();
-    expect(req).toMatchObject({ kind: 'register', details: 'needs phone', taskId: '' });
+    expect(req).toMatchObject({ kind: 'register', details: 'needs phone' });
+    expect('taskId' in req!).toBe(false); // no task → taskId absent, not ''
     resolveUserRequest({ store, events }, req!.id, 'denied');
     expect(await p).toMatchObject({ ok: true, data: { status: 'denied', approved: false } });
 
@@ -426,3 +427,45 @@ describe('user request insert failure', () => {
     expect((s.events as unknown as { listeners: Set<unknown> }).listeners.size).toBe(before);
   });
 });
+
+describe('concurrent user requests on one task', () => {
+  for (const order of ['creation', 'reverse'] as const) {
+    it(`restore the task's original status after the last resolves (${order} order)`, async () => {
+      const { store, events, handle } = setup();
+      const task = addTask(store); // status 'running'
+      const c = ctx('worker', { taskId: task.id });
+      const p1 = handle(c, 'request_approval', { action: 'request a demo', site: 'a', details: 'd' });
+      await tick();
+      const p2 = handle(c, 'request_approval', { action: 'contact sales', site: 'b', details: 'd' });
+      await tick();
+      const pending = store.userRequests.list({ status: 'pending' });
+      expect(pending).toHaveLength(2);
+      expect(pending.map((r) => r.taskPriorStatus)).toEqual(['running', 'running']);
+      expect(store.tasks.get(task.id)!.status).toBe('waiting_user');
+      const ids = order === 'creation' ? pending.map((r) => r.id) : pending.map((r) => r.id).reverse();
+      resolveUserRequest({ store, events }, ids[0]!, 'resolved');
+      expect(store.tasks.get(task.id)!.status).toBe('waiting_user'); // one still pending
+      resolveUserRequest({ store, events }, ids[1]!, 'denied');
+      await Promise.all([p1, p2]);
+      expect(store.tasks.get(task.id)!.status).toBe('running');
+      expect(store.userRequests.list({ status: 'pending' })).toHaveLength(0);
+    });
+  }
+
+  it('restores the task after a restart (no live waiter)', async () => {
+    const { store, events, handle, dbPath } = setup();
+    const task = addTask(store);
+    const ac = new AbortController();
+    const p = handle(ctx('worker', { taskId: task.id }), 'request_user_action', { kind: 'login', site: 's', instructions: 'i' }, { signal: ac.signal });
+    await tick();
+    ac.abort();
+    await p;
+    store.close();
+    const reopened = openStore(dbPath);
+    opened.push(reopened);
+    const [req] = reopened.userRequests.list({ status: 'pending' });
+    resolveUserRequest({ store: reopened, events }, req!.id, 'resolved');
+    expect(reopened.tasks.get(task.id)!.status).toBe('running');
+  });
+});
+

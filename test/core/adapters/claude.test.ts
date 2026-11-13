@@ -43,6 +43,8 @@ describe('ClaudeAdapter', () => {
     const { cmd, args } = new ClaudeAdapter('/opt/claude').buildCommand({ ...spec, prompt: '-x' });
     expect(cmd).toBe('/opt/claude');
     expect(args[1]!.startsWith('-')).toBe(false);
+    const sys = new ClaudeAdapter().buildCommand({ ...spec, systemPrompt: '--evil' }).args;
+    expect(sys[sys.indexOf('--append-system-prompt') + 1]!.startsWith('-')).toBe(false);
   });
 
   it('parseLine fixture yields message, tool_call(save_finding), done(0)', () => {

@@ -42,7 +42,7 @@ export class ClaudeAdapter implements CliAdapter {
         '--model', spec.model,
         '--mcp-config', mcpPath,
         '--strict-mcp-config',
-        '--append-system-prompt', spec.systemPrompt,
+        '--append-system-prompt', safePositional(spec.systemPrompt),
         '--dangerously-skip-permissions',
       ],
       files: [{ path: mcpPath, content: JSON.stringify(mcp, null, 2) }],

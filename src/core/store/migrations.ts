@@ -199,4 +199,30 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent_runs ADD COLUMN prompt_version TEXT;
   CREATE INDEX decisions_run ON decisions (agent_run_id);
   `,
+  // 3: Section B — user_requests.task_id becomes nullable (runs without a task) and gains
+  // task_prior_status (task status to restore once its last pending request resolves).
+  // SQLite cannot drop NOT NULL in place, so the table is rebuilt; '' task ids become NULL.
+  `
+  CREATE TABLE user_requests_new (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    agent_run_id TEXT NOT NULL,
+    task_id TEXT,
+    kind TEXT NOT NULL,
+    site TEXT,
+    details TEXT NOT NULL,
+    status TEXT NOT NULL,
+    response TEXT,
+    created_at TEXT NOT NULL,
+    task_prior_status TEXT
+  );
+  INSERT INTO user_requests_new (id, workspace_id, agent_run_id, task_id, kind, site, details, status, response, created_at)
+    SELECT id, workspace_id, agent_run_id, NULLIF(task_id, ''), kind, site, details, status, response, created_at
+    FROM user_requests ORDER BY rowid;
+  DROP TABLE user_requests;
+  ALTER TABLE user_requests_new RENAME TO user_requests;
+  CREATE INDEX user_requests_ws ON user_requests (workspace_id);
+  CREATE INDEX user_requests_status ON user_requests (status);
+  CREATE INDEX user_requests_task ON user_requests (task_id);
+  `,
 ];

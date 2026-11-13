@@ -1,7 +1,8 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
 import { openStore, type Store } from '../../src/core/store/db.js';
 import { MIGRATIONS } from '../../src/core/store/migrations.js';
 import { newId } from '../../src/core/store/repos.js';
@@ -264,4 +265,26 @@ describe('store', () => {
     expect('result' in cleared).toBe(false);
     expect(store.tasks.update(task.id, { result: null }).result).toBeNull();
   });
+
+  it('migration 3 upgrades a v2 database: user_requests.task_id nullable, empty ids become NULL', () => {
+    const path = tmpDb();
+    openStore(path).close(); // create directories
+    rmSync(path);
+    const raw = new DatabaseSync(path);
+    raw.exec('BEGIN');
+    raw.exec(MIGRATIONS[0]!);
+    raw.exec(MIGRATIONS[1]!);
+    raw.exec('PRAGMA user_version = 2');
+    raw.exec(`INSERT INTO user_requests (id, workspace_id, agent_run_id, task_id, kind, details, status, created_at)
+      VALUES ('ureq_1', 'ws', 'arun_1', '', 'login', 'd', 'pending', 'now'),
+             ('ureq_2', 'ws', 'arun_1', 'tsk_1', 'login', 'd', 'pending', 'now')`);
+    raw.exec('COMMIT');
+    raw.close();
+    const store = open(path);
+    expect(store.schemaVersion()).toBe(MIGRATIONS.length);
+    expect('taskId' in store.userRequests.get('ureq_1')!).toBe(false);
+    expect(store.userRequests.get('ureq_2')!.taskId).toBe('tsk_1');
+    expect(store.userRequests.list({ status: 'pending' }).map((r) => r.id)).toEqual(['ureq_1', 'ureq_2']);
+  });
 });
+

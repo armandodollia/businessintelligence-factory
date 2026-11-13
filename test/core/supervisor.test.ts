@@ -303,14 +303,14 @@ describe('Supervisor fix round 1', () => {
     expect(store.agentRuns.list()).toHaveLength(1);
   });
 
-  it('SIGKILLs the process group after the grace period even if the CLI exits on SIGTERM', async () => {
+  it('reaps a SIGTERM-ignoring descendant before run() resolves', async () => {
     const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = 300));
     const res = await sup.run(cli({ lines: [CLAUDE_FIXTURE[0]!], sleepForever: true, stubbornChild: true }));
     expect(res).toMatchObject({ status: 'failed', reason: expect.stringMatching(/idle/) });
     const childPid = Number(readFileSync(join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd', 'child.pid'), 'utf8'));
-    expect(alive(childPid)).toBe(true); // parent died on SIGTERM; grandchild ignored it
-    await new Promise((r) => setTimeout(r, 400)); // killGraceMs is 150
+    // The grandchild ignored SIGTERM; run() must not resolve until it has been SIGKILLed.
     expect(alive(childPid)).toBe(false);
+    expect(res.events.at(-1)).toEqual({ t: 'done', exitCode: res.exitCode });
   });
 
   it('idle-killed runs are not rate-limit retried', async () => {
@@ -321,4 +321,20 @@ describe('Supervisor fix round 1', () => {
     expect(res).toMatchObject({ status: 'failed', attempts: 1, reason: expect.stringMatching(/idle/) });
     expect(readFileSync(counterFile, 'utf8')).toBe('1');
   });
+
+  it('a descendant left after a normal exit is reaped before run() resolves', async () => {
+    const { dir, sup } = setup();
+    const res = await sup.run(cli({ lines: CLAUDE_FIXTURE, stubbornChild: true }));
+    expect(res.status).toBe('done');
+    const childPid = Number(readFileSync(join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd', 'child.pid'), 'utf8'));
+    expect(alive(childPid)).toBe(false);
+  });
+
+  it("'done' is the last event even when output keeps arriving", async () => {
+    const { sup } = setup((c) => (c.limits.idleTimeoutMs = 2000));
+    const res = await sup.run(cli({ lines: [...CLAUDE_FIXTURE, CLAUDE_FIXTURE.at(-1)!] }));
+    expect(res.events.at(-1)!.t).toBe('done');
+    expect(res.events.filter((e) => e.t === 'done').length).toBeGreaterThanOrEqual(1);
+  });
 });
+

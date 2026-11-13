@@ -24,6 +24,7 @@ if (plan.stubbornChild) {
     stdio: 'ignore',
   });
   writeFileSync('child.pid', String(child.pid));
+  child.unref(); // the CLI may exit and leave it behind
   await new Promise((r) => setTimeout(r, 200)); // let the grandchild install its handler
 }
 

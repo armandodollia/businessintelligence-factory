@@ -125,19 +125,31 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       id,
       workspaceId: ctx.workspaceId,
       agentRunId: ctx.agentRunId,
-      taskId: ctx.taskId ?? '',
       kind,
       site,
       details,
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
-    const task = taskOf(ctx);
-    const prevStatus = task?.status;
+    if (ctx.taskId !== undefined) request.taskId = ctx.taskId;
     try {
       store.transaction(() => {
+        // Read the task inside the transaction so concurrent requests see each other.
+        const task = taskOf(ctx);
+        if (task) {
+          if (task.status !== 'waiting_user') {
+            // First pending request for this task: remember the status to restore later.
+            request.taskPriorStatus = task.status;
+            store.tasks.update(task.id, { status: 'waiting_user' });
+          } else {
+            // Already waiting: carry the original prior status from a sibling pending request.
+            const prior = store.userRequests
+              .list({ taskId: task.id, status: 'pending' })
+              .find((r) => r.workspaceId === ctx.workspaceId && r.taskPriorStatus)?.taskPriorStatus;
+            if (prior) request.taskPriorStatus = prior;
+          }
+        }
         store.userRequests.insert(request);
-        if (task && task.status !== 'waiting_user') store.tasks.update(task.id, { status: 'waiting_user' });
       });
     } catch (err) {
       local.abort();
@@ -146,14 +158,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     events.emit({ type: 'user_request', workspaceId: ctx.workspaceId, request });
     try {
       const e = await waiter;
+      // Task status restoration happens in resolveUserRequest (works after restarts too).
       const resolved = (e as Extract<typeof e, { type: 'user_request_resolved' }>).request;
-      if (task && prevStatus && prevStatus !== 'waiting_user') {
-        const stillPending = store.userRequests
-          .list({ taskId: task.id, status: 'pending' })
-          .some((r) => r.workspaceId === ctx.workspaceId);
-        const current = store.tasks.get(task.id);
-        if (!stillPending && current?.status === 'waiting_user') store.tasks.update(task.id, { status: prevStatus });
-      }
       const data: Record<string, unknown> = {
         requestId: id,
         status: resolved.status,
@@ -343,7 +349,9 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
 
 /**
  * Answers a pending user request (from the UI / API). `resolved` means done/approved. Wakes the
- * blocked tool call, if any. Throws if the request is unknown or no longer pending.
+ * blocked tool call, if any. When this was the task's last pending request and the task is still
+ * `waiting_user`, the task goes back to its pre-wait status (`taskPriorStatus`). Throws if the
+ * request is unknown or no longer pending.
  */
 export function resolveUserRequest(
   deps: { store: Store; events: EventBus },
@@ -356,7 +364,24 @@ export function resolveUserRequest(
   if (current.status !== 'pending') throw new Error(`user request '${id}' is already ${current.status}`);
   const patch: Partial<UserRequest> = { status };
   if (response !== undefined) patch.response = response;
-  const request = deps.store.userRequests.update(id, patch);
+  const { store } = deps;
+  const request = store.transaction(() => {
+    const updated = store.userRequests.update(id, patch);
+    const taskId = updated.taskId;
+    if (taskId) {
+      const stillPending = store.userRequests
+        .list({ taskId, status: 'pending' })
+        .some((r) => r.workspaceId === updated.workspaceId);
+      const task = store.tasks.get(taskId);
+      if (!stillPending && task?.workspaceId === updated.workspaceId && task.status === 'waiting_user') {
+        const prior =
+          updated.taskPriorStatus ??
+          store.userRequests.list({ taskId }).find((r) => r.taskPriorStatus)?.taskPriorStatus;
+        if (prior && prior !== 'waiting_user') store.tasks.update(taskId, { status: prior });
+      }
+    }
+    return updated;
+  });
   deps.events.emit({ type: 'user_request_resolved', workspaceId: request.workspaceId, request });
   return request;
 }

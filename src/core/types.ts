@@ -129,13 +129,16 @@ export interface UserRequest {
   id: string;
   workspaceId: string;
   agentRunId: string;
-  taskId: string;
+  /** Absent when the requesting run has no task. */
+  taskId?: string;
   kind: 'register' | 'login' | 'captcha' | 'approval' | 'other';
   site?: string;
   details: string;
   status: 'pending' | 'resolved' | 'denied';
   response?: string;
   createdAt: string;
+  /** Task status before it entered `waiting_user`; restored when the task's last pending request resolves (migration 3). */
+  taskPriorStatus?: Task['status'];
 }
 
 export interface PersonaFeedback {
