@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { modelRefSchema, taskTypeSchema } from '../../config/schema.js';
+import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
 import type { Role } from '../../types.js';
 
 export const TOOL_NAMES = [
@@ -44,6 +45,16 @@ export type IssueClass = (typeof ISSUE_CLASSES)[number];
 
 const id = z.string().min(1);
 const criteria = z.record(z.string(), z.union([z.number(), z.string()]));
+
+/** One persona profile field: value, confidence 0–1, ≥ 1 evidence artifact (fields may share artifacts). */
+const personaField = z.object({
+  value: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  evidence: z.array(id).min(1, 'each persona field needs at least one evidence artifact'),
+});
+const personaProfileShape = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, personaField])) as {
+  [K in PersonaField]: typeof personaField;
+};
 
 // ---------------------------------------------------------------------------
 // input schemas (snake_case, as agents see them)
@@ -130,12 +141,10 @@ export const toolInputSchemas = {
   }),
   get_identity: z.object({ site: z.string().min(1) }),
   save_persona: z.object({
-    segment: z.string().min(1),
-    slug: z.string().optional(),
-    profile: z.record(
-      z.string(),
-      z.object({ value: z.string(), confidence: z.number().min(0).max(1), evidence: z.array(id) }),
-    ),
+    segment: z.string().min(1).describe('Audience segment this persona represents'),
+    slug: z.string().optional().describe('Stable id (lowercase-dashes); default: derived from segment. Same slug = update'),
+    audience: z.enum(['external', 'internal']).describe('external = customers; internal = employees / internal users'),
+    profile: z.object(personaProfileShape).describe('Every persona field, each with value, confidence 0–1 and evidence'),
   }),
   submit_persona_feedback: z.object({
     recommendation_id: id,
