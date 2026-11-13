@@ -21,6 +21,9 @@ import { startScheduler, type SchedulerHandle } from '../core/scheduler/schedule
 import { scoreRecommendations, scoringToolHandlers } from '../core/scoring/priority.js';
 import { openStore, type Store } from '../core/store/db.js';
 import { createApp } from './routes.js';
+// WP-D
+import { escalationToolHandlers, startEscalations, type EscalationService } from '../core/escalation/escalation.js';
+import { attachEventRecorders, type EventRecorders } from '../core/telemetry/recorders.js';
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -82,6 +85,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...interviewToolHandlers(),
       ...scoringToolHandlers(),
       ...marketToolHandlers({ dataDir }),
+      ...escalationToolHandlers(), // WP-D
     },
   });
   const supervisor = new Supervisor({
@@ -115,7 +119,16 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
   return { app, config, store, events, tokens, supervisor, handle, research, dataDir, port };
 }
 
-export type Booted = { runtime: Runtime; server: ServerType; scheduler: SchedulerHandle; close(): Promise<void> };
+export type Booted = {
+  runtime: Runtime;
+  server: ServerType;
+  scheduler: SchedulerHandle;
+  /** WP-D: bus-event / policy-event recorders (and OTLP export when enabled). */
+  recorders: EventRecorders;
+  /** WP-D: escalation agent on unverified / failed tasks, re-runs on answers. */
+  escalations: EscalationService;
+  close(): Promise<void>;
+};
 
 /**
  * Boots the local server: config → store → harness → app (API + MCP + web) → listen on
@@ -130,6 +143,9 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
   });
   // Blocking MCP tools (request_approval) keep requests open for as long as the user takes.
   if ('requestTimeout' in server) server.requestTimeout = 0;
+  // WP-D: subscribe before resuming, so events of resumed work are recorded and escalated.
+  const recorders = attachEventRecorders({ store: runtime.store, events: runtime.events, config: runtime.config });
+  const escalations = startEscalations(runtime.research);
   const report = resumeInterrupted(runtime.research);
   if (report.failedRuns.length || report.requeuedTasks.length || report.continuedRuns.length || report.continuedPipelines.length) {
     console.log(
@@ -144,6 +160,8 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     if (closed) return;
     closed = true;
     scheduler.stop();
+    escalations.stop(); // WP-D
+    await recorders.stop(); // WP-D
     const closing = new Promise<void>((r) => server.close(() => r()));
     // Open SSE streams would otherwise keep close() pending forever.
     (server as { closeAllConnections?: () => void }).closeAllConnections?.();
@@ -152,7 +170,7 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     await runtime.supervisor.close();
     runtime.store.close();
   };
-  return { runtime, server, scheduler, close };
+  return { runtime, server, scheduler, recorders, escalations, close };
 }
 
 const isEntry = import.meta.main || (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
