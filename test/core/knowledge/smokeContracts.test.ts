@@ -188,7 +188,7 @@ describe('raw mode and expand on chunks page by position', () => {
 });
 
 describe('lists never skip an item (KS-8 ruling)', () => {
-  it('an evidence item too long for the page is shortened and marked cut; following the cursor visits every item', async () => {
+  it('evidence items that do not fit after the header start the next page whole (re-gate Opus 1); following the cursor visits every item', async () => {
     const t = ks4(opened);
     const a = await t.page('ws_a', 'Quote source text.');
     const f = t.fact('ws_a', 'Big evidence', { evidence: [a.id] });
@@ -203,7 +203,7 @@ describe('lists never skip an item (KS-8 ruling)', () => {
     for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(300);
     const evidence = pages.flatMap((p) => p.items ?? []).filter((i) => i.type === 'evidence');
     expect(evidence.map((e) => e.artifact_id)).toEqual([a.id, b.id, g.id]);
-    expect(evidence.some((e) => e.cut === true)).toBe(true);
+    expect(evidence.some((e) => e.cut === true)).toBe(false); // each fits a later page whole
     for (const e of evidence) for (const q of e.quotes as string[]) expect(q).toMatch(FENCED);
     expect(JSON.stringify(pages)).not.toMatch(/retry_cursor|"omitted"/);
   });

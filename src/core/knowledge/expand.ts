@@ -37,7 +37,7 @@ import { itemIsUploadDerived } from './provenance.js';
 import {
   aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, itemExpandId, outsideScopeNote, pageOf, readableById, shortenItem,
   sourceLabel, uniqueRefs, usableOnly,
-  type ReadEnv, type ReadOutput,
+  type ItemPage, type ReadEnv, type ReadOutput,
 } from './readCommon.js';
 import { notFound, type ScopeMode } from './scope.js';
 import { artifactChunks, canonicalArtifactId, servedChunkText, servedLine, servedTextState, type ServedTextState } from './texts.js';
@@ -93,34 +93,57 @@ const cursorAt = (cursor: string | undefined, key: string) => (cursor ? decodeCu
 /** Pages `b.items` within `budget` and assembles the output. */
 function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
   if (b.outside) b.notes.push(outsideScopeNote(b.outside));
-  // Opus finding 4 (§9): the first page shortens its header the way text reads do (`header_cut`), so a
-  // long claim never turns a small page into "nothing fits": room is kept for the envelope and the
-  // barest form of the first item.
-  const next = b.items[0];
+  const at = cursorAt(cursor, key);
+  const assemble = (page: ItemPage<Item>, header: Record<string, unknown>, notes: string[], first: boolean): ReadOutput => {
+    // A shortened item is a new object: its refs are those of the item it was cut from.
+    const src = b.items.slice(page.offset, page.offset + page.items.length);
+    const out: ReadOutput = {
+      data: { ...header, items: page.items },
+      results: uniqueRefs([...(first ? b.headerRefs : []), ...src.flatMap((i) => b.refs.get(i) ?? [])]),
+      uploadDerived: (first && b.upload) || src.some((i) => b.itemUpload.get(i) === true),
+      truncated: page.truncated,
+      restart: { cursor: page.startCursor, remaining: page.remaining },
+      more: page.more,
+      notes,
+      query,
+      scopeLabel: 'tree',
+    };
+    if (page.stalled) out.stalled = true;
+    if (page.cursor) out.cursor = page.cursor;
+    return out;
+  };
+  // Re-gate (Opus 1): page 0 serves the header first. An item that does not fit after it starts the next
+  // page (cursor offset 0, `pos` 1 = "header served") when a later page — the id, the items, the
+  // envelope — holds it whole; the header is shortened (`header_cut`) only when it cannot fit alone; an
+  // item is shortened only when it is too big for a whole page.
+  if (at.offset === 0 && at.pos === 0 && b.items.length) {
+    const envelope = envelopeTokens(budget, key, b.items.length, 1);
+    const laterCursor = encodeCursor({ key, offset: 0, pos: 1 });
+    const fitsLater = estimateTokens(JSON.stringify({
+      id: b.header.id, items: [b.items[0]], tokens: budget, truncated: true, more: b.items.length, cursor: laterCursor, content_trust: CONTENT_TRUST,
+    })) <= budget;
+    const headerOnly = (header: Record<string, unknown>, notes: string[]): ReadOutput =>
+      assemble({ items: [], truncated: true, more: b.items.length, cursor: laterCursor, offset: 0, startCursor: encodeCursor({ key, offset: 0 }), remaining: b.items.length }, header, notes, true);
+    const wholeHeader = estimateTokens(JSON.stringify({ ...b.header, items: [] })) + (b.notes.length ? estimateTokens(JSON.stringify(b.notes)) : 0) + envelope <= budget;
+    if (wholeHeader) {
+      const page = pageOf(b.items, b.header, budget, { key, notes: b.notes });
+      if (page.items.length && (page.items[0] as { cut?: unknown }).cut !== true) return assemble(page, b.header, b.notes, true);
+      if (fitsLater) return headerOnly(b.header, b.notes);
+    } else if (fitsLater) {
+      const short = textHeader(b, at, budget - envelope);
+      return headerOnly(short.header, short.notes);
+    }
+  }
+  // Later pages, and a first item too big for any page: the header shortened first, leaving room for the
+  // envelope and the barest form of that item (Opus finding 4, §9), then the item shortened to fit.
+  const next = b.items[at.offset];
   const nextId = next !== undefined ? itemExpandId(next) : undefined;
   const minItem = next === undefined ? 0 : estimateTokens(JSON.stringify({
     ...(typeof (next as Item).type === 'string' ? { type: (next as Item).type } : {}),
     ...(nextId ? { id: nextId, full: `expand ${nextId} for the full item` } : {}), cut: true,
   }));
-  const { header, first, notes } = textHeader(b, cursorAt(cursor, key), budget - envelopeTokens(budget, key, b.items.length, 0) - minItem);
-  const page = pageOf(b.items, header, budget, { key, notes, ...(cursor ? { cursor } : {}) });
-  // A shortened item is a new object: its refs are those of the item it was cut from.
-  const src = b.items.slice(page.offset, page.offset + page.items.length);
-  const results = uniqueRefs([...(first ? b.headerRefs : []), ...src.flatMap((i) => b.refs.get(i) ?? [])]);
-  const out: ReadOutput = {
-    data: { ...header, items: page.items },
-    results,
-    uploadDerived: (first && b.upload) || src.some((i) => b.itemUpload.get(i) === true),
-    truncated: page.truncated,
-    restart: { cursor: page.startCursor, remaining: page.remaining },
-    more: page.more,
-    notes,
-    query,
-    scopeLabel: 'tree',
-  };
-  if (page.stalled) out.stalled = true;
-  if (page.cursor) out.cursor = page.cursor;
-  return out;
+  const { header, first, notes } = textHeader(b, at, budget - envelopeTokens(budget, key, b.items.length, 0) - minItem);
+  return assemble(pageOf(b.items, header, budget, { key, notes, ...(cursor ? { cursor } : {}) }), header, notes, first);
 }
 
 /**
