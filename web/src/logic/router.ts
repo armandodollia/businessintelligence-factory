@@ -12,6 +12,7 @@ export const WORKSPACE_PAGES = [
   { page: 'review', label: 'Review queue' },
   { page: 'decisions', label: 'Decision log' },
   { page: 'schedule', label: 'Schedule' },
+  { page: 'usage', label: 'Usage & prompts' }, // learning loop WP-B
 ] as const;
 
 export type WorkspacePage = (typeof WORKSPACE_PAGES)[number]['page'];

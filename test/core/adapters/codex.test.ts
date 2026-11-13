@@ -98,7 +98,7 @@ describe('CodexAdapter', () => {
     });
     expect(events.filter((e) => e.t === 'tool_call')).toHaveLength(1);
     expect(events).toContainEqual({ t: 'tool_result', name: 'save_finding', ok: true });
-    expect(events).toContainEqual({ t: 'usage', inputTokens: 58852, outputTokens: 93 });
+    expect(events).toContainEqual({ t: 'usage', inputTokens: 58852, outputTokens: 93, cacheReadTokens: 51968, cacheWriteTokens: 0 });
     expect(events.at(-1)).toEqual({ t: 'done', exitCode: 0 });
   });
 

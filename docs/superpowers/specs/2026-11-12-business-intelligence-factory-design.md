@@ -50,7 +50,7 @@ A local, agent-driven strategy tool for senior business leaders. These users see
 - Browser access via a **separate, persistent research browser profile** — never the user's everyday profile. Backends (user's choice): a browser MCP plugin (e.g. Chrome DevTools / Playwright MCP with a dedicated `user-data-dir`; Claude-in-Chrome where the worker is Claude Code) or the T3 Code browser. Must be configurable per CLI.
 - Agents run as headless CLI subprocesses (`claude -p --output-format stream-json`, `codex exec --json`, `opencode run`); each CLI differs in event format and MCP configuration.
 - Concurrent browser use is limited (shared profile) — harness must ration tabs/sessions.
-- **No usage/cost caps** (user decision). The harness still detects CLI rate-limit/usage-window errors and retries with back-off so runs don't fail.
+- **No usage/cost caps by default** (user decision). Optional per-workspace / per-pipeline token and cost caps can be configured (`budgets`, learning loop WP-B; §12). The harness always detects CLI rate-limit/usage-window errors and retries with back-off so runs don't fail.
 
 ## 4. Approaches considered
 
@@ -96,6 +96,8 @@ One adapter per CLI implementing:
 - report token/cost usage where the CLI exposes it
 
 Start with Claude Code and Codex; OpenCode third. Every raw event stream is persisted (`runs/<id>/events.jsonl`) regardless of what the agent logs.
+
+**Usage, cost and timing (learning loop WP-B).** Every `usage` event is stored in `agent_usage` (run, role, provider/model, prompt version, attempt, uncached input / output / cache-read / cache-write tokens, `cost_usd` computed from the dated, editable price table `src/core/harness/pricing.json` with its `price_version`, and the CLI's own `cli_reported_cost_usd`; effective cost = computed, else CLI-reported). Agent runs record `attempts`, `failure_reason`, `round` and `task_type`; every attempt (first try and each rate-limit retry, with its back-off) is a row in `agent_run_attempts`; tasks and research runs record `failure_reason`. The full task prompt is saved as `runs/<id>/prompt.md` (`prompt.attemptN.md` for a retry), and every prompt version hash resolves to its text in `prompt_versions`. **Budgets** (optional): before starting a run past a workspace or pipeline cap, the supervisor raises a `user_request` to extend it (approve = one more cap) and waits; a denial refuses runs of that scope until the cap is raised in config.
 
 ### 6.2 Harness MCP server (tools every agent gets)
 - `log_decision({ what, why, alternatives[], signals_positive[], signals_negative[], confidence })`
@@ -219,6 +221,8 @@ Criteria agents assign (each with reasoning + evidence links):
 
 - No model training in v1.
 - A "calibration" job (manual trigger) summarizes rating disagreements per role/criterion/task type and proposes prompt changes (few-shot examples from corrected items, rubric clarifications). The user approves changes; prompts are versioned, and every run records the prompt version it used so improvements can be measured.
+- Calibration appendices are versioned (WP-B): every approved patch, import and revert is a row in `calibration_versions` (per business tree root and role, with actor and the approval Decision); the live text stays in `calibration/<role>.md`, and any earlier version can be restored (logged as a `revert_calibration` Decision).
+- Per-prompt-version metrics (WP-B): rating agreement, mean delta, review pass rate, first-round pass rate, rounds and cost grouped by the prompt version of the run that produced the work, ordered by first use (trend).
 - Priority weights can be refit from the user's ratings (simple regression), proposed to the user, not auto-applied.
 - Export: decision log + ratings as JSONL for later model training.
 - Feedback provenance (learning-loop parity WP-A, migration 14): every human input records who
@@ -243,7 +247,8 @@ Criteria agents assign (each with reasoning + evidence links):
 - **models**: allowed models per provider
 - **roles**: default model for orchestrator, interviewer, each worker task type, reviewer, synthesizer
 - **loop**: `max_rounds` (3), `pass_threshold` (8), per-task-type overrides
-- **limits**: max parallel workers, max concurrent browser runs, max tasks per run (no cost/usage caps; rate-limit back-off only)
+- **limits**: max parallel workers, max concurrent browser runs, max tasks per run
+- **budgets** (optional): `workspace` / `pipeline` caps (`maxTokens`, `maxCostUsd`); absent = no caps
 - **browser** backend (MCP plugin with dedicated profile | T3 Code browser), identity/disposable-email provider
 - **action policy** (§6.6)
 - **persona weight** in priority (default 0)
@@ -252,7 +257,7 @@ Editable in a simple settings page and as a file.
 
 ## 13. Web app (v1, minimal)
 
-Pages: **Business map** (workspace tree, mapping proposals, roll-up and cross-cutting issues) · **Workspaces** · **Interview** (+ optional uploads) · **Audience & Personas** · **Research** (live runs: orchestrator plan, task tree, review rounds/scores, pending user actions and approvals) · **Findings & Evidence** (screenshot flows, archived articles, documents) · **Strategy** (ranked recommendations with per-criterion rating) · **Review queue** · **Decision log** · **Schedule** · **Settings**.
+Pages: **Business map** (workspace tree, mapping proposals, roll-up and cross-cutting issues) · **Workspaces** · **Interview** (+ optional uploads) · **Audience & Personas** · **Research** (live runs: orchestrator plan, task tree, review rounds/scores, pending user actions and approvals) · **Findings & Evidence** (screenshot flows, archived articles, documents) · **Strategy** (ranked recommendations with per-criterion rating) · **Review queue** · **Decision log** · **Schedule** · **Usage & prompts** (costs and budgets per role / model / prompt version / task, prompt-version trend with prompt text, calibration history with revert, agent runs with a paged event viewer) · **Settings**.
 
 ## 14. Left to the builder
 

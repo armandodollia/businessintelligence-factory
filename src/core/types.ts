@@ -162,6 +162,8 @@ export interface Task {
   /** Issues of the last review, handed to the revise step (also after a restart). */
   reviewIssues?: Array<{ id: string; class: 'blocking' | 'substantive' | 'nit' | 'scope_expansion'; description: string; evidence?: string[] }>;
   createdAt: string;
+  /** Why the task ended `failed` (migration 15). */
+  failureReason?: string;
 }
 
 export interface ResearchRun {
@@ -175,6 +177,8 @@ export interface ResearchRun {
   scheduleId?: string;
   /** Pipeline this run belongs to (migration 11). */
   pipelineId?: string;
+  /** Why the run ended `failed` (migration 15). */
+  failureReason?: string;
 }
 
 /**
@@ -214,6 +218,14 @@ export interface AgentRun {
   pid?: number;
   /** `ps -o lstart=` of `pid` at spawn, used to verify the process before killing it after a crash (migration 7). */
   pidStartedAt?: string;
+  /** Attempts made (> 1 after rate-limit retries; migration 15). */
+  attempts?: number;
+  /** Why the run ended `failed`: supervisor reason or last error event (migration 15). */
+  failureReason?: string;
+  /** Review round (orchestrator: orchestrator round) the run was started for (migration 15). */
+  round?: number;
+  /** Task type of the run's task, when it has one (migration 15). */
+  taskType?: TaskType;
 }
 
 export interface Decision {
@@ -450,4 +462,79 @@ export interface Identity {
 export interface Profile {
   workspaceId: string;
   data: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// learning loop WP-B (migration 15): usage, cost, timing, prompt store, versioned calibration
+
+/**
+ * Token usage of one `usage` RunEvent of an agent run. Token columns are disjoint:
+ * `inputTokens` = uncached input, plus cache reads and cache writes, plus output.
+ * `costUsd` is computed from the dated price table (`price_version`); `cliReportedCostUsd` is what
+ * the CLI itself reported, when it does (Claude Code, OpenCode). Effective cost = `costUsd`, else
+ * `cliReportedCostUsd`.
+ */
+export interface AgentUsage {
+  id: string;
+  workspaceId: string;
+  runId: string;
+  taskId?: string;
+  researchRunId?: string;
+  pipelineId?: string;
+  role: Role;
+  provider: ModelRef['provider'];
+  model: string;
+  promptVersion?: string;
+  /** Supervisor attempt (rate-limit retry) the usage was reported in. */
+  attempt: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd?: number;
+  cliReportedCostUsd?: number;
+  /** `version` of the price table used; absent when the model has no price. */
+  priceVersion?: string;
+  createdAt: string;
+}
+
+/** One supervisor attempt of an agent run (first try and every rate-limit retry). */
+export interface AgentRunAttempt {
+  id: string;
+  workspaceId: string;
+  runId: string;
+  attempt: number;
+  startedAt: string;
+  endedAt: string;
+  exitCode: number;
+  rateLimited: boolean;
+  failureReason?: string;
+  /** Back-off waited after this attempt before the next one. */
+  backoffMs?: number;
+}
+
+/** Full text of a prompt version (`hash` = the 8-hex `prompt_version` recorded on runs/decisions). */
+export interface PromptVersionRecord {
+  hash: string;
+  role: string;
+  text: string;
+  createdAt: string;
+}
+
+/**
+ * One version of a business tree's calibration appendix for a role. The latest row per
+ * (rootWorkspaceId, role) is the current one (also written to `calibration/<role>.md`).
+ * `source`: `apply` (approved patch), `revert` (back to `revertedFrom`), `import` (file found
+ * without history, e.g. written before migration 15).
+ */
+export interface CalibrationVersion {
+  id: string;
+  rootWorkspaceId: string;
+  role: Role;
+  text: string;
+  source: 'apply' | 'revert' | 'import';
+  revertedFrom?: string;
+  decisionId?: string;
+  actor: string;
+  createdAt: string;
 }

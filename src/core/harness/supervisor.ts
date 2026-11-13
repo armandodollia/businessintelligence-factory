@@ -8,7 +8,11 @@ import type { BifConfig } from '../config/schema.js';
 import { AbortError, type EventBus } from '../events.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
-import type { AgentRun, Role } from '../types.js';
+import type { AgentRun, AgentRunAttempt, Role, TaskType } from '../types.js';
+import { recordUsage, resolveRunScope } from '../metrics/usage.js';
+import { recordRunPrompt } from '../prompts/store.js';
+import { usageRepos } from '../store/usageRepos.js';
+import { enforceBudget } from './budget.js';
 import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
 import { browserServersFor, effectiveMaxBrowserRuns, SharedBrowser } from './browser.js';
@@ -56,7 +60,15 @@ export type RunOptions = {
    * while queued on a semaphore), the run never starts and `run()` rejects with `AbortError`.
    */
   signal?: AbortSignal;
+  /**
+   * Learning loop WP-B: what the run is for, recorded on the AgentRun (`round`, `taskType`) and used
+   * to attribute usage to a research run / pipeline (`researchRunId`, else the task's research run).
+   */
+  meta?: RunMeta;
 };
+
+/** Learning loop WP-B: run metadata (see `RunOptions.meta`). */
+export type RunMeta = { round?: number; taskType?: TaskType; researchRunId?: string };
 
 export type RunOutcome = {
   agentRunId: string;
@@ -131,6 +143,9 @@ export class Supervisor {
     if (opts.needsBrowser && !this.browsers) {
       throw new Error('this run needs a browser but limits.maxBrowserRuns is 0');
     }
+    // Learning loop WP-B: no new run past a configured budget cap (waits for the user to extend).
+    const { pipelineId } = this.scopeOf(opts);
+    await enforceBudget(this.deps, pipelineId ? { workspaceId: opts.ctx.workspaceId, pipelineId } : { workspaceId: opts.ctx.workspaceId }, opts.signal);
     const releases: Array<() => void> = [];
     try {
       if (LIMITED_ROLES.has(opts.ctx.role)) releases.push(await this.workers.acquire(opts.signal));
@@ -175,7 +190,9 @@ export class Supervisor {
       }
       tokens.revoke(token);
       try {
-        store.agentRuns.update(ctx.agentRunId, { status: 'failed', exitCode: 1, endedAt: new Date().toISOString() });
+        store.agentRuns.update(ctx.agentRunId, {
+          status: 'failed', exitCode: 1, endedAt: new Date().toISOString(), attempts: Math.max(attempt, 1), failureReason: message,
+        });
       } catch {
         // store unavailable; the bus event below still reports the failure
       }
@@ -198,10 +215,28 @@ export class Supervisor {
     mkdirSync(cwd, { recursive: true });
     const eventsPath = join(runDir, 'events.jsonl');
     writeFileSync(eventsPath, '');
+    // Learning loop WP-B: run metadata, prompt store, prompt.md, usage attribution.
+    const meta = opts.meta ?? {};
+    const runPatch: Partial<AgentRun> = {};
+    if (meta.round !== undefined) runPatch.round = meta.round;
+    if (meta.taskType !== undefined) runPatch.taskType = meta.taskType;
+    if (Object.keys(runPatch).length) store.agentRuns.update(ctx.agentRunId, runPatch);
+    recordRunPrompt(store, ctx.role, ctx.promptVersion, opts.systemPrompt);
+    writeFileSync(join(runDir, 'prompt.md'), promptMarkdown(ctx, opts.systemPrompt, opts.prompt, 1));
+    const scope = this.scopeOf(opts);
+    const usageRun = { ...ctx, ...scope };
+    let attempt = 0;
 
     const record = (e: RunEvent) => {
       all.push(e);
       appendFileSync(eventsPath, JSON.stringify(e) + '\n');
+      if (e.t === 'usage') {
+        try {
+          recordUsage(store, usageRun, Math.max(attempt, 1), e);
+        } catch (err) {
+          console.warn(`[bif] could not record usage of run ${ctx.agentRunId}: ${(err as Error).message}`);
+        }
+      }
       const bus: Parameters<EventBus['emit']>[0] = {
         type: 'run_event',
         workspaceId: ctx.workspaceId,
@@ -213,35 +248,71 @@ export class Supervisor {
     };
     this.emitStatus(ctx, 'running');
 
-    let attempt = 0;
     let result: AttemptResult;
     for (;;) {
       attempt++;
       setAttempt(attempt);
+      const attemptStarted = new Date().toISOString();
+      const eventsBefore = all.length;
       // A rate-limit retry restarts the agent on the same run: tell it what the run already did.
       const prior = attempt > 1 ? priorAttemptSection(store, ctx.agentRunId) : '';
       const prompt = prior ? `${opts.prompt}\n\n${prior}` : opts.prompt;
+      if (attempt > 1) writeFileSync(join(runDir, `prompt.attempt${attempt}.md`), promptMarkdown(ctx, opts.systemPrompt, prompt, attempt));
       result = opts.fake
         ? await this.attemptFake(ctx, opts, record)
         : await this.attemptCli(ctx, token, cwd, runDir, { ...opts, prompt }, record);
+      const attemptRow: AgentRunAttempt = {
+        id: newId('att'), workspaceId: ctx.workspaceId, runId: ctx.agentRunId, attempt, startedAt: attemptStarted,
+        endedAt: new Date().toISOString(), exitCode: result.exitCode, rateLimited: result.rateLimited,
+      };
+      const attemptFailure = result.exitCode === 0 ? undefined : failureOf(result, all.slice(eventsBefore));
+      if (attemptFailure !== undefined) attemptRow.failureReason = attemptFailure;
+      const recordAttempt = (backoffMs?: number) => {
+        if (backoffMs !== undefined) attemptRow.backoffMs = backoffMs;
+        try {
+          usageRepos(store).agentRunAttempts.insert(attemptRow);
+        } catch (err) {
+          console.warn(`[bif] could not record attempt of run ${ctx.agentRunId}: ${(err as Error).message}`);
+        }
+      };
       // Runs killed by the watchdog or an abort (result.reason set) are never retried.
-      if (!result.rateLimited || result.exitCode === 0 || result.reason || opts.signal?.aborted) break;
+      if (!result.rateLimited || result.exitCode === 0 || result.reason || opts.signal?.aborted) {
+        recordAttempt();
+        break;
+      }
       if (attempt >= this.backoff.maxAttempts) {
         result.reason = `rate limited; gave up after ${attempt} attempts`;
+        recordAttempt();
         break;
       }
       const delay = Math.min(this.backoff.baseMs * 2 ** (attempt - 1), this.backoff.maxMs);
+      recordAttempt(delay);
       await sleep(delay, opts.signal);
       if (opts.signal?.aborted) break;
     }
 
     const status: AgentRun['status'] = result.exitCode === 0 ? 'done' : 'failed';
     tokens.revoke(token);
-    store.agentRuns.update(ctx.agentRunId, { status, exitCode: result.exitCode, endedAt: new Date().toISOString() });
+    const endPatch: Partial<AgentRun> = { status, exitCode: result.exitCode, endedAt: new Date().toISOString(), attempts: attempt };
+    if (status === 'failed') endPatch.failureReason = failureOf(result, all);
+    store.agentRuns.update(ctx.agentRunId, endPatch);
     this.emitStatus(ctx, status, result.exitCode, result.reason);
     const outcome: RunOutcome = { agentRunId: ctx.agentRunId, exitCode: result.exitCode, events: all, status, attempts: attempt };
     if (result.reason !== undefined) outcome.reason = result.reason;
     return outcome;
+  }
+
+  /** Learning loop WP-B: research run / pipeline a run counts against (usage rows, budgets). */
+  private scopeOf(opts: RunOptions): { researchRunId?: string; pipelineId?: string } {
+    const c = opts.ctx;
+    const input: Parameters<typeof resolveRunScope>[1] = { workspaceId: c.workspaceId, role: c.role };
+    if (c.taskId !== undefined) input.taskId = c.taskId;
+    if (opts.meta?.researchRunId !== undefined) input.researchRunId = opts.meta.researchRunId;
+    try {
+      return resolveRunScope(this.deps.store, input);
+    } catch {
+      return {};
+    }
   }
 
   private emitStatus(ctx: RunContext, status: AgentRun['status'], exitCode?: number, reason?: string) {
@@ -502,6 +573,31 @@ export class Supervisor {
       });
     });
   }
+}
+
+// --- learning loop WP-B helpers ------------------------------------------------------------------
+
+/** Why an attempt / run failed: the supervisor's reason, else the last error event, else the exit code. */
+function failureOf(result: AttemptResult, events: RunEvent[]): string {
+  if (result.reason) return result.reason;
+  const lastError = [...events].reverse().find((e) => e.t === 'error');
+  if (lastError?.t === 'error') return lastError.message.slice(0, 2000);
+  return `exit ${result.exitCode}`;
+}
+
+/** `prompt.md` of a run: the full system prompt and task prompt the agent was started with. */
+function promptMarkdown(ctx: RunContext, systemPrompt: string, prompt: string, attempt: number): string {
+  return [
+    `<!-- run ${ctx.agentRunId} · role ${ctx.role} · ${ctx.model.provider}/${ctx.model.model} · prompt version ${ctx.promptVersion} · attempt ${attempt} -->`,
+    '# System prompt',
+    '',
+    systemPrompt,
+    '',
+    '# Task prompt',
+    '',
+    prompt,
+    '',
+  ].join('\n');
 }
 
 const isWin = process.platform === 'win32';

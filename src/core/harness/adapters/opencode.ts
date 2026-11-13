@@ -114,6 +114,10 @@ export class OpenCodeAdapter implements CliAdapter {
         if (output !== undefined) ev.outputTokens = output;
         const cost = num(part?.cost);
         if (cost !== undefined) ev.costUsd = cost;
+        const cacheRead = num(cache?.read);
+        if (cacheRead !== undefined) ev.cacheReadTokens = cacheRead;
+        const cacheWrite = num(cache?.write);
+        if (cacheWrite !== undefined) ev.cacheWriteTokens = cacheWrite;
         const out: RunEvent[] = [ev];
         if (part?.reason !== 'tool-calls' && !this.failed) out.push({ t: 'done', exitCode: 0 });
         return out;

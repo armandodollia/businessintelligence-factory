@@ -235,6 +235,7 @@ export const specs = {
       id: 'text', workspaceId: 'text', runId: 'text', phase: 'text', type: 'text', brief: 'text',
       subject: 'text', model: 'json', needsBrowser: 'bool', acceptanceCriteria: 'json', status: 'text',
       round: 'int', result: 'json', createdAt: 'text', step: 'text', submittedRound: 'int', reviewIssues: 'json',
+      failureReason: 'text',
     },
   } satisfies TableSpec<Task>,
   researchRuns: {
@@ -242,7 +243,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', phase: 'text', status: 'text', startedAt: 'text', endedAt: 'text', scheduleId: 'text',
-      pipelineId: 'text',
+      pipelineId: 'text', failureReason: 'text',
     },
   } satisfies TableSpec<ResearchRun>,
   agentRuns: {
@@ -251,7 +252,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', taskId: 'text', role: 'text', model: 'json', token: 'text',
       status: 'text', exitCode: 'int', startedAt: 'text', endedAt: 'text', promptVersion: 'text', pid: 'int',
-      pidStartedAt: 'text',
+      pidStartedAt: 'text', attempts: 'int', failureReason: 'text', round: 'int', taskType: 'text',
     },
   } satisfies TableSpec<AgentRun>,
   decisions: {

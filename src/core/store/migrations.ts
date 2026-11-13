@@ -449,4 +449,76 @@ export const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER feedback_events_no_delete BEFORE DELETE ON feedback_events
     BEGIN SELECT RAISE(ABORT, 'feedback_events is append-only'); END;
   `,
+  // 15: learning loop WP-B — token/cost usage per run (agent_usage, priced from the dated
+  // src/core/harness/pricing.json), run timing and failures (agent_runs attempts / failure_reason /
+  // round / task_type, agent_run_attempts; failure_reason on research_runs and tasks), the prompt
+  // store (every recorded prompt_version hash resolves to its text) and versioned calibration
+  // (calibration_versions: every approved / reverted appendix per business tree root and role).
+  `
+  CREATE TABLE agent_usage (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    task_id TEXT,
+    research_run_id TEXT,
+    pipeline_id TEXT,
+    role TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT,
+    attempt INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL,
+    cli_reported_cost_usd REAL,
+    price_version TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX agent_usage_ws ON agent_usage (workspace_id);
+  CREATE INDEX agent_usage_run ON agent_usage (run_id);
+  CREATE INDEX agent_usage_pipeline ON agent_usage (pipeline_id);
+
+  ALTER TABLE agent_runs ADD COLUMN attempts INTEGER;
+  ALTER TABLE agent_runs ADD COLUMN failure_reason TEXT;
+  ALTER TABLE agent_runs ADD COLUMN round INTEGER;
+  ALTER TABLE agent_runs ADD COLUMN task_type TEXT;
+  ALTER TABLE research_runs ADD COLUMN failure_reason TEXT;
+  ALTER TABLE tasks ADD COLUMN failure_reason TEXT;
+
+  CREATE TABLE agent_run_attempts (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    exit_code INTEGER NOT NULL,
+    rate_limited INTEGER NOT NULL,
+    failure_reason TEXT,
+    backoff_ms INTEGER
+  );
+  CREATE INDEX agent_run_attempts_run ON agent_run_attempts (run_id);
+
+  CREATE TABLE prompt_versions (
+    hash TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE calibration_versions (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,
+    reverted_from TEXT,
+    decision_id TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX calibration_versions_root_role ON calibration_versions (root_workspace_id, role);
+  `,
 ];

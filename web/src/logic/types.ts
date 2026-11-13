@@ -286,3 +286,102 @@ export interface HypothesisCorrection {
   confidence?: number;
   reason?: string;
 }
+
+// ---------------------------------------------------------------------------
+// learning loop WP-B: usage, costs, agent runs, prompt versions, calibration history
+
+export type {
+  AgentRunAttempt,
+  AgentUsage,
+  CalibrationVersion,
+  PromptVersionRecord,
+} from '../../../src/core/types.js';
+export type { RunEvent } from '../../../src/core/harness/adapter.js';
+
+/** `UsageTotals` (src/core/metrics/usage.ts). `costUsd` = computed cost, else CLI-reported. */
+export interface UsageTotals {
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  cliReportedCostUsd: number;
+  unpriced: number;
+}
+export type CostGroup = UsageTotals & { key: string; label: string };
+
+/** `BudgetStatus` (src/core/harness/budget.ts). */
+export interface BudgetStatusView {
+  kind: 'workspace' | 'pipeline';
+  id: string;
+  cap: { maxTokens?: number; maxCostUsd?: number };
+  extensions: number;
+  effectiveCap: { maxTokens?: number; maxCostUsd?: number };
+  spent: { tokens: number; costUsd: number };
+  exceeded: boolean;
+  denied: boolean;
+  pendingRequestId?: string;
+}
+
+/** `GET /api/costs[?workspaceId=]`. */
+export interface CostReport {
+  pricing: { version: string; effectiveDate: string; currency: string };
+  total: UsageTotals;
+  byWorkspace: CostGroup[];
+  byTask: CostGroup[];
+  byRole: CostGroup[];
+  byModel: CostGroup[];
+  byPromptVersion: CostGroup[];
+  budgets?: BudgetStatusView[];
+}
+
+/** An agent run as listed by `GET /api/workspaces/:id/agent-runs` (no token). */
+export type AgentRunView = Omit<import('../../../src/core/types.js').AgentRun, 'token'> & { usage: UsageTotals };
+
+/** `GET /api/runs/:id`. */
+export interface AgentRunDetail {
+  run: Omit<import('../../../src/core/types.js').AgentRun, 'token'>;
+  attempts: import('../../../src/core/types.js').AgentRunAttempt[];
+  usage: UsageTotals;
+  usageRows: import('../../../src/core/types.js').AgentUsage[];
+}
+
+/** `GET /api/runs/:id/events`. */
+export interface RunEventsPage {
+  runId: string;
+  total: number;
+  offset: number;
+  limit: number;
+  events: import('../../../src/core/harness/adapter.js').RunEvent[];
+}
+
+/** `PromptVersionMetrics` (src/core/metrics/promptMetrics.ts). */
+export interface PromptVersionMetrics {
+  role: PatchRole;
+  promptVersion: string;
+  firstSeen: string;
+  lastSeen: string;
+  runs: number;
+  failedRuns: number;
+  ratings: number;
+  agreeRate: number | null;
+  meanDelta: number | null;
+  tasks: number;
+  verified: number;
+  unverified: number;
+  failed: number;
+  passRate: number | null;
+  firstRoundPassRate: number | null;
+  meanRounds: number | null;
+  costUsd: number;
+  totalTokens: number;
+}
+
+/** `POST .../calibration/versions/:id/revert`. */
+export interface RevertedCalibration {
+  path: string;
+  version: import('../../../src/core/types.js').CalibrationVersion;
+  decisionId: string;
+}

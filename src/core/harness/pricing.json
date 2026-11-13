@@ -1,0 +1,31 @@
+{
+  "_note": "EDITABLE price table used to compute agent run cost (agent_usage.cost_usd). Prices are USD per 1M tokens: input = uncached input, cacheRead = cache hits, cacheWrite = cache creation (5-minute TTL). Change any value freely; when you do, bump `version` and `effectiveDate` so stored rows show which prices they were computed with (rows keep their price_version; old rows are not recomputed). Keys: `<provider>/<model>` or a bare model name; `aliases` map other model ids to a key. A model without a price gets no computed cost (the CLI-reported cost is used when the CLI reports one).",
+  "version": "2026-11-03",
+  "effectiveDate": "2026-11-03",
+  "currency": "USD",
+  "models": {
+    "opus": {
+      "input": 4.0, "output": 20.0, "cacheRead": 0.2, "cacheWrite": 5.0,
+      "source": "Anthropic list price for Claude Opus 5.5 (claude-opus-5-5), the model the Claude Code `opus` alias resolves to; cacheWrite = 1.25 x input"
+    },
+    "sonnet": {
+      "input": 2.0, "output": 10.0, "cacheRead": 0.1, "cacheWrite": 2.5,
+      "source": "Anthropic list price for Claude Sonnet 5.5 (claude-sonnet-5-5), the `sonnet` alias; cacheWrite = 1.25 x input"
+    },
+    "haiku": {
+      "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125,
+      "source": "Anthropic list price for Claude Haiku 5.5 (claude-haiku-5-5), the `haiku` alias, prompts up to 100K tokens; cache prices derived (0.1 x / 1.25 x input)"
+    },
+    "codex/gpt-6.1-sol": {
+      "input": 2.5, "output": 15.0, "cacheRead": 0.25, "cacheWrite": 2.5,
+      "estimate": true,
+      "source": "UNVERIFIED PLACEHOLDER: no published price was available when this table was dated. Replace with the provider's list price."
+    }
+  },
+  "aliases": {
+    "claude-opus-5-5": "opus",
+    "claude-sonnet-5-5": "sonnet",
+    "claude-haiku-5-5": "haiku",
+    "gpt-6.1-sol": "codex/gpt-6.1-sol"
+  }
+}

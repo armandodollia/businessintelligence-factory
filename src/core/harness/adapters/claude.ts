@@ -122,6 +122,10 @@ export class ClaudeAdapter implements CliAdapter {
       if (output !== undefined) ev.outputTokens = output;
       const cost = num(d.total_cost_usd);
       if (cost !== undefined) ev.costUsd = cost;
+      const cacheRead = num(u.cache_read_input_tokens);
+      if (cacheRead !== undefined) ev.cacheReadTokens = cacheRead;
+      const cacheWrite = num(u.cache_creation_input_tokens);
+      if (cacheWrite !== undefined) ev.cacheWriteTokens = cacheWrite;
       out.push(ev);
     }
     const isError = d.is_error === true || (typeof d.subtype === 'string' && d.subtype !== 'success');

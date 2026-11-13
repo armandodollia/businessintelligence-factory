@@ -98,6 +98,25 @@ export const PLAYWRIGHT_SHARED_BROWSER: z.output<typeof sharedBrowserSchema> = {
   path: '/mcp',
 };
 
+// --- learning loop WP-B: budgets -------------------------------------------------------------
+/** A token and/or cost cap (either may be omitted). Tokens = input + output + cache read + cache write. */
+export const budgetCapSchema = z.strictObject({
+  maxTokens: z.number().int().min(1).optional(),
+  maxCostUsd: z.number().positive().optional(),
+});
+/**
+ * Optional spend caps (spec §5 "budgets"). `workspace`: total spend of each workspace;
+ * `pipeline`: spend of each research pipeline. Past a cap the supervisor starts no new run and asks
+ * the user (a `user_request`) to extend it by one more cap; denying stops new runs for that scope
+ * until the cap is raised in config.
+ */
+export const budgetsSchema = z.strictObject({
+  workspace: budgetCapSchema.optional(),
+  pipeline: budgetCapSchema.optional(),
+});
+export type BudgetCap = z.infer<typeof budgetCapSchema>;
+// --- end WP-B budgets --------------------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -158,6 +177,8 @@ export const bifConfigSchema = z
     dataDir: z.string().min(1),
     /** Learning loop WP-A: the acting user recorded on every human input (default `local-user`). */
     user: z.strictObject({ id: z.string().trim().min(1) }).optional(),
+    /** Learning loop WP-B: optional token/cost caps. */
+    budgets: budgetsSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.

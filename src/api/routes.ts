@@ -43,6 +43,7 @@ import {
 import { actorOf } from '../core/feedback/events.js';
 import { mountFeedbackRoutes } from './feedbackRoutes.js';
 import { sseResponse } from './sse.js';
+import { mountUsageRoutes } from './usageRoutes.js';
 
 export type AppDeps = {
   store: Store;
@@ -644,6 +645,9 @@ export function createApp(deps: AppDeps): Hono {
 
   // --- learning loop WP-A: feedback log, hypothesis corrections, profile edits ------------------
   mountFeedbackRoutes(app, { store, config });
+
+  // --- learning loop WP-B: costs, runs, prompts, prompt-version metrics, calibration history ---
+  mountUsageRoutes(app, { store, config, events });
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

@@ -13,6 +13,8 @@ import type { Store } from '../../src/core/store/db.js';
 import { newId } from '../../src/core/store/repos.js';
 import type { Persona, Recommendation } from '../../src/core/types.js';
 import { researchSetup } from './helpers/research.js';
+import { promptVersion } from '../../src/core/prompts/index.js';
+import { getPromptText } from '../../src/core/prompts/store.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -233,6 +235,10 @@ describe('persona panel', () => {
     // Exactly one persona_feedback decision per feedback (written by the dispatcher only).
     const pf = t.store.decisions.list({ workspaceId: 'ws_a' }).filter((d) => d.kind === 'persona_feedback');
     expect(pf).toHaveLength(4);
+    // WP-B prompt store: each persona run's version resolves to the exact hashed text (system + template).
+    for (const run of t.store.agentRuns.list({ role: 'persona' })) {
+      expect(promptVersion(getPromptText(t.store, run.promptVersion!)!.text)).toBe(run.promptVersion);
+    }
 
     // Re-running replaces each persona's feedback instead of appending.
     await runPersonaPanel('ws_a', t.deps);

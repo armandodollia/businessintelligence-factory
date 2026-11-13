@@ -13,6 +13,7 @@ import { ReviewQueue } from './ReviewQueue.js';
 import { Schedule } from './Schedule.js';
 import { Settings } from './Settings.js';
 import { Strategy } from './Strategy.js';
+import { Usage } from './Usage.js';
 import { Workspaces } from './Workspaces.js';
 
 export function App() {
@@ -89,5 +90,7 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <DecisionLog wsId={wsId} />;
     case 'schedule':
       return <Schedule wsId={wsId} />;
+    case 'usage':
+      return <Usage wsId={wsId} />;
   }
 }

@@ -61,6 +61,11 @@ describe('ClaudeAdapter', () => {
     expect(events).toContainEqual({ t: 'tool_result', name: 'save_finding', ok: true });
     const usage = events.find((e) => e.t === 'usage');
     expect(usage).toMatchObject({ t: 'usage', outputTokens: 253 });
+    // WP-B: cache tokens split out (inputTokens stays the total input, cache included)
+    expect(usage).toEqual({
+      t: 'usage', inputTokens: 6 + 38856 + 76960, outputTokens: 253, cacheReadTokens: 76960, cacheWriteTokens: 38856,
+      costUsd: 0.008798899999999998,
+    });
     expect(events.at(-1)).toEqual({ t: 'done', exitCode: 0 });
     // the allowed rate_limit_event in the fixture must not be reported as an error
     expect(events.some((e) => e.t === 'error')).toBe(false);
