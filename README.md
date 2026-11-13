@@ -29,6 +29,9 @@ the agent CLIs call into, and a small React web app. Design spec:
      `"budgets": { "workspace": { "maxCostUsd": 50 }, "pipeline": { "maxTokens": 20000000 } }`. Past a
      cap no new agent run starts; a "Waiting on you" request asks to extend it by one more cap (deny
      to stop; raising the cap in config lifts a denial). Without `budgets` there are no caps.
+   - optional `escalation` (`enabled`, `model` — default `roles.orchestrator`, `maxQuestions` ≤ 3,
+     `maxPerTask`, default 2) and `telemetry` (`busEventRetentionDays`, default 30, 0 = keep;
+     `otlp: { enabled, endpoint, headers, serviceName }`, off by default).
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -177,6 +180,20 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.
+- **Escalations.** When a task ends *unverified* or *failed*, an `escalation` agent may ask you up to
+  three multiple-choice questions about it (one option recommended, preselected) in the "Waiting on
+  you" banner. Once every question of that escalation is answered (not all dismissed), the task runs
+  again through the review loop, with a fresh round budget, your answers and a summary of what its
+  previous attempt did and why it failed review. At most `escalation.maxPerTask` escalations per task.
+- **Policy history.** Every approval request, grant and denial and every blocked attempt (a tool call
+  outside the role's scope, or an approval request for a *never* action) is recorded. Worker,
+  synthesizer and orchestrator prompts list that role's last five denials in the same business tree,
+  so agents stop retrying refused actions. `GET /api/workspaces/:id/policy-events`.
+- **Event history.** Bus events that used to exist only on the live SSE stream (tool-call validation
+  errors, run and task status changes, request traffic) are kept in `bus_events` for
+  `telemetry.busEventRetentionDays` (`GET /api/workspaces/:id/bus-events`). With
+  `telemetry.otlp.enabled` they are also sent as OTLP/HTTP JSON logs to `<endpoint>/v1/logs`
+  (built-in `fetch`, no SDK dependency; ids, types and statuses only, no agent or user text).
 - **Personas are simulated.** Persona profiles are researched with evidence, compiled into persona
   prompts, and every recommendation is put to each persona. Their feedback is labelled *simulated*,
   shown in its own column, and has weight 0 in priority unless you change `scoring.personaWeight`.

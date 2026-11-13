@@ -18,6 +18,18 @@ describe('boot', () => {
       expect(mcp.status).toBe(401);
       expect(Object.keys(b.runtime.research.phaseRunners ?? {}).sort()).toEqual(['persona_panel', 'scoring']);
       expect(b.runtime.dataDir).toBe(join(dir, 'data'));
+      // WP-D: bus events are persisted and the escalation tool is wired.
+      b.runtime.events.emit({ type: 'task_status', workspaceId: 'ws_boot', taskId: 'tsk_none', status: 'verified' });
+      const persisted = await fetch(`http://127.0.0.1:${port}/api/workspaces/ws_boot/bus-events`);
+      expect(persisted.status).toBe(404); // unknown workspace; the row itself is checked below
+      const rows = b.runtime.store.db.prepare("SELECT type FROM bus_events WHERE workspace_id = 'ws_boot'").all();
+      expect(rows).toEqual([{ type: 'task_status' }]);
+      const r = await b.runtime.handle(
+        { agentRunId: 'arun_x', workspaceId: 'ws_boot', role: 'escalation', model: { provider: 'claude', model: 'opus' }, promptVersion: 'v' },
+        'submit_escalation',
+        { questions: [] },
+      );
+      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/needs a task/) });
     } finally {
       await b.close();
     }

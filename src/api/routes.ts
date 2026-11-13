@@ -45,6 +45,7 @@ import { mountFeedbackRoutes } from './feedbackRoutes.js';
 import { mountOutcomeRoutes } from './learningRoutes.js';
 import { sseResponse } from './sse.js';
 import { mountUsageRoutes } from './usageRoutes.js';
+import { mountOversightRoutes } from './oversightRoutes.js'; // WP-D
 
 export type AppDeps = {
   store: Store;
@@ -652,6 +653,9 @@ export function createApp(deps: AppDeps): Hono {
 
   // --- learning loop WP-C: decision outcomes report -------------------------------------------
   mountOutcomeRoutes(app, { store }, workspace);
+
+  // --- WP-D: escalation answers, policy-event and bus-event history -----------------------------
+  mountOversightRoutes(app, { store, events });
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

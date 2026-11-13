@@ -274,7 +274,7 @@ export interface UserRequest {
   agentRunId: string;
   /** Absent when the requesting run has no task. */
   taskId?: string;
-  kind: 'register' | 'login' | 'captcha' | 'approval' | 'other';
+  kind: 'register' | 'login' | 'captcha' | 'approval' | 'other' | 'escalation';
   site?: string;
   details: string;
   status: 'pending' | 'resolved' | 'denied';
@@ -287,6 +287,23 @@ export interface UserRequest {
   resolvedAt?: string;
   /** Who answered (`config.user.id`). The column defaults to `local-user`. */
   actor?: string;
+  // WP-D (migration 17): structured escalation question (kind `escalation`); `details` is the question.
+  optionsJson?: EscalationOptions;
+}
+
+// ---------------------------------------------------------------------------
+// WP-D (migration 17): structured escalations
+
+/** Multiple-choice payload of an escalation question (`UserRequest.optionsJson`). */
+export interface EscalationOptions {
+  /** 2–4 answer options shown to the user. */
+  options: string[];
+  /** Index into `options` of the option the escalation agent recommends. */
+  recommended: number;
+  /** Why the agent asks / recommends (short). */
+  rationale?: string;
+  /** The user's choice (index into `options`), set when answered through the escalation route. */
+  choice?: number;
 }
 
 export interface PersonaFeedback {

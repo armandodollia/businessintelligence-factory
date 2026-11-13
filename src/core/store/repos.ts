@@ -280,6 +280,8 @@ export const specs = {
       id: 'text', workspaceId: 'text', agentRunId: 'text', taskId: 'text', kind: 'text', site: 'text',
       details: 'text', status: 'text', response: 'text', createdAt: 'text', taskPriorStatus: 'text',
       resolvedAt: 'text', actor: 'text', // WP-A (migration 14)
+      // WP-D (migration 17)
+      optionsJson: 'json',
     },
   } satisfies TableSpec<UserRequest>,
   recommendations: {

@@ -1165,9 +1165,28 @@ export function useRequests(wsId: string | null | undefined) {
     [action.run, res.mutate, res.reload],
   );
 
+  // WP-D: answer an escalation question with an option index and an optional note.
+  const answerEscalation = useCallback(
+    async (id: string, choice: number, note?: string) => {
+      try {
+        await api.answerEscalation(id, choice, note);
+        res.mutate((list) => list?.filter((r) => r.id !== id));
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
+          res.mutate((list) => list?.filter((r) => r.id !== id));
+          await res.reload();
+          return;
+        }
+        await action.run(() => Promise.reject(e));
+      }
+    },
+    [action.run, res.mutate, res.reload],
+  );
+
   return {
     pending: res.data ?? [],
     resolve,
+    answerEscalation, // WP-D
     resolving: action.busy,
     loading: res.loading,
     error: res.error ?? action.error,

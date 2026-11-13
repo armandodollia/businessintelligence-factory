@@ -6,6 +6,8 @@ import type { RunOutcome } from '../harness/supervisor.js';
 import { getRunOutputs, type ReviewIssue } from '../harness/tools/handlers.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
+import { escalationRerunSection, ESCALATION_KIND } from '../escalation/context.js'; // WP-D
+import { policyDenialsSection } from '../policy/policyEvents.js'; // WP-D
 import type { Finding, Role, Task, TaskType } from '../types.js';
 import { sameTree } from '../workspace/tree.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
@@ -163,7 +165,9 @@ function taskHeader(task: Task): string {
 export function answeredRequestsSection(deps: Pick<ResearchDeps, 'store'>, task: Task): string {
   const answered = deps.store.userRequests
     .list({ taskId: task.id })
-    .filter((r) => r.workspaceId === task.workspaceId && r.status !== 'pending');
+    .filter((r) => r.workspaceId === task.workspaceId && r.status !== 'pending')
+    // WP-D: escalation answers are shown by `escalationRerunSection`.
+    .filter((r) => r.kind !== ESCALATION_KIND);
   if (!answered.length) return '';
   return (
     '## Earlier requests to the user for this task (already answered)\n' +
@@ -184,6 +188,8 @@ export function workPrompt(deps: Pick<ResearchDeps, 'store'>, task: Task): strin
   if (task.phase === 'synthesis') parts.push(synthesisFindingsSection(deps.store, task.workspaceId));
   const answered = answeredRequestsSection(deps, task);
   if (answered) parts.push(answered);
+  // WP-D: escalation re-run context and the role's recent policy denials (same business tree).
+  parts.push(...wpdSections(deps, task));
   parts.push('Finish by calling `submit_result` with your deliverable.');
   return parts.join('\n\n');
 }
@@ -205,9 +211,18 @@ export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<Rese
     deps ? currentOutputsSection(deps, task) : '',
     deps && task.phase === 'synthesis' ? synthesisFindingsSection(deps.store, task.workspaceId) : '',
     deps ? answeredRequestsSection(deps, task) : '',
+    ...(deps ? wpdSections(deps, task) : []), // WP-D
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+// WP-D: prompt sections shared by work and revise prompts.
+function wpdSections(deps: Pick<ResearchDeps, 'store'>, task: Task): string[] {
+  return [
+    escalationRerunSection(deps.store, task),
+    policyDenialsSection(deps.store, task.workspaceId, roleForTask(task)),
+  ].filter(Boolean);
 }
 
 /**

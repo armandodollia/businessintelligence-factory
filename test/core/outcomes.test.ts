@@ -36,11 +36,11 @@ function agentDecision(store: Store, extra: Partial<Decision> = {}): Decision {
 }
 
 describe('migration 16 (learning loop WP-C)', () => {
-  it('is the latest migration and creates both tables', () => {
+  it('is migration 16 and creates both tables', () => {
     const s = researchSetup(opened);
     expect(s.store.schemaVersion()).toBe(MIGRATIONS.length);
-    expect(MIGRATIONS.at(-1)).toMatch(/CREATE TABLE decision_outcomes/);
-    expect(MIGRATIONS.at(-1)).toMatch(/CREATE TABLE review_issues/);
+    expect(MIGRATIONS[15]).toMatch(/CREATE TABLE decision_outcomes/);
+    expect(MIGRATIONS[15]).toMatch(/CREATE TABLE review_issues/);
     expect(learningRepos(s.store).decisionOutcomes.list()).toEqual([]);
     expect(learningRepos(s.store).reviewIssues.list()).toEqual([]);
   });
