@@ -63,6 +63,12 @@ export const FEEDBACK_KINDS = [
   /** The user rejected an entity merge suggestion (target: the suggested entity). */
   'entity_merge_reject',
   // --- end knowledge store KS-6 / KS-7 ---
+  // --- learning loop WP-E: lesson proposals (target type `lesson`, target id = the proposal) ---
+  /** The user accepted a lesson proposal (rule added / strengthened / retired / reverted, or a retro edit applied). */
+  'lesson_accept',
+  /** The user rejected a lesson proposal (nothing changed). */
+  'lesson_reject',
+  // --- end learning loop WP-E ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -81,7 +87,9 @@ export type FeedbackTargetType =
   // knowledge store KS-3: an entity (`entity_merge`, `entity_rename`)
   | 'entity'
   // knowledge store KS-6 / KS-7: an artifact (`artifact_prune`)
-  | 'artifact';
+  | 'artifact'
+  // learning loop WP-E: a lesson proposal (`lesson_accept`, `lesson_reject`)
+  | 'lesson';
 
 export interface FeedbackEvent {
   id: string;

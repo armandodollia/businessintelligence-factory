@@ -38,6 +38,8 @@ export const TOOL_NAMES = [
   'get_card',
   'expand',
   'list_changes',
+  // Learning loop WP-E: the retro agent's proposals
+  'submit_retro',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -63,6 +65,8 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   ],
   // WP-D: the escalation agent only reads evidence and asks the user multiple-choice questions.
   escalation: ['log_decision', 'read_artifact', 'submit_escalation'],
+  // Learning loop WP-E: the retro agent reads only its digest (no read tools) and submits proposals.
+  retro: ['log_decision', 'submit_retro'],
 };
 
 // --- Knowledge store KS-1: describe_artifact (design §9) ------------------------------------------
@@ -427,6 +431,24 @@ export const toolInputSchemas = {
       .max(3)
       .describe('0–3 questions; an empty list when the user cannot help'),
   }),
+  // Learning loop WP-E: the weekly retro's proposals (pending until the user accepts each one).
+  submit_retro: z.object({
+    summary: z.string().min(1).max(2000).describe('What went well and what went wrong in the period, in a few sentences'),
+    proposals: z
+      .array(
+        z.object({
+          kind: z
+            .enum(['prompt_edit', 'calibration_edit'])
+            .describe('prompt_edit: one rule appended to the role prompt; calibration_edit: a note for the role calibration appendix'),
+          role: z.enum(['orchestrator', 'worker', 'reviewer', 'interviewer', 'persona', 'synthesizer', 'escalation']),
+          text: z.string().min(1).max(600).describe('The rule or note itself, one or two sentences, general (no quotes from evidence)'),
+          why: z.string().min(1).max(600).describe('Why: what in the digest it addresses'),
+          evidence: z.array(id).min(1).max(20).describe('Ids shown in the digest that support it'),
+        }),
+      )
+      .max(10)
+      .describe('Proposals for the user (each one is accepted or rejected separately); an empty list when nothing is needed'),
+  }),
   // Knowledge store KS-1 (design §8.1, §9)
   describe_artifact: z.object({
     artifact_id: id,
@@ -500,6 +522,8 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Retract a current fact that is no longer true (reason + at least one artifact you saved in this task). Applied when your task is verified.',
   submit_escalation:
     'Ask the user 0–3 multiple-choice questions (2–4 options each, one recommended) about a task that ended unverified or failed. Call once.',
+  submit_retro:
+    'Submit the retro: a short summary and 0–N proposals (prompt rule or calibration note for one role), each citing digest ids. Call once.',
   // Knowledge store KS-1
   describe_artifact:
     'Add a description to an artifact that has none (e.g. an uploaded image), or replace the description of one you saved in this run.',

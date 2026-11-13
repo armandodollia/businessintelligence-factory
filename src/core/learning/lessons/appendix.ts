@@ -1,0 +1,60 @@
+/**
+ * The lessons appendix of a role's prompt (learning loop WP-E): the role's ACTIVE rules in one
+ * business tree, each line tagged with its tracking marker and rule version (`[L-7F3A2C.v2]`).
+ * `withCalibration` (prompts/index.ts) appends it after the calibration appendix through
+ * `CalibrationScope.lessons`, which `calibrationScope` (scoring/calibration.ts) binds to the store,
+ * so every role prompt built for a tree carries that tree's accepted rules and nothing else.
+ */
+import { randomBytes } from 'node:crypto';
+import type { Store } from '../../store/db.js';
+import type { Role } from '../../types.js';
+import { lessonsMode } from './mode.js';
+import { lessonRepos } from './store.js';
+import type { LessonRule } from './types.js';
+
+export const LESSONS_HEADING = '## Lessons from past work (approved by the user)';
+
+/** The tag a rule's prompt line carries: marker + rule version. */
+export const markerTag = (rule: Pick<LessonRule, 'marker' | 'version'>): string => `[${rule.marker}.v${rule.version}]`;
+/** Text fragment present in a prompt that carries any version of the rule. */
+export const markerPrefix = (marker: string): string => `[${marker}.v`;
+
+/** Active rules of a tree (one role or all), oldest first. */
+export function activeRules(store: Store, rootWorkspaceId: string, role?: Role): LessonRule[] {
+  return lessonRepos(store).rules.list({ rootWorkspaceId, status: 'active', ...(role ? { role } : {}) });
+}
+
+/** One prompt line of a rule. */
+export function ruleLine(rule: Pick<LessonRule, 'marker' | 'version' | 'text'>): string {
+  return `- ${markerTag(rule)} ${rule.text.replace(/\s+/g, ' ').trim()}`;
+}
+
+/**
+ * The lessons section for `role` in the tree of `rootWorkspaceId` ('' when it has no active rule, or
+ * when lessons are switched off for the current run: `withLessons('off', …)`).
+ */
+export function lessonsAppendix(store: Store, rootWorkspaceId: string, role: string): string {
+  if (lessonsMode() === 'off') return '';
+  const rules = lessonRepos(store).rules.list({ rootWorkspaceId, status: 'active' }).filter((r) => r.role === role);
+  if (!rules.length) return '';
+  return [
+    LESSONS_HEADING,
+    '',
+    'Rules learned from reviews, outcomes and feedback on earlier work in this business. Follow them unless your task says',
+    'otherwise. The bracketed tag of each rule is a tracking marker: ignore it.',
+    '',
+    ...rules.map(ruleLine),
+  ].join('\n');
+}
+
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/** A new unique tracking marker (`L-` + 6 Crockford characters). */
+export function newMarker(store: Store): string {
+  const repo = lessonRepos(store).rules;
+  for (;;) {
+    let m = 'L-';
+    for (const b of randomBytes(6)) m += CROCKFORD[b % 32];
+    if (!repo.list({ marker: m }).length) return m;
+  }
+}

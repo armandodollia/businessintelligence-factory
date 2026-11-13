@@ -10,6 +10,7 @@ import { normalizeCriterion, personaScore } from './priority.js';
 import { resolveTarget } from './ratings.js';
 // Learning loop WP-A: feedback signals (include overrides, unit proposal decisions) count in calibration.
 import { ratingsWithSignals, signalDelta } from '../feedback/signals.js';
+import { lessonsAppendix } from '../learning/lessons/appendix.js'; // learning loop WP-E
 
 export type CalibrationRow = { targetType: TargetType; criterion: string; n: number; agreeRate: number; meanDelta: number };
 /**
@@ -22,7 +23,9 @@ export type CalibrationReport = { byCriterion: CalibrationRow[]; byRoleTask: Cal
 
 /** Calibration scope (business tree root + data dir) of a workspace. */
 export function calibrationScope(store: Store, dataDir: string, workspaceId: string): CalibrationScope {
-  return { dataDir, rootWorkspaceId: rootOf(store, workspaceId) };
+  const rootWorkspaceId = rootOf(store, workspaceId);
+  // Learning loop WP-E: the tree's accepted lesson rules are appended with the calibration appendix.
+  return { dataDir, rootWorkspaceId, lessons: (name) => lessonsAppendix(store, rootWorkspaceId, name) };
 }
 
 export type PromptPatchExample = {

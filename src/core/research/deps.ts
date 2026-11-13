@@ -10,7 +10,7 @@ import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
 import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-4
 
 /** Which agent step a run is for (used by fake pickers and logs). */
-export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate'; // escalate: WP-D
+export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate' | 'retro'; // escalate: WP-D; retro: learning loop WP-E
 
 export type AgentRequest = {
   kind: AgentKind;

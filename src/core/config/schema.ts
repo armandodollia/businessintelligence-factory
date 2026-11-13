@@ -12,6 +12,8 @@ export const ROLES = [
   'synthesizer',
   // WP-D: writes multiple-choice questions for the user when a task ends unverified / failed.
   'escalation',
+  // Learning loop WP-E: the weekly retro agent (proposes prompt and calibration edits for the user).
+  'retro',
 ] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -150,6 +152,38 @@ export const telemetryConfigSchema = z.strictObject({
 });
 
 // ---------------------------------------------------------------------------
+// Learning loop WP-E: lessons engine and weekly retro. Optional; read it through `lessonsSettings`
+// (src/core/learning/lessons/settings.ts), which applies the defaults.
+
+export const lessonsConfigSchema = z.strictObject({
+  /** Lessons engine and retro proposals (default true). Accepted rules stay in prompts until retired. */
+  enabled: z.boolean().optional(),
+  /** Distinct tasks a signal category must recur in before a rule is proposed (default 3). */
+  minTasks: z.number().int().min(1).optional(),
+  /** Consecutive clean tasks under a rule before its retirement is proposed (default 10). */
+  retireAfterCleanTasks: z.number().int().min(1).optional(),
+  /** Tasks under a rule's current version before its effect is judged (revert; default 5). */
+  minEffectTasks: z.number().int().min(1).optional(),
+  /** Active rules (plus pending additions) per role and business tree (default 15). */
+  maxRulesPerRole: z.number().int().min(1).max(15).optional(),
+  retro: z
+    .strictObject({
+      /** Weekly retro per business tree (default true). */
+      enabled: z.boolean().optional(),
+      /** When it runs (default `0 6 * * 1`, Mondays 06:00 server time). */
+      cron: z.string().min(1).optional(),
+      /** Model of the retro agent (default `roles.orchestrator`). */
+      model: modelRefSchema.optional(),
+      /** Days of history a retro digests when there was no earlier retro (default 7). */
+      windowDays: z.number().int().min(1).optional(),
+      /** Proposals one retro may make (default 5). */
+      maxProposals: z.number().int().min(0).max(10).optional(),
+    })
+    .optional(),
+});
+// --- end learning loop WP-E config ---------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // Knowledge store KS-0: `config.knowledge` (design 2026-11-13-knowledge-store-design.md §16).
 // Optional; every field defaulted. Read it through `knowledgeSettings` (src/core/knowledge/config.ts),
 // which applies `KNOWLEDGE_DEFAULTS`.
@@ -234,7 +268,7 @@ export type KnowledgeConfig = z.infer<typeof knowledgeConfigSchema>;
 export const KNOWLEDGE_DEFAULTS = {
   budgets: {
     default: { search: 1200, card: 800, expand: 2000, briefing: 1500 },
-    roles: { reviewer: { expand: 3000 }, synthesizer: { briefing: 4000 } },
+    roles: { reviewer: { expand: 3000 }, synthesizer: { briefing: 4000 }, retro: { briefing: 4000 } /* learning loop WP-E */ },
     providers: {},
   },
   hardMaxTokens: 8000,
@@ -325,6 +359,8 @@ export const bifConfigSchema = z
     telemetry: telemetryConfigSchema.optional(),
     /** Knowledge store KS-0: budgets, freshness, extraction, captions, dedupe, retention (all defaulted). */
     knowledge: knowledgeConfigSchema.optional(),
+    /** Learning loop WP-E: lessons engine and weekly retro (all defaulted). */
+    lessons: lessonsConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -348,6 +384,7 @@ export const bifConfigSchema = z
       check(ref as ModelRef | undefined, ['roles', 'workers', key]);
     }
     check(cfg.escalation?.model, ['escalation', 'model']); // WP-D
+    check(cfg.lessons?.retro?.model, ['lessons', 'retro', 'model']); // learning loop WP-E
     // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).
     const ex = cfg.knowledge?.extraction;
     if (ex && (ex.chunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.chunkTokens) > (ex.maxChunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.maxChunkTokens)) {

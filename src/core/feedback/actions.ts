@@ -53,6 +53,13 @@ import { mergeSuggestionIsUploadOnly } from '../knowledge/provenance.js'; // KS-
 import { mergeDuplicateSaves } from '../knowledge/outcomes.js'; // KS-6
 import { targetProvenance } from './provenance.js';
 import { UNIT_PROPOSAL_CRITERION } from './signals.js';
+// learning loop WP-E
+import { activeRules, newMarker } from '../learning/lessons/appendix.js';
+import { lessonsSettings } from '../learning/lessons/settings.js';
+import { lessonRepos } from '../learning/lessons/store.js';
+import type { LessonProposal, LessonRule } from '../learning/lessons/types.js';
+import { rootOf } from '../workspace/tree.js';
+import { actorOf } from './events.js';
 
 /** User-facing validation error of a feedback action (the API maps it to 400). */
 export class FeedbackActionError extends Error {
@@ -828,3 +835,163 @@ export function pruneArtifactsAsUser(
   return { ...result, decisionId, feedback };
 }
 // --- end knowledge store KS-7 ----------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// learning loop WP-E: lesson proposals (accept / reject). The ONLY paths that change lesson rules, and
+// with them a role's prompt: nothing edits a prompt without the user's explicit accept.
+
+export type LessonDecisionResult = {
+  proposal: LessonProposal;
+  feedback: FeedbackEvent;
+  /** Accept only: the rule as it is now, the user's Decision, and the role prompt versions around it. */
+  rule?: LessonRule;
+  decisionId?: string;
+  promptVersion?: string;
+  previousPromptVersion?: string;
+};
+
+/** The pending proposal of the caller's business tree (other tree = unknown = 404; decided = 409). */
+function callerProposal(store: Store, workspaceId: string, proposalId: string): LessonProposal {
+  const p = lessonRepos(store).proposals.get(proposalId);
+  if (!p || !store.workspaces.get(workspaceId) || p.rootWorkspaceId !== rootOf(store, workspaceId)) {
+    throw new FeedbackActionError(`lesson proposal '${proposalId}' not found`, 404);
+  }
+  if (p.status !== 'pending') throw new FeedbackActionError(`lesson proposal '${proposalId}' is already ${p.status}`, 409);
+  return p;
+}
+
+/**
+ * User accept of a lesson proposal. In one transaction: the rule change (add / prompt_edit: a new
+ * active rule with a fresh tracking marker; strengthen: the stronger text as the rule's next version;
+ * retire / revert: the rule leaves the prompt), the role's prompt version before and after (both
+ * stored in the prompt store), an `accept_lesson` Decision by the actor, a `lesson_accept` feedback
+ * event, and the proposal marked accepted (other pending proposals of the same rule are superseded).
+ * `calibration_edit` (retro) goes through `applyPromptPatchAsUser` (calibration history, its own
+ * Decision and `prompt_patch_apply` event) and is recorded the same way.
+ */
+export function acceptLessonProposalAsUser(
+  deps: { store: Store; events?: EventBus; config: BifConfig },
+  workspaceId: string,
+  proposalId: string,
+  opts: ActorOpts = {},
+): LessonDecisionResult {
+  const { store, config } = deps;
+  const who = opts.actor?.trim() || actorOf(config);
+  const repos = lessonRepos(store);
+  return store.transaction(() => {
+    const p = callerProposal(store, workspaceId, proposalId);
+    const scope = calibrationScope(store, config.dataDir, workspaceId);
+    const now = new Date().toISOString();
+    const previousPromptVersion = recordRolePromptVersion(store, config, p.role, scope);
+    let rule: LessonRule | undefined;
+    let ruleBefore: LessonRule | undefined;
+    let patchDecisionId: string | undefined;
+    switch (p.action) {
+      case 'add':
+      case 'prompt_edit': {
+        const settings = lessonsSettings(config);
+        const active = activeRules(store, p.rootWorkspaceId, p.role);
+        if (active.length >= settings.maxRulesPerRole) {
+          throw new FeedbackActionError(`role '${p.role}' already has ${active.length} active lesson rules (max ${settings.maxRulesPerRole}); retire one first`, 409);
+        }
+        const category = p.action === 'prompt_edit' ? `retro:${p.id}` : p.category!;
+        if (active.some((r) => r.category === category)) throw new FeedbackActionError(`an active rule already covers '${category}'`, 409);
+        rule = repos.rules.insert({
+          id: newId('lrule'), rootWorkspaceId: p.rootWorkspaceId, role: p.role, category, marker: newMarker(store), text: p.text,
+          strength: 1, version: 1, status: 'active', source: p.source, proposalId: p.id, actor: who, createdAt: now, changedAt: now,
+        });
+        break;
+      }
+      case 'strengthen':
+      case 'retire':
+      case 'revert': {
+        ruleBefore = p.ruleId ? repos.rules.get(p.ruleId) : undefined;
+        if (!ruleBefore || ruleBefore.rootWorkspaceId !== p.rootWorkspaceId) throw new FeedbackActionError(`lesson rule '${p.ruleId}' not found`, 404);
+        if (ruleBefore.status !== 'active') throw new FeedbackActionError(`lesson rule '${ruleBefore.id}' is ${ruleBefore.status}`, 409);
+        rule =
+          p.action === 'strengthen'
+            ? repos.rules.update(ruleBefore.id, { text: p.text, strength: ruleBefore.strength + 1, version: ruleBefore.version + 1, changedAt: now, actor: who })
+            : repos.rules.update(ruleBefore.id, { status: p.action === 'retire' ? 'retired' : 'reverted', endedAt: now, actor: who });
+        break;
+      }
+      case 'calibration_edit': {
+        const applied = applyPromptPatchAsUser(deps, workspaceId, { role: p.role, patchText: p.text, examples: [] }, { actor: who, reason: opts.reason ?? `lesson proposal ${p.id}` });
+        patchDecisionId = applied.decisionId;
+        break;
+      }
+    }
+    const promptVersion = recordRolePromptVersion(store, config, p.role, scope);
+    if (rule) rule = repos.rules.update(rule.id, { promptVersionBefore: previousPromptVersion, promptVersionAfter: promptVersion });
+    const decision = recordSystemDecision(
+      { store, ...(deps.events ? { events: deps.events } : {}) },
+      {
+        workspaceId,
+        actor: 'user',
+        actorId: who,
+        promptVersion,
+        payload: {
+          tool: 'accept_lesson', proposalId: p.id, action: p.action, role: p.role, previousPromptVersion,
+          ...(rule ? { ruleId: rule.id, marker: rule.marker, ruleVersion: rule.version } : {}),
+          ...(patchDecisionId ? { calibrationDecisionId: patchDecisionId } : {}),
+        },
+        refs: [p.id, ...(rule ? [rule.id] : []), ...(patchDecisionId ? [patchDecisionId] : [])],
+      },
+    );
+    const feedback = recordFeedback(store, {
+      workspaceId,
+      actor: who,
+      kind: 'lesson_accept',
+      targetType: 'lesson',
+      targetId: p.id,
+      beforeJson: { status: 'pending', promptVersion: previousPromptVersion, ...(ruleBefore ? { rule: { status: ruleBefore.status, version: ruleBefore.version, strength: ruleBefore.strength } } : {}) },
+      afterJson: {
+        status: 'accepted', action: p.action, role: p.role, promptVersion, decisionId: decision.id,
+        ...(rule ? { ruleId: rule.id, marker: rule.marker, ruleStatus: rule.status, ruleVersion: rule.version } : {}),
+        ...(patchDecisionId ? { calibrationDecisionId: patchDecisionId } : {}),
+      },
+      promptVersion,
+      ...(opts.reason ? { reason: opts.reason } : {}),
+    });
+    const proposal = repos.proposals.update(p.id, {
+      status: 'accepted', decidedAt: now, actor: who, decisionId: decision.id, feedbackEventId: feedback.id,
+      ...(rule && !p.ruleId ? { ruleId: rule.id } : {}),
+      ...(opts.reason?.trim() ? { reason: opts.reason.trim() } : {}),
+    });
+    if (rule) {
+      for (const other of repos.proposals.list({ ruleId: rule.id, status: 'pending' })) repos.proposals.update(other.id, { status: 'superseded', decidedAt: now });
+    }
+    const out: LessonDecisionResult = { proposal, feedback, decisionId: decision.id, promptVersion, previousPromptVersion };
+    if (rule) out.rule = rule;
+    return out;
+  });
+}
+
+/** User reject of a lesson proposal: nothing changes but the proposal; a `lesson_reject` feedback event records it. */
+export function rejectLessonProposalAsUser(
+  deps: { store: Store; config: BifConfig },
+  workspaceId: string,
+  proposalId: string,
+  opts: ActorOpts = {},
+): LessonDecisionResult {
+  const { store, config } = deps;
+  const who = opts.actor?.trim() || actorOf(config);
+  return store.transaction(() => {
+    const p = callerProposal(store, workspaceId, proposalId);
+    const now = new Date().toISOString();
+    const feedback = recordFeedback(store, {
+      workspaceId,
+      actor: who,
+      kind: 'lesson_reject',
+      targetType: 'lesson',
+      targetId: p.id,
+      beforeJson: { status: 'pending' },
+      afterJson: { status: 'rejected', action: p.action, role: p.role, ...(p.category ? { category: p.category } : {}), ...(p.ruleId ? { ruleId: p.ruleId } : {}) },
+      ...(opts.reason ? { reason: opts.reason } : {}),
+    });
+    const proposal = lessonRepos(store).proposals.update(p.id, {
+      status: 'rejected', decidedAt: now, actor: who, feedbackEventId: feedback.id, ...(opts.reason?.trim() ? { reason: opts.reason.trim() } : {}),
+    });
+    return { proposal, feedback };
+  });
+}
+// --- end learning loop WP-E ----------------------------------------------------------------------
