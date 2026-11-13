@@ -250,6 +250,7 @@ describe('renameEntity', () => {
     const s = ks3Store(opened);
     const sc = scopeFor(s, 'ws_a');
     const e = resolveEntity(s, sc, { kind: 'competitor', name: 'Globex' });
+    fact(s, 'fnd_e', 'ws_a', { entityId: e.id }); // a public, usable record attests the names (orphans are not attested)
     resolveEntity(s, sc, { kind: 'competitor', name: 'Initech' });
     const r = renameEntity(s, e.id, 'Globex Inc');
     expect(r.entity).toMatchObject({ name: 'Globex Inc', nameKey: 'globex inc', aliases: ['Globex'] });
@@ -267,6 +268,8 @@ describe('renameEntity', () => {
     const sc = scopeFor(s, 'ws_a');
     const a = resolveEntity(s, sc, { kind: 'competitor', name: 'Globex' });
     const b = resolveEntity(s, sc, { kind: 'competitor', name: 'GX' });
+    fact(s, 'fnd_a', 'ws_a', { entityId: a.id });
+    fact(s, 'fnd_b', 'ws_a', { entityId: b.id });
     mergeEntities(s, a.id, b.id, 'u');
     const r = renameEntity(s, a.id, 'gx');
     expect(r.entity).toMatchObject({ name: 'gx', nameKey: 'gx' });

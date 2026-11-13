@@ -195,8 +195,11 @@ stickiness. The decision and the candidates shown are logged (ratable).
   include-override to true, the replacement is applied.
 - Observations not re-submitted in the task's final round follow the existing
   superseded rule for outputs.
-- If the prior version is no longer the lineage head when applying, apply onto the
-  head and flag the lineage `conflict` for the review queue.
+- If the named version is no longer the lineage head when applying: a `replace` or a
+  `retract` applies onto the head and flags the lineage `conflict` for the review
+  queue; a `confirm` aimed at a version that is no longer the head confirms nothing
+  (evidence for the old claim does not confirm the new one) and only flags the head
+  `conflict`.
 
 **Freshness** is computed, not stored: `stale = now − last_confirmed_at > ttl`.
 `ttl` = fact `ttl_days` if set by the agent, else config by entity kind, else

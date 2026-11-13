@@ -25,10 +25,31 @@ function setup() {
 }
 
 describe('entityIsUploadOnly (ruling 5: resolved at check time, no stored flag)', () => {
+  // KS-4 design-thread ruling: an orphan entity (no referencing record) is not attested → flagged.
+  it('an orphan entity row inserted directly is flagged (fail safe), also through itemIsUploadDerived', () => {
+    const { s } = setup();
+    knowledgeRepos(s).entities.insert({
+      id: 'ent_orphan', rootWorkspaceId: 'ws_a', workspaceId: 'ws_a', kind: 'topic', name: 'Orphan Name', nameKey: 'orphan name',
+      aliases: [], createdAt: 'now', updatedAt: 'now',
+    });
+    expect(entityReferences(s, 'ent_orphan')).toEqual([]);
+    expect(entityIsUploadOnly(s, 'ent_orphan')).toBe(true);
+    expect(itemIsUploadDerived(s, 'ent_orphan')).toBe(true);
+  });
+
+  it("a node's own company entity stays unflagged without any referencing record", () => {
+    const { s, sc } = setup();
+    const own = companyEntity(s, sc);
+    const child = companyEntity(s, sc, 'ws_c');
+    expect(entityReferences(s, own.id)).toEqual([]);
+    expect(entityIsUploadOnly(s, own.id)).toBe(false);
+    expect(entityIsUploadOnly(s, child.id)).toBe(false);
+  });
+
   it('upload-only while every referencing record is upload-derived; one usable public record attests it', () => {
     const { s, sc } = setup();
     const e = resolveEntity(s, sc, { kind: 'competitor', name: 'Hidden Co' });
-    expect(entityIsUploadOnly(s, e.id)).toBe(false); // no references: the name did not come from an upload
+    expect(entityIsUploadOnly(s, e.id)).toBe(true); // no references: not attested (KS-4 fail-safe ruling)
     fact(s, 'fnd_up', 'ws_a', { entityId: e.id, evidence: ['art_up'] });
     expect(entityIsUploadOnly(s, e.id)).toBe(true);
     // A public but not (yet) usable reference does not attest it.
@@ -202,6 +223,7 @@ describe('human entity actions (feedback events, ruling 3)', () => {
     const a = resolveEntity(s, sc, { kind: 'competitor', name: 'Globex' }, { workspaceId: 'ws_c' });
     const b = resolveEntity(s, sc, { kind: 'competitor', name: 'Globex Corp' });
     fact(s, 'fnd_a', 'ws_c', { entityId: a.id, evidence: ['art_pub'] });
+    fact(s, 'fnd_b', 'ws_a', { entityId: b.id, evidence: ['art_pub'] }); // orphans are not attested (KS-4 ruling)
     const r = mergeEntitiesAsUser(s, a.id, b.id, { actor: 'alice', reason: 'same company', workspaceId: 'ws_a' });
     expect(r.survivor.aliases).toEqual(['Globex Corp']);
     const merges = listFeedback(s, { kind: 'entity_merge' });
@@ -249,6 +271,8 @@ describe('human entity actions (feedback events, ruling 3)', () => {
     fact(s, newId('fnd'), 'ws_a', { entityId: hidden.id, evidence: ['art_up'] });
     const other = resolveEntity(s, sc, { kind: 'topic', name: 'Plans' });
     const other2 = resolveEntity(s, sc, { kind: 'topic', name: 'Pricing' });
+    fact(s, 'fnd_o1', 'ws_a', { entityId: other.id, evidence: ['art_pub'] }); // orphans are not attested (KS-4 ruling)
+    fact(s, 'fnd_o2', 'ws_a', { entityId: other2.id, evidence: ['art_pub'] });
     mergeEntitiesAsUser(s, pub.id, hidden.id, { actor: 'alice' });
     mergeEntitiesAsUser(s, other2.id, other.id, { actor: 'alice' });
     const events = (includeUploads: boolean) =>

@@ -130,8 +130,11 @@ function isScopeCompany(store: Store, entity: Entity): boolean {
  * Whether entity `entityId`'s name is upload-only now (ruling 5): every record that references it is
  * upload-derived, so the name itself came only from uploads and must be treated like upload text.
  * - One non-derived, usable reference makes the name publicly attested (not upload-only).
- * - No references at all, or only non-derived ones not yet usable: not upload-only (the name did not
- *   come from an upload). A company entity named after a node of its tree is never upload-only.
+ * - Only non-derived references not yet usable: not upload-only (the name did not come from an upload).
+ * - No references at all (an orphan row): NOT attested, so treated as upload-only (fail safe, design
+ *   thread ruling for KS-4: a future code path that leaves an orphan entity must not leak its name).
+ * - A company entity named after a node of its tree is never upload-only (its name is the workspace
+ *   name the user set or accepted).
  * - A merged row (an alias of its survivor): upload-only unless its name was taken into the
  *   survivor's public `aliases` at merge / rename time (`mergeEntities`, `renameEntity` keep an
  *   upload-only name on this row only); a name equal to the survivor's follows the survivor.
@@ -154,6 +157,7 @@ function entityUploadStatus(store: Store, id: string, depth = 0): boolean | unde
   }
   if (isScopeCompany(store, entity)) return false;
   const refs = entityReferences(store, entity.id);
+  if (!refs.length) return true; // orphan: not attested (fail safe)
   if (refs.some((r) => !r.derived && r.usable)) return false;
   return refs.some((r) => r.derived);
 }

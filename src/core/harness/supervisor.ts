@@ -65,6 +65,12 @@ export type RunOptions = {
    * to attribute usage to a research run / pipeline (`researchRunId`, else the task's research run).
    */
   meta?: RunMeta;
+  /**
+   * Knowledge store KS-4: called once the run id exists (AgentRun row written, prompt recorded) and
+   * BEFORE the agent starts, so nothing the run is shown is unlogged. Prompt-context reads are logged
+   * here (`knowledge/promptReads.ts`). A throw fails the run without starting the agent.
+   */
+  beforeStart?: (ctx: RunContext) => void;
 };
 
 /** Learning loop WP-B: run metadata (see `RunOptions.meta`). */
@@ -222,6 +228,7 @@ export class Supervisor {
     if (meta.taskType !== undefined) runPatch.taskType = meta.taskType;
     if (Object.keys(runPatch).length) store.agentRuns.update(ctx.agentRunId, runPatch);
     recordRunPrompt(store, ctx.role, ctx.promptVersion, opts.systemPrompt);
+    opts.beforeStart?.(ctx); // KS-4: prompt-context reads logged before the run starts
     writeFileSync(join(runDir, 'prompt.md'), promptMarkdown(ctx, opts.systemPrompt, opts.prompt, 1));
     const scope = this.scopeOf(opts);
     const usageRun = { ...ctx, ...scope };

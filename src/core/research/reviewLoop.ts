@@ -17,7 +17,6 @@ import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDispu
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 import { defaultConfig } from '../config/schema.js'; // KS-2
 import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
-import { recordRetrieval } from '../knowledge/retrievalLog.js'; // KS-2
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -365,22 +364,22 @@ async function reviewStep(
   const version = promptVersion(system);
   const model = reviewerFor(task.model, config);
   const context = reviewContext(deps, task);
+  // Knowledge store KS-2/KS-4: the prior claims and quotes in the reviewer's prompt are a read (design
+  // §12), logged on the reviewer run before it starts (a crash mid-run cannot lose the row).
+  const k = context.knowledge;
   const res = await runAgent(deps, {
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
     prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))), systemPrompt: system,
     model, needsBrowser: false, promptVersion: version,
+    ...(k
+      ? {
+          promptReads: [{
+            query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: k.results,
+            tokensReturned: k.tokens, truncated: k.truncated, uploadDerived: k.uploadDerived,
+          }],
+        }
+      : {}),
   });
-  // Knowledge store KS-2: the prior claims and quotes in the reviewer's prompt are a read (design §12).
-  if (context.knowledge) {
-    recordRetrieval(
-      { store, events: deps.events },
-      { workspaceId: task.workspaceId, agentRunId: res.agentRunId, taskId: task.id, role: 'reviewer', model, promptVersion: version },
-      {
-        tool: 'prompt_context', query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: context.knowledge.results,
-        tokensReturned: context.knowledge.tokens, truncated: context.knowledge.truncated, latencyMs: 0, uploadDerived: context.knowledge.uploadDerived,
-      },
-    );
-  }
   throwIfAborted(deps.signal);
   const review = getRunOutputs(store, res.agentRunId).review;
   // A review counts only if the reviewer run itself finished successfully.

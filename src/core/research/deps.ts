@@ -7,6 +7,7 @@ import { redactIdentitySecrets } from '../identity/identities.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
+import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-4
 
 /** Which agent step a run is for (used by fake pickers and logs). */
 export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate'; // escalate: WP-D
@@ -24,6 +25,11 @@ export type AgentRequest = {
   systemPrompt: string;
   /** Learning loop WP-B: research run a task-less run belongs to (orchestrator), for usage/budgets. */
   researchRunId?: string;
+  /**
+   * Knowledge store KS-4: store text the prompt carries (reviewer context, KS-5 briefings). Logged as
+   * `prompt_context` retrieval rows on the run before it starts (`recordPromptReads`).
+   */
+  promptReads?: PromptRead[];
 };
 
 /** Returns an in-process script for a run (tests / dry runs); `undefined` → spawn the real CLI. */
@@ -76,6 +82,9 @@ export async function runAgent(
   const researchRunId = req.task?.runId ?? req.researchRunId;
   if (researchRunId) meta.researchRunId = researchRunId;
   opts.meta = meta;
+  // KS-4: prompt reads are logged once the run id exists and before the agent starts.
+  const reads = req.promptReads ?? [];
+  if (reads.length) opts.beforeStart = (runCtx) => void recordPromptReads({ store: deps.store, events: deps.events }, runCtx, reads);
   return deps.supervisor.run(opts);
 }
 

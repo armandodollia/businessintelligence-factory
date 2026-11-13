@@ -48,7 +48,7 @@ export function getPromptText(store: Store, hash: string): PromptVersionRecord |
 
 /**
  * Prompt versions recorded anywhere (agent runs, decisions, usage, ratings, feedback events,
- * decision outcomes, review issues) that have no stored text.
+ * decision outcomes, review issues, knowledge retrieval events) that have no stored text.
  */
 export function promptStoreGaps(store: Store): string[] {
   const rows = store.db
@@ -61,6 +61,7 @@ export function promptStoreGaps(store: Store): string[] {
          UNION SELECT prompt_version AS v FROM feedback_events
          UNION SELECT prompt_version AS v FROM decision_outcomes
          UNION SELECT worker_prompt_version AS v FROM review_issues
+         UNION SELECT prompt_version AS v FROM retrieval_events
        ) WHERE v IS NOT NULL AND v NOT IN ('', 'n/a') AND v NOT IN (SELECT hash FROM prompt_versions) ORDER BY v`,
     )
     .all() as Array<{ v: string }>;
