@@ -243,7 +243,7 @@ Editable in a simple settings page and as a file.
 
 ## 13. Web app (v1, minimal)
 
-Pages: **Workspaces** · **Interview** (+ optional uploads) · **Audience & Personas** · **Research** (live runs: orchestrator plan, task tree, review rounds/scores, pending user actions and approvals) · **Findings & Evidence** (screenshot flows, archived articles, documents) · **Strategy** (ranked recommendations with per-criterion rating) · **Review queue** · **Decision log** · **Schedule** · **Settings**.
+Pages: **Business map** (workspace tree, mapping proposals, roll-up and cross-cutting issues) · **Workspaces** · **Interview** (+ optional uploads) · **Audience & Personas** · **Research** (live runs: orchestrator plan, task tree, review rounds/scores, pending user actions and approvals) · **Findings & Evidence** (screenshot flows, archived articles, documents) · **Strategy** (ranked recommendations with per-criterion rating) · **Review queue** · **Decision log** · **Schedule** · **Settings**.
 
 ## 14. Left to the builder
 
