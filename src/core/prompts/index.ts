@@ -11,7 +11,15 @@ export const PROMPTS_DIR = import.meta.dirname;
  * never global — one company's corrections must not reach another company's prompts — and
  * nothing is ever written under `src/`.
  */
-export type CalibrationScope = { dataDir: string; rootWorkspaceId: string };
+export type CalibrationScope = {
+  dataDir: string;
+  rootWorkspaceId: string;
+  /**
+   * Learning loop WP-E: the tree's accepted lesson rules for a role (`lessonsAppendix`, bound to the
+   * store by `calibrationScope`); '' when there are none or lessons are off for the run.
+   */
+  lessons?: (name: string) => string;
+};
 
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -57,7 +65,11 @@ export function calibrationAppendix(name: string, scope?: CalibrationScope): str
  */
 export function withCalibration(text: string, name: string, scope?: CalibrationScope): string {
   const extra = calibrationAppendix(name, scope);
-  return extra ? `${text.trimEnd()}\n\n${extra}\n` : text;
+  const out = extra ? `${text.trimEnd()}\n\n${extra}\n` : text;
+  // --- learning loop WP-E: accepted lesson rules follow the calibration appendix ---
+  const lessons = scope?.lessons?.(name).trim() ?? '';
+  return lessons ? `${out.trimEnd()}\n\n${lessons}\n` : out;
+  // --- end WP-E ---
 }
 
 /** First 8 hex chars of the sha256 of `text` (same scheme as `loadPrompt().version`). */

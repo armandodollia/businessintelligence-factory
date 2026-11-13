@@ -10,7 +10,18 @@ export const SCHEDULER_INTERVAL_MS = 60_000;
 export type SchedulerDeps = ResearchDeps & {
   /** Check interval; default 60 s. */
   intervalMs?: number;
+  /** Learning loop WP-E: built-in recurring jobs (the weekly retro per business tree), listed on every tick. */
+  systemJobs?: () => SystemJob[];
 };
+
+// --- learning loop WP-E: system jobs ---------------------------------------------------------------
+/**
+ * A built-in recurring job checked on every scheduler tick next to the user's schedules: due when its
+ * next `cron` occurrence after `lastRunAt` (else the scheduler start) has passed; a missed occurrence
+ * runs once. One run per job id at a time.
+ */
+export type SystemJob = { id: string; cron: string; lastRunAt?: string; run(): Promise<unknown> };
+// --- end WP-E ------------------------------------------------------------------------------------
 
 export type SchedulerHandle = {
   stop(): void;
@@ -66,6 +77,7 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
   const startedAt = now();
   const busy = new Set<string>();
   const jobs = new Set<Promise<void>>();
+  const systemStarts = new Map<string, number>(); // learning loop WP-E: last start of each system job
   let stopped = false;
   let ticking: Promise<void> = Promise.resolve();
 
@@ -100,6 +112,29 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
         });
       jobs.add(job);
     }
+    // --- learning loop WP-E: system jobs (weekly retro) ---
+    for (const sj of deps.systemJobs?.() ?? []) {
+      if (busy.has(sj.id)) continue;
+      try {
+        const base = Math.max(scheduleBaseline({ lastRunAt: sj.lastRunAt }, startedAt), systemStarts.get(sj.id) ?? 0);
+        if (nextDue(sj.cron, new Date(base)).getTime() > t) continue;
+      } catch (e) {
+        console.warn(`[bif] system job ${sj.id}: ${(e as Error).message}`);
+        continue;
+      }
+      busy.add(sj.id);
+      systemStarts.set(sj.id, t);
+      const job: Promise<void> = sj
+        .run()
+        .then(() => undefined)
+        .catch((e) => console.error(`[bif] system job ${sj.id} failed: ${(e as Error).message}`))
+        .finally(() => {
+          busy.delete(sj.id);
+          jobs.delete(job);
+        });
+      jobs.add(job);
+    }
+    // --- end WP-E ---
   };
 
   const tick = () => {

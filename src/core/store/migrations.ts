@@ -1047,4 +1047,92 @@ export const MIGRATIONS: readonly string[] = [
           ELSE '[]' END));
   END;
   `,
+  // 19: learning loop WP-E — lessons engine and retro: per business-tree root and role lesson rules
+  // (tracking marker, strength, rule version, status, the role prompt versions around the accepted
+  // change), the proposals the user accepts or rejects (engine: add / strengthen / retire / revert;
+  // weekly retro agent: prompt and calibration edits; evidence by id), lesson signals recorded by
+  // other packages (e.g. WP-F reviewer-audit misses; idempotent per source + key) and retro runs.
+  `
+  CREATE TABLE lesson_rules (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    category TEXT NOT NULL,
+    marker TEXT NOT NULL,
+    text TEXT NOT NULL,
+    strength INTEGER NOT NULL DEFAULT 1,
+    version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    proposal_id TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    created_at TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    ended_at TEXT,
+    prompt_version_before TEXT,
+    prompt_version_after TEXT
+  );
+  CREATE UNIQUE INDEX lesson_rules_marker ON lesson_rules (marker);
+  CREATE INDEX lesson_rules_root_role ON lesson_rules (root_workspace_id, role, status);
+
+  CREATE TABLE lesson_proposals (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    action TEXT NOT NULL,
+    category TEXT,
+    rule_id TEXT,
+    text TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    stats TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    retro_id TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    actor TEXT,
+    reason TEXT,
+    decision_id TEXT,
+    feedback_event_id TEXT
+  );
+  CREATE INDEX lesson_proposals_root ON lesson_proposals (root_workspace_id, status);
+  CREATE INDEX lesson_proposals_rule ON lesson_proposals (rule_id);
+
+  CREATE TABLE lesson_signals (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    category TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT,
+    task_id TEXT,
+    agent_run_id TEXT,
+    prompt_version TEXT,
+    ref_id TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX lesson_signals_key ON lesson_signals (source, source_key) WHERE source_key IS NOT NULL;
+  CREATE INDEX lesson_signals_root ON lesson_signals (root_workspace_id, role);
+
+  CREATE TABLE retros (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    triggered_by TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    agent_run_id TEXT,
+    digest TEXT NOT NULL DEFAULT '{}',
+    evidence_ids TEXT NOT NULL DEFAULT '[]',
+    proposal_ids TEXT NOT NULL DEFAULT '[]',
+    summary TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    ended_at TEXT
+  );
+  CREATE INDEX retros_root ON retros (root_workspace_id, created_at);
+  `,
 ];

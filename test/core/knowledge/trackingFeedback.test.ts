@@ -71,7 +71,8 @@ describe('human knowledge actions write feedback events with the configured acto
       'include_override', 'profile_edit', 'proposal_accept', 'proposal_edit', 'proposal_reject', 'hypothesis_correction', 'request_answer',
       'weights_change', 'prompt_patch_apply', 'prompt_patch_revert',
     ];
-    expect(FEEDBACK_KINDS.filter((k) => !wave1.includes(k)).sort()).toEqual([...kinds].sort());
+    const wpE = ['lesson_accept', 'lesson_reject']; // learning loop WP-E (lesson proposals, not knowledge actions)
+    expect(FEEDBACK_KINDS.filter((k) => !wave1.includes(k) && !wpE.includes(k)).sort()).toEqual([...kinds].sort());
     for (const kind of kinds) {
       expect(FEEDBACK_KINDS).toContain(kind);
       const rows = listFeedback(t.store, { kind });

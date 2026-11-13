@@ -31,6 +31,9 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   // knowledge store KS-6 / KS-7
   artifact_prune: 'stored file pruned',
   entity_merge_reject: 'merge suggestion rejected',
+  // learning loop WP-E
+  lesson_accept: 'lesson proposal accepted',
+  lesson_reject: 'lesson proposal rejected',
 };
 
 const short = (v: unknown, max = 80): string => {
