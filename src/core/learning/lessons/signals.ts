@@ -21,6 +21,12 @@
  *   signals so the same miss is not counted twice;
  * - signals recorded by other packages (`recordLessonSignal`).
  *
+ * Experiments and audits (ruling R3, applied to lessons at KS-8): by default every signal of an
+ * experiment arm task or of an experiment / reviewer-audit run (WP-F tags: `taggedRunIds`,
+ * `experimentTaskIds`) is left out, and so is a rating or feedback event on a tagged decision
+ * (`isTaggedDecision`) — whatever source it comes from. `includeExperiments` keeps them. Audit misses
+ * are not affected: they are about the audited (normal) task's reviewer and reach lessons by design.
+ *
  * Nothing crosses trees: every query is bounded to the tree's workspaces.
  */
 import { ROLES, type BifConfig } from '../../config/schema.js';
@@ -36,6 +42,7 @@ import { descendants, rootOf } from '../../workspace/tree.js';
 import { listOutcomes } from '../outcomes.js';
 import { auditMisses } from '../reviewerAudit.js'; // wave-2 integration: audit misses feed lessons
 import { issueRecurrence, listReviewIssues } from '../reviewIssues.js';
+import { experimentTaskIds, isTaggedDecision, taggedRunIds } from '../runTags.js'; // KS-8: ruling R3 for lessons
 import type { OutcomeLabel } from '../types.js';
 import { LessonPrivacy } from './privacy.js';
 import { lessonRepos } from './store.js';
@@ -106,6 +113,8 @@ export function treeIds(store: Store, rootWorkspaceId: string): string[] {
 }
 
 export type SignalWindow = { since?: string; until?: string };
+/** KS-8 (ruling R3): `includeExperiments` keeps signals of experiment and reviewer-audit runs. */
+export type LessonSignalOptions = { includeExperiments?: boolean };
 
 const inWindow = (at: string | undefined, w: SignalWindow) => !at || ((!w.since || at >= w.since) && (!w.until || at < w.until));
 
@@ -115,8 +124,17 @@ export function collectLessonSignals(
   rootWorkspaceId: string,
   window: SignalWindow = {},
   config?: Pick<BifConfig, 'knowledge' | 'actionPolicy'>,
+  opts: LessonSignalOptions = {},
 ): LessonSignal[] {
   const ids = treeIds(store, rootWorkspaceId);
+  // --- KS-8: ruling R3 for lessons (experiment and audit runs left out by default) ---
+  const taggedRuns = opts.includeExperiments ? new Set<string>() : taggedRunIds(store);
+  const armTasks = opts.includeExperiments ? new Set<string>() : experimentTaskIds(store);
+  const taggedTarget = (targetType: string, targetId: string) =>
+    !opts.includeExperiments && targetType === 'decision' && isTaggedDecision(store, targetId);
+  const isTagged = (s: { source: LessonSignalSource; agentRunId?: string; taskId?: string }) =>
+    s.source !== 'audit' && ((!!s.agentRunId && taggedRuns.has(s.agentRunId)) || (!!s.taskId && armTasks.has(s.taskId)));
+  // --- end KS-8 ---
   const idSet = new Set(ids);
   const out: LessonSignal[] = [];
   const runs = new Map<string, AgentRun | undefined>();
@@ -129,7 +147,7 @@ export function collectLessonSignals(
     return runs.get(id);
   };
   const push = (s: Omit<LessonSignal, 'unit'> & { unit?: string }) => {
-    if (!isRole(s.role)) return;
+    if (!isRole(s.role) || isTagged(s)) return;
     out.push({ ...s, unit: s.unit ?? s.taskId ?? s.agentRunId ?? s.refId });
   };
 
@@ -151,7 +169,11 @@ export function collectLessonSignals(
   }
 
   // Decision outcomes (negative labels) of the judged role.
-  for (const o of listOutcomes(store, { workspaceIds: ids, ...(window.since ? { since: window.since } : {}) })) {
+  for (const o of listOutcomes(store, {
+    workspaceIds: ids,
+    ...(window.since ? { since: window.since } : {}),
+    ...(opts.includeExperiments ? { includeExperiments: true } : {}),
+  })) {
     if (!LESSON_OUTCOME_LABELS.has(o.label) || !o.role || !inWindow(o.createdAt, window)) continue;
     if (o.source === 'reviewer_audit') continue; // counted once, as an audit signal (below)
     push({
@@ -204,7 +226,7 @@ export function collectLessonSignals(
   // Human feedback on agent output, and rating disagreements.
   for (const ws of ids) {
     for (const f of listFeedback(store, { workspaceId: ws })) {
-      if (!inWindow(f.createdAt, window)) continue;
+      if (!inWindow(f.createdAt, window) || taggedTarget(f.targetType, f.targetId)) continue;
       let category: string | undefined;
       if (f.kind === 'include_override' && (f.afterJson as { include?: unknown } | undefined)?.include === false) category = `feedback:exclude:${f.targetType}`;
       else if (f.kind === 'proposal_reject' || f.kind === 'proposal_edit' || f.kind === 'hypothesis_correction' || f.kind === 'fact_retract') category = `feedback:${f.kind}`;
@@ -217,7 +239,7 @@ export function collectLessonSignals(
       });
     }
     for (const r of store.ratings.list({ workspaceId: ws })) {
-      if (r.verdict !== 'disagree' || !inWindow(r.createdAt, window)) continue;
+      if (r.verdict !== 'disagree' || !inWindow(r.createdAt, window) || taggedTarget(r.targetType, r.targetId)) continue;
       if (r.targetType === 'recommendation' && r.criterion === 'priority') continue; // computed from weights
       const run = runOf(r.agentRunId);
       if (!run) continue;

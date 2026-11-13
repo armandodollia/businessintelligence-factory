@@ -183,7 +183,10 @@ implemented with tests.
 - **R3. Calibration ignores experiments and audits.** Ratings of experiment and reviewer-audit
   judgments are left out of calibration (`calibrationReport`) and prompt-patch examples
   (`proposePromptPatch`) by default (`calibrationRatings`, `includeExperiments` to include them). They
-  still count in the arm comparison (`compareExperiment`).
+  still count in the arm comparison (`compareExperiment`). KS-8 applies the same rule to lessons: every signal of an
+  experiment arm task or of an experiment / audit run, and every rating or feedback event on a tagged
+  decision, is left out of `collectLessonSignals` by default (`includeExperiments` to include them);
+  audit misses still reach lessons by their own path.
 - **R4. No browser experiments by default.** An experiment on a task that uses the browser is refused
   (403) unless `config.experiments.allowBrowser` is true (default false). When allowed, the start
   request must carry `confirmBrowser: true`, and the UI states that real-world actions repeat per arm
