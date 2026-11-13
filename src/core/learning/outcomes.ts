@@ -1,6 +1,7 @@
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
-import type { Decision, ResearchRun, Task } from '../types.js';
+import type { Role } from '../config/schema.js';
+import type { Decision, Task } from '../types.js';
 import { learningRepos } from './store.js';
 import {
   OUTCOME_LABELS,
@@ -26,12 +27,28 @@ export const SYSTEM_ACTOR = 'system';
 
 const isUserSource = (s: OutcomeSource) => s === 'user_override' || s === 'user_reject';
 
-export type OutcomeInput = {
-  /** The agent decision being judged. */
-  decisionId: string;
+/**
+ * Input of `recordOutcome`. Give the judged agent `decisionId`, or a non-decision subject
+ * (`subjectType` + `subjectId`, e.g. a fact version) — with its saving `decisionId` when one exists.
+ */
+export type RecordOutcomeInput = {
+  /** The agent decision being judged (for a subject: the decision that saved it, if any). */
+  decisionId?: string;
+  /** Non-decision subject, e.g. `fact_version` + its id. */
+  subjectType?: string;
+  subjectId?: string;
+  /** Required when there is no (known) decision; otherwise the decision's workspace. */
+  workspaceId?: string;
   outcome: string;
   label: OutcomeLabel;
   source: OutcomeSource;
+  /**
+   * The source event (feedback event id, fact observation id, or for `stale` the caller's
+   * `<factId>|stale|<lastConfirmedAt>`). Calls are idempotent per (subject, outcome, sourceKey).
+   * Without it, automatic sources are idempotent per (decision, outcome, label, source, target) and
+   * `user_*` sources append.
+   */
+  sourceKey?: string;
   evidence?: Record<string, unknown>;
   /** Human actor (user sources; default `local-user`). Automatic sources are always `system`. */
   actor?: string;
@@ -39,48 +56,78 @@ export type OutcomeInput = {
   taskId?: string;
   targetType?: OutcomeTargetType;
   targetId?: string;
+  /** For a subject without a decision: the run / role / prompt version that produced it, when known. */
+  runId?: string;
+  role?: Role;
+  promptVersion?: string;
 };
 
 /**
- * THE single writer of `decision_outcomes`. Resolves the judged decision (unknown → `undefined`,
- * nothing written) and copies its workspace, role and prompt version, plus the task (and task type)
- * of its agent run. Automatic sources are idempotent per (decision, outcome, label, target) — a
- * resumed loop or re-run diff never doubles a row; `user_*` sources append every action (history).
+ * THE single writer of `decision_outcomes`. With a known `decisionId` it copies the decision's
+ * workspace, role, prompt version and agent run, plus the task (and task type) of that run. With
+ * only a subject it writes on the subject (`workspaceId` required). An unknown decision without a
+ * subject, or neither, writes nothing (`undefined`). Idempotent per (subject — else decision —,
+ * outcome, `sourceKey`) via a unique index; see `RecordOutcomeInput.sourceKey` for calls without one.
  */
-export function recordOutcome(store: Store, input: OutcomeInput): DecisionOutcome | undefined {
-  const decision = store.decisions.get(input.decisionId);
-  if (!decision) return undefined;
-  const repo = learningRepos(store).decisionOutcomes;
+export function recordOutcome(store: Store, input: RecordOutcomeInput): DecisionOutcome | undefined {
+  const decision = input.decisionId ? store.decisions.get(input.decisionId) : undefined;
+  const subject = input.subjectId ? { type: input.subjectType ?? 'subject', id: input.subjectId } : undefined;
+  if (!decision && !subject) return undefined;
+  const workspaceId = decision?.workspaceId ?? input.workspaceId;
+  if (!workspaceId) throw new Error('recordOutcome: a subject without a decision needs a workspaceId');
   const user = isUserSource(input.source);
-  if (!user) {
-    const existing = repo
-      .list({ decisionId: decision.id })
-      .find(
-        (o) =>
-          o.outcome === input.outcome && o.label === input.label && o.source === input.source && (o.targetId ?? null) === (input.targetId ?? null),
-      );
+  const sourceKey = input.sourceKey ?? (user ? undefined : `auto:${input.source}:${input.label}:${input.targetId ?? ''}`);
+  const repo = learningRepos(store).decisionOutcomes;
+  if (sourceKey !== undefined) {
+    const existing = existingOutcome(store, subject ?? { type: 'decision', id: decision!.id }, input.outcome, sourceKey);
     if (existing) return existing;
   }
-  const taskId = input.taskId ?? taskOfDecision(store, decision);
+  const taskId = input.taskId ?? (decision ? taskOfDecision(store, decision) : undefined);
   const task = taskId ? store.tasks.get(taskId) : undefined;
   const row: DecisionOutcome = {
     id: newId('dout'),
-    workspaceId: decision.workspaceId,
-    decisionId: decision.id,
+    workspaceId,
     outcome: input.outcome,
     label: input.label,
     evidenceJson: input.evidence ?? {},
     source: input.source,
     actor: user ? (input.actor ?? DEFAULT_USER_ACTOR) : SYSTEM_ACTOR,
-    role: decision.role,
-    promptVersion: decision.promptVersion,
     createdAt: new Date().toISOString(),
   };
+  if (decision) row.decisionId = decision.id;
+  if (subject) {
+    row.subjectType = subject.type;
+    row.subjectId = subject.id;
+  }
+  const runId = decision ? runOfDecision(store, decision) : input.runId;
+  if (runId) row.runId = runId;
+  const role = decision?.role ?? input.role;
+  if (role) row.role = role;
+  const promptVersion = decision?.promptVersion ?? input.promptVersion;
+  if (promptVersion) row.promptVersion = promptVersion;
+  if (sourceKey !== undefined) row.sourceKey = sourceKey;
   if (taskId) row.taskId = taskId;
   if (task) row.taskType = task.type;
   if (input.targetType) row.targetType = input.targetType;
   if (input.targetId) row.targetId = input.targetId;
   return repo.insert(row);
+}
+
+/** The row already written for (subject, outcome, sourceKey), if any (mirrors the unique index). */
+function existingOutcome(store: Store, subject: { type: string; id: string }, outcome: string, sourceKey: string): DecisionOutcome | undefined {
+  const hit = store.db
+    .prepare(
+      `SELECT id FROM decision_outcomes
+       WHERE COALESCE(subject_type, 'decision') = ? AND COALESCE(subject_id, decision_id) = ? AND outcome = ? AND source_key = ?`,
+    )
+    .get(subject.type, subject.id, outcome, sourceKey) as { id: string } | undefined;
+  return hit ? learningRepos(store).decisionOutcomes.get(hit.id) : undefined;
+}
+
+/** The agent run behind a decision; system decisions (user / scheduler, `payload.actor`) have none. */
+function runOfDecision(store: Store, d: Decision): string | undefined {
+  if (typeof (d.payload as { actor?: unknown } | null)?.actor === 'string') return undefined;
+  return store.agentRuns.get(d.agentRunId)?.id ?? (d.promptVersion !== 'n/a' ? d.agentRunId : undefined);
 }
 
 function taskOfDecision(store: Store, d: Decision): string | undefined {
@@ -243,7 +290,15 @@ function ownedOutputs(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): Arr
  */
 export function recordOverrideOutcome(
   store: Store,
-  input: { targetType: OutputKind; targetId: string; include: boolean | null; actor?: string; reason?: string; feedbackEventId?: string },
+  input: {
+    targetType: OutputKind;
+    targetId: string;
+    include: boolean | null;
+    actor?: string;
+    reason?: string;
+    /** The feedback event of the override: evidence + idempotency key (`feedback:<id>`). */
+    feedbackEventId?: string;
+  },
 ): DecisionOutcome[] {
   const { targetType, targetId, include } = input;
   if (include === null) return [];
@@ -256,7 +311,11 @@ export function recordOverrideOutcome(
   const evidence: Record<string, unknown> = { include, status };
   if (input.reason) evidence.reason = input.reason;
   if (input.feedbackEventId) evidence.feedbackEventId = input.feedbackEventId;
-  const common = { source: 'user_override' as const, targetType, targetId, ...(input.actor ? { actor: input.actor } : {}) };
+  const common = {
+    source: 'user_override' as const, targetType, targetId,
+    ...(input.actor ? { actor: input.actor } : {}),
+    ...(input.feedbackEventId ? { sourceKey: `feedback:${input.feedbackEventId}` } : {}),
+  };
   const taskId = output.taskId;
   const out: DecisionOutcome[] = [];
   const first = recordOutcome(store, {
@@ -289,51 +348,9 @@ export function recordUnitProposalRejected(
   if (!proposal.decisionId) return undefined;
   return recordOutcome(store, {
     decisionId: proposal.decisionId, outcome: 'rejected', label: 'user-rejected', source: 'user_reject',
-    evidence: { ...(reason ? { reason } : {}), ...(feedbackEventId ? { feedbackEventId } : {}) }, targetType: 'unit_proposal', targetId: proposal.id, ...(actor ? { actor } : {}),
+    evidence: { ...(reason ? { reason } : {}), ...(feedbackEventId ? { feedbackEventId } : {}) },
+    ...(feedbackEventId ? { sourceKey: `feedback:${feedbackEventId}` } : {}), targetType: 'unit_proposal', targetId: proposal.id, ...(actor ? { actor } : {}),
   });
-}
-
-// ---------------------------------------------------------------------------
-// scheduled "what changed"
-
-/**
- * Outcomes of a scheduled "what changed" diff (`stale`, on each previous finding's save decision):
- * `contradicted` when the next run re-researched the subject but no longer found the claim (e.g.
- * "$10/mo" became "$12/mo"); `changed` when a screenshot the finding cites changed. Subjects the
- * next run did not cover at all record nothing. Idempotent.
- */
-export function recordWhatChangedOutcomes(
-  store: Store,
-  input: {
-    whatChangedDecisionId: string;
-    prev: ResearchRun;
-    next: ResearchRun;
-    contradicted: string[];
-    changedArtifacts: Array<{ prev: string; next: string }>;
-  },
-): DecisionOutcome[] {
-  const out: DecisionOutcome[] = [];
-  const base = { whatChangedDecisionId: input.whatChangedDecisionId, prevRunId: input.prev.id, nextRunId: input.next.id };
-  const write = (findingId: string, outcome: string, evidence: Record<string, unknown>) => {
-    const save = outputSaveDecision(store, 'finding', findingId);
-    if (!save) return;
-    const taskId = store.findings.get(findingId)?.taskId;
-    const o = recordOutcome(store, {
-      decisionId: save.id, outcome, label: 'stale', source: 'what_changed', evidence: { ...base, ...evidence },
-      targetType: 'finding', targetId: findingId, ...(taskId && store.tasks.get(taskId) ? { taskId } : {}),
-    });
-    if (o) out.push(o);
-  };
-  for (const id of input.contradicted) write(id, 'contradicted', {});
-  const changed = new Map(input.changedArtifacts.map((c) => [c.prev, c.next]));
-  if (changed.size) {
-    for (const f of store.findings.list({ runId: input.prev.id })) {
-      if (f.workspaceId !== input.prev.workspaceId || f.status === 'superseded') continue;
-      const hits = f.evidence.filter((a) => changed.has(a));
-      if (hits.length) write(f.id, 'changed', { changedArtifacts: hits.map((a) => ({ prev: a, next: changed.get(a) })) });
-    }
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -372,10 +389,12 @@ export function listOutcomes(store: Store, filter: OutcomeFilter = {}): Decision
 export function outcomeReport(store: Store, workspaceIds: string[]): OutcomeReport {
   const rows = new Map<string, OutcomeReportRow>();
   for (const o of listOutcomes(store, { workspaceIds })) {
-    const key = `${o.role}\u0000${o.taskType ?? ''}\u0000${o.promptVersion}`;
+    const key = `${o.role ?? ''}\u0000${o.taskType ?? ''}\u0000${o.promptVersion ?? ''}`;
     let row = rows.get(key);
     if (!row) {
-      row = { role: o.role, promptVersion: o.promptVersion, counts: {}, total: 0 };
+      row = { counts: {}, total: 0 };
+      if (o.role) row.role = o.role;
+      if (o.promptVersion) row.promptVersion = o.promptVersion;
       if (o.taskType) row.taskType = o.taskType;
       rows.set(key, row);
     }
@@ -386,9 +405,9 @@ export function outcomeReport(store: Store, workspaceIds: string[]): OutcomeRepo
     labels: [...OUTCOME_LABELS],
     rows: [...rows.values()].sort(
       (a, b) =>
-        a.role.localeCompare(b.role) ||
+        (a.role ?? '').localeCompare(b.role ?? '') ||
         (a.taskType ?? '').localeCompare(b.taskType ?? '') ||
-        a.promptVersion.localeCompare(b.promptVersion),
+        (a.promptVersion ?? '').localeCompare(b.promptVersion ?? ''),
     ),
   };
 }

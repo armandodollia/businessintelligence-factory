@@ -523,29 +523,41 @@ export const MIGRATIONS: readonly string[] = [
   `,
   // 16: learning loop WP-C — decision outcomes (labelled after-the-fact judgments of agent decisions:
   // task end, superseded outputs, scheduled what_changed diffs, user overrides / rejects, review
-  // disputes) and append-only review-issue history (one row per task + round + issue, stable issue
+  // disputes — or of a non-decision subject such as a fact version, idempotent per subject + outcome +
+  // source event key) and append-only review-issue history (one row per task + round + issue, stable issue
   // ids across rounds, dispute status). Self-contained: depends on no other learning-loop migration.
   `
   CREATE TABLE decision_outcomes (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
-    decision_id TEXT NOT NULL,
+    decision_id TEXT,
+    subject_type TEXT,
+    subject_id TEXT,
+    run_id TEXT,
     outcome TEXT NOT NULL,
     label TEXT NOT NULL,
     evidence_json TEXT NOT NULL,
     source TEXT NOT NULL,
+    source_key TEXT,
     actor TEXT NOT NULL DEFAULT 'local-user',
     task_id TEXT,
     target_type TEXT,
     target_id TEXT,
-    role TEXT NOT NULL,
+    role TEXT,
     task_type TEXT,
-    prompt_version TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    prompt_version TEXT,
+    created_at TEXT NOT NULL,
+    CHECK (decision_id IS NOT NULL OR subject_id IS NOT NULL)
   );
   CREATE INDEX decision_outcomes_ws ON decision_outcomes (workspace_id);
   CREATE INDEX decision_outcomes_decision ON decision_outcomes (decision_id);
+  CREATE INDEX decision_outcomes_subject ON decision_outcomes (subject_type, subject_id);
   CREATE INDEX decision_outcomes_task ON decision_outcomes (task_id);
+  -- Idempotency: one row per (subject, outcome, source event key); the subject is
+  -- (subject_type, subject_id), else the judged decision.
+  CREATE UNIQUE INDEX decision_outcomes_source_key ON decision_outcomes (
+    COALESCE(subject_type, 'decision'), COALESCE(subject_id, decision_id), outcome, source_key
+  ) WHERE source_key IS NOT NULL;
 
   CREATE TABLE review_issues (
     id TEXT PRIMARY KEY,

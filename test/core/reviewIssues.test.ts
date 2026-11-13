@@ -163,7 +163,7 @@ describe('review disputes', () => {
     expect(secondRevise.prompt).toMatch(/I1: the reviewer reasserted this issue after your pushback \(1×; limit reached\)/);
     const miss = outcomes(s.store).filter((o) => o.label === 'worker-miss');
     expect(miss).toHaveLength(1);
-    const pushback = s.store.decisions.get(miss[0]!.decisionId)!;
+    const pushback = s.store.decisions.get(miss[0]!.decisionId!)!;
     expect(pushback.kind).toBe('pushback');
     expect(miss[0]).toMatchObject({ outcome: 'fixed_after_upheld', source: 'dispute', role: 'worker', taskId: task.id });
   });

@@ -2,8 +2,8 @@ import type { EventBus } from '../events.js';
 import type { Store } from '../store/db.js';
 import { recordSystemDecision } from '../systemDecision.js';
 import type { Decision, ResearchRun } from '../types.js';
-import { contradictedFindings, diffRuns } from './diff.js';
-import { recordWhatChangedOutcomes } from '../learning/outcomes.js';
+import { diffRuns } from './diff.js';
+import { recordWhatChangedOutcomes } from '../learning/whatChangedOutcomes.js';
 
 /**
  * The latest finished (`done`) run of the same schedule + phase that started before `rr`. Manual
@@ -60,11 +60,8 @@ export function recordWhatChanged(
         refs: [rr.id, prev.id, ...diff.newFindings, ...diff.changedArtifacts.map((c) => c.next)],
       }),
     );
-    // learning loop WP-C: findings the diff contradicts or changes get a `stale` outcome.
-    recordWhatChangedOutcomes(store, {
-      whatChangedDecisionId: out.at(-1)!.id, prev, next: rr,
-      contradicted: contradictedFindings(prev.id, rr.id, deps), changedArtifacts: diff.changedArtifacts,
-    });
+    // learning loop WP-C: findings the diff contradicts or changes get a `stale` outcome (one hook).
+    recordWhatChangedOutcomes(store, { whatChangedDecisionId: out.at(-1)!.id, prev, next: rr, changedArtifacts: diff.changedArtifacts });
   }
   return out;
 }

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { learningRepos } from '../../src/core/learning/store.js';
 import {
+  type RecordOutcomeInput,
   listOutcomes,
   outcomeReport,
   outputSaveDecision,
@@ -9,7 +10,8 @@ import {
 } from '../../src/core/learning/outcomes.js';
 import { setIncludeInSynthesis } from '../../src/core/evidence/synthesis.js';
 import { decideUnitProposal, setIncludeOverride } from '../../src/core/feedback/actions.js';
-import { feedbackOutcomesRegistered, registerFeedbackOutcomes } from '../../src/core/learning/feedbackOutcomes.js';
+import { feedbackOutcomesRegistered, outcomesFromFeedback, registerFeedbackOutcomes } from '../../src/core/learning/feedbackOutcomes.js';
+import { OUTCOME_LABELS } from '../../src/core/learning/types.js';
 import { resumeInterrupted } from '../../src/core/research/orchestrator.js';
 import { setOutputInclude } from '../../src/core/research/outputs.js';
 import { runTaskWithReview } from '../../src/core/research/reviewLoop.js';
@@ -86,13 +88,127 @@ describe('recordOutcome', () => {
   });
 });
 
+describe('recordOutcome on non-decision subjects (integration: knowledge-store lineage)', () => {
+  const cols = (s: ReturnType<typeof researchSetup>) =>
+    (s.store.db.prepare('PRAGMA table_info(decision_outcomes)').all() as Array<{ name: string; notnull: number }>);
+
+  it('migration 16: decision_id nullable, subject / run / source_key columns, CHECK decision or subject, unique source key', () => {
+    const s = researchSetup(opened);
+    const c = cols(s);
+    expect(c.find((x) => x.name === 'decision_id')!.notnull).toBe(0);
+    expect(c.map((x) => x.name)).toEqual(expect.arrayContaining(['subject_type', 'subject_id', 'run_id', 'source_key']));
+    const insert = (id: string, decision: string | null, subject: string | null, key: string | null) =>
+      s.store.db
+        .prepare(
+          `INSERT INTO decision_outcomes (id, workspace_id, decision_id, subject_type, subject_id, outcome, label, evidence_json, source, source_key, created_at)
+           VALUES (?, 'ws_a', ?, ?, ?, 'stale', 'stale', '{}', 'fact_lineage', ?, 'x')`,
+        )
+        .run(id, decision, subject ? 'fact_version' : null, subject, key);
+    expect(() => insert('d1', null, null, null)).toThrow(/CHECK/);
+    insert('d2', null, 'fv_1', 'k1');
+    expect(() => insert('d3', null, 'fv_1', 'k1')).toThrow(/UNIQUE/);
+    insert('d4', null, 'fv_1', 'k2');
+    insert('d5', null, 'fv_2', 'k1');
+  });
+
+  it('labels include confirmed, changed, retracted, stale and user-rejected', () => {
+    expect(OUTCOME_LABELS).toEqual(expect.arrayContaining(['confirmed', 'changed', 'retracted', 'stale', 'user-rejected']));
+  });
+
+  it('stale on a synthetic subject without a decision: idempotent per (subject, outcome, caller sourceKey)', () => {
+    const s = researchSetup(opened);
+    const stale = (lastConfirmedAt: string): RecordOutcomeInput => ({
+      workspaceId: 'ws_a', subjectType: 'test_fact', subjectId: 'fact_1', outcome: 'stale', label: 'stale', source: 'fact_lineage',
+      sourceKey: `fact_1|stale|${lastConfirmedAt}`, evidence: { lastConfirmedAt },
+    });
+    const a = recordOutcome(s.store, stale('2026-10-01T00:00:00Z'))!;
+    expect(a).toMatchObject({ subjectType: 'test_fact', subjectId: 'fact_1', label: 'stale', actor: 'system', sourceKey: 'fact_1|stale|2026-10-01T00:00:00Z' });
+    expect(a.decisionId).toBeUndefined();
+    expect(recordOutcome(s.store, stale('2026-10-01T00:00:00Z'))!.id).toBe(a.id);
+    const b = recordOutcome(s.store, stale('2026-11-01T00:00:00Z'))!; // re-confirmed, then stale again
+    expect(b.id).not.toBe(a.id);
+    expect(outcomesOf(s.store)).toHaveLength(2);
+  });
+
+  it('a subject version attaches to its saving decision when one exists (role, prompt version, run copied)', () => {
+    const s = researchSetup(opened);
+    s.store.agentRuns.insert({
+      id: 'run_x', workspaceId: 'ws_a', role: 'worker', model: { provider: 'claude', model: 'sonnet' },
+      token: 'tok', status: 'done', startedAt: new Date().toISOString(), promptVersion: 'pv1',
+    });
+    const save = agentDecision(s.store, { payload: { tool: 'save_fact', factVersionId: 'fv_1' } });
+    const obs = (kind: 'confirmed' | 'changed' | 'retracted', obsId: string, decisionId?: string): RecordOutcomeInput => ({
+      workspaceId: 'ws_a', subjectType: 'test_fact_version', subjectId: 'fv_1', outcome: kind, label: kind, source: 'fact_lineage',
+      sourceKey: obsId, ...(decisionId ? { decisionId } : {}),
+    });
+    const changed = recordOutcome(s.store, obs('changed', 'obs_1', save.id))!;
+    expect(changed).toMatchObject({ decisionId: save.id, subjectId: 'fv_1', role: 'worker', promptVersion: 'pv1', runId: 'run_x', label: 'changed' });
+    expect(recordOutcome(s.store, obs('changed', 'obs_1', save.id))!.id).toBe(changed.id);
+    recordOutcome(s.store, obs('confirmed', 'obs_2', save.id));
+    // Same observation key, different outcome → its own row.
+    recordOutcome(s.store, obs('retracted', 'obs_2', save.id));
+    // No saving decision known: still written on the subject, with the caller's run when given.
+    const loose = recordOutcome(s.store, { ...obs('retracted', 'obs_3'), runId: 'run_x', role: 'worker', promptVersion: 'pv1' })!;
+    expect(loose).toMatchObject({ runId: 'run_x', role: 'worker', promptVersion: 'pv1' });
+    expect(loose.decisionId).toBeUndefined();
+    expect(outcomesOf(s.store).map((o) => [o.outcome, o.sourceKey])).toEqual([
+      ['changed', 'obs_1'], ['confirmed', 'obs_2'], ['retracted', 'obs_2'], ['retracted', 'obs_3'],
+    ]);
+  });
+
+  it('run_id is filled from an agent decision, never from a system decision', () => {
+    const s = researchSetup(opened);
+    s.store.agentRuns.insert({
+      id: 'run_y', workspaceId: 'ws_a', role: 'worker', model: { provider: 'claude', model: 'sonnet' },
+      token: 'tok', status: 'done', startedAt: new Date().toISOString(), promptVersion: 'pv1',
+    });
+    const agent = agentDecision(s.store, { agentRunId: 'run_y' });
+    expect(recordOutcome(s.store, { decisionId: agent.id, outcome: 'verified', label: 'confirmed', source: 'review_loop' })!.runId).toBe('run_y');
+    const sys = agentDecision(s.store, { agentRunId: 'scheduler', role: 'orchestrator', promptVersion: 'n/a', payload: { actor: 'scheduler' } });
+    expect(recordOutcome(s.store, { decisionId: sys.id, outcome: 'x', label: 'stale', source: 'what_changed' })!.runId).toBeUndefined();
+  });
+
+  it('a subject without a decision needs a workspace; neither decision nor subject writes nothing', () => {
+    const s = researchSetup(opened);
+    expect(() => recordOutcome(s.store, { subjectType: 'test_fact', subjectId: 'f', outcome: 'stale', label: 'stale', source: 'fact_lineage' } as RecordOutcomeInput)).toThrow(/workspace/);
+    expect(recordOutcome(s.store, { workspaceId: 'ws_a', outcome: 'stale', label: 'stale', source: 'fact_lineage' } as RecordOutcomeInput)).toBeUndefined();
+    expect(outcomesOf(s.store)).toEqual([]);
+  });
+
+  it('feedback-driven outcomes are keyed on the feedback event (replaying the event writes nothing more)', async () => {
+    const s = researchSetup(opened);
+    s.store.recommendations.insert({
+      id: 'rec_9', workspaceId: 'ws_a', title: 'T', summary: 's', criteria: {}, findingIds: [], personaFeedback: [],
+      priority: 1, createdAt: new Date().toISOString(), status: 'unverified',
+    });
+    agentDecision(s.store, { role: 'synthesizer', payload: { tool: 'save_recommendation', recommendationId: 'rec_9' }, refs: ['rec_9'] });
+    const release = registerFeedbackOutcomes();
+    try {
+      setIncludeOverride(s.store, 'recommendation', 'rec_9', true, { actor: 'ana' });
+    } finally {
+      release();
+    }
+    const [o] = outcomesOf(s.store);
+    expect(o).toMatchObject({ label: 'confirmed', sourceKey: `feedback:${String(o!.evidenceJson.feedbackEventId)}` });
+    const { latestFeedback } = await import('../../src/core/feedback/events.js');
+    outcomesFromFeedback(s.store, latestFeedback(s.store, { kind: 'include_override' })!);
+    expect(outcomesOf(s.store)).toHaveLength(1);
+  });
+
+  it('the outcomes report groups subject-only outcomes without a role or prompt version', () => {
+    const s = researchSetup(opened);
+    recordOutcome(s.store, { workspaceId: 'ws_a', subjectType: 'test_fact', subjectId: 'f1', outcome: 'stale', label: 'stale', source: 'fact_lineage', sourceKey: 'k' });
+    expect(outcomeReport(s.store, ['ws_a']).rows).toEqual([{ counts: { stale: 1 }, total: 1 }]);
+  });
+});
+
 describe('task end outcomes (review loop)', () => {
   it('verified task → confirmed on its deliverable decision', async () => {
     const s = researchSetup(opened, { pick: (r) => (r.kind === 'work' ? submitWork() : review(9)) });
     const task = addTask(s.store);
     await runTaskWithReview(task, s.deps);
     const [o] = outcomesOf(s.store);
-    const d = s.store.decisions.get(o!.decisionId)!;
+    const d = s.store.decisions.get(o!.decisionId!)!;
     expect((d.payload as { tool: string }).tool).toBe('submit_result');
     expect(o).toMatchObject({ outcome: 'verified', label: 'confirmed', source: 'review_loop', taskId: task.id, targetType: 'task', taskType: 'news_scan', role: 'worker' });
     expect(o!.evidenceJson).toMatchObject({ round: 1, score: 9 });
@@ -129,7 +245,7 @@ describe('task end outcomes (review loop)', () => {
     expect((await runTaskWithReview(task, s.deps)).status).toBe('failed');
     const [o] = outcomesOf(s.store);
     expect(o).toMatchObject({ outcome: 'failed', label: 'run-failed', taskId: task.id });
-    expect((s.store.decisions.get(o!.decisionId)!.payload as { event: string }).event).toBe('worker_run_failed');
+    expect((s.store.decisions.get(o!.decisionId!)!.payload as { event: string }).event).toBe('worker_run_failed');
   });
 
   it('superseded outputs → missed-evidence on their save decision', async () => {

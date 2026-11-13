@@ -12,8 +12,8 @@ export const learningSpecs = {
     table: 'decision_outcomes',
     key: 'id',
     fields: {
-      id: 'text', workspaceId: 'text', decisionId: 'text', outcome: 'text', label: 'text', evidenceJson: 'json',
-      source: 'text', actor: 'text', taskId: 'text', targetType: 'text', targetId: 'text', role: 'text',
+      id: 'text', workspaceId: 'text', decisionId: 'text', subjectType: 'text', subjectId: 'text', runId: 'text',
+      outcome: 'text', label: 'text', evidenceJson: 'json', source: 'text', sourceKey: 'text', actor: 'text', taskId: 'text', targetType: 'text', targetId: 'text', role: 'text',
       taskType: 'text', promptVersion: 'text', createdAt: 'text',
     },
   } satisfies TableSpec<DecisionOutcome>,

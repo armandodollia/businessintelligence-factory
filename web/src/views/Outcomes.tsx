@@ -32,10 +32,10 @@ export function OutcomesTable({ wsId }: { wsId: string }) {
           </thead>
           <tbody>
             {o.report.rows.map((r) => (
-              <tr key={`${r.role}:${r.taskType ?? ''}:${r.promptVersion}`}>
-                <td>{r.role}</td>
+              <tr key={`${r.role ?? ''}:${r.taskType ?? ''}:${r.promptVersion ?? ''}`}>
+                <td>{r.role ?? '—'}</td>
                 <td>{r.taskType ?? '—'}</td>
-                <td className="small">{r.promptVersion}</td>
+                <td className="small">{r.promptVersion ?? '—'}</td>
                 {o.columns.map((l) => (
                   <td key={l}>{r.counts[l] ?? 0}</td>
                 ))}
