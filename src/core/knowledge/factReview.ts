@@ -36,7 +36,7 @@ export type ReviewFactContext = {
 const OUTPUT_ID = /\b(?:fnd|rec|per|cmp|hyp)_[0-9A-Z]{26}\b/g;
 
 /** The task's confirm / retract observations still in play: pending, from the latest round or cited by the deliverable. */
-function liveObservations(store: Store, task: Pick<Task, 'id' | 'workspaceId' | 'round' | 'submittedRound' | 'result'>): FactObservation[] {
+export function liveObservations(store: Store, task: Pick<Task, 'id' | 'workspaceId' | 'round' | 'submittedRound' | 'result'>): FactObservation[] {
   const all = knowledgeRepos(store)
     .factObservations.list({ taskId: task.id, status: 'pending' })
     .filter((o) => o.workspaceId === task.workspaceId && (o.kind === 'confirm' || o.kind === 'retract'));

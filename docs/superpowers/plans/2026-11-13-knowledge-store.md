@@ -615,6 +615,81 @@ Smaller decisions taken while building KS-0 (none changes §3, §9 or §12).
   `evidenceIncludesUpload` (delimited block); the backfill and the tests use them, so the flag
   and the export's expansion agree by construction.
 
+## KS-2 builder notes
+
+Smaller decisions taken while building KS-2 (none changes §3, §9 or §12).
+
+- **Modules:** `knowledge/facts.ts` (claims, candidates, freshness, lineage, applying observations,
+  human fact actions), `knowledge/factTools.ts` (`save_finding` beyond the replay rule,
+  `confirm_finding` / `retract_finding`, quote checks), `knowledge/factReview.ts` (reviewer context),
+  `knowledge/uploadCause.ts` (`explainUploadDerived`). Hot files only call into these.
+- **Similarity floor:** `claimSimilarity` = Jaccard of the word-token sets (`[\p{L}\p{N}]+`) of
+  `normalizeClaim` (§8.2 `normalizeText`, NFKC, lower case, trailing punctuation dropped). FTS5
+  selects up to 50 rows (`claim` column, quoted tokens OR-ed, ≤ 32 tokens, bm25 order); the floor and
+  `candidateLimit` then apply. Documented next to the config key, in the README and in design §16.
+- **Sameness:** "same entity" = equal `entity_id` when both sides have one, else equal subject name
+  key (`titleKey`). KS-3 passes the resolved entity as `saveFindingFact(…, { entityId })` (the
+  handler passes `{}` today). Candidates: lifecycle `current`, status not `superseded` / `failed`
+  (unverified ones are shown, flagged), `workspace_id` in `treeIds`, never the saving task's own
+  outputs.
+- **Exact match:** auto-confirms only when the evidence includes an artifact captured by this task;
+  otherwise it comes back as the first candidate, flagged `exact`, and nothing is saved.
+- **Logging:** the handshake writes a `retrieval_events` row (new tool value `save_finding`, scope
+  `tree`, results = every fact shown; the auto-confirm logs its matched fact too) and a Decision
+  (`decision`, `event: duplicate_handshake`, refs = task + candidates). The reviewer context is
+  logged as `prompt_context` on the reviewer run right after the run returns (its id is created
+  inside the supervisor); a process crash during the run loses that row — KS-5 may want a pre-run
+  hook for all prompt reads.
+- **Observations:** every new fact gets a `create` observation (applied with the task: sets
+  `last_confirmed_at = created_at`), so KS-5's "what changed" can read new facts from observations.
+  Confirm / retract Decisions are kind `score`, payload `tool: confirm_finding | retract_finding`
+  and `findingId`, also when they came through `save_finding` (so `outputSaveDecision` still finds
+  the original save). The save Decision carries `relation` only when the agent gave one, plus
+  `appliesTo` / `evidenceRefs` when used (the plain-save payload is unchanged).
+- **Guards:** a fact can be confirmed, retracted or replaced only when current, in the caller's
+  tree, and not an output of the caller's own task. Unknown and out-of-tree ids get the same
+  "finding '<id>' not found".
+- **"Captured by this task"** = an `artifact_captures` row with the task id or one of the task's
+  agent runs. KS-1 writes those rows; until KS-1 is merged no capture carries a task, so
+  `confirm_finding` / `retract_finding` / auto-confirm fail in production (tests insert captures).
+- **Quotes:** whitespace-insensitive, case-sensitive substring of the extracted text (chunks of the
+  artifact or of its `duplicate_of` canonical). A `pending` artifact goes through the
+  `ensureExtracted` hook (KS-1 wires `ingestArtifact`); without the hook it is extracted in memory
+  with the KS-1a library and nothing is stored. Quote ≤ 2 000 chars; offsets stored only on an exact
+  raw match. `evidence_refs` artifacts join `findings.evidence`. On a confirmation via
+  `save_finding`, quotes are verified but not stored (`finding_evidence` belongs to a fact version).
+- **Replacement:** `version` = lineage max + 1 at save (two pending replacements never share one);
+  entity and `ttl_days` are inherited, and so are the prior's scope labels when `applies_to` is
+  absent and they differ from the caller's node.
+- **Applying (§7.2):** replace and retract apply onto the lineage head and set `lineage_conflict`
+  on the new head / retracted head when the named version is no longer the head; a conflicting
+  replacement is renumbered above every other version and the lineage upload rule is re-applied. A
+  **confirmation of a non-head version confirms nothing** and flags the head (confirming the new claim
+  with evidence for the old one would be wrong). A rejected candidate still counts for the lineage
+  upload rule of later versions (over-flagging only).
+- **Outcomes (ruling 5, wired now):** `applyObservations` writes `confirmed` / `changed` (on the
+  version actually replaced) / `retracted` with subject `fact_version`, the save Decision, source
+  `fact_lineage`, `sourceKey` = observation id. `recordStaleOutcome(store, config, fact, now)`
+  exists (`sourceKey` = `last_confirmed_at`, else first seen / created) but has no caller: its call
+  sites are KS-4 `list_changes` and the KS-5 briefing. Human actions go through the WP-A feedback
+  listener (WP-C's "one place"): `fact_retract` → `retracted` / `user-rejected` (`user_reject`),
+  `fact_replacement_accept` → `changed` on the replaced version (`user_override`), keyed by the
+  observation id.
+- **Human actions** (`facts.ts`): `retractFactByUser` (an applied retract observation without a
+  task), `setFactScopes` (source `user`), `applyReplacementByUser` — the last is called from
+  `setIncludeOverride` when a finding's include override is set to true on a `candidate` whose
+  replace observation was rejected. KS-7 routes call these; they throw `KnowledgeNotFoundError` /
+  `FactActionError` (status 409 for a non-current fact).
+- **Re-review:** the review queue lists a lineage's live version (replaced and retracted versions
+  are skipped), so a new version is unrated and the lineage is queued again. Conflicts are not
+  queued there (KS-7's conflict list).
+- **Revise prompt:** "Your current outputs" also lists the task's pending confirmations /
+  retractions by fact id only (no claim text: that section is not a logged read).
+- **Export (ruling 1):** `exportTrainingData` excludes by `uploadExclusionSet`, a `Set` whose `has`
+  also answers `itemIsUploadDerived` (memoized) for every id the reference expansion reaches;
+  iteration still yields only the upload ids. `explainUploadDerived(store, id)` returns the recorded
+  cause chain (item → … → upload) and a one-line text for the UI and the export report.
+
 ## Design-thread rulings after KS-0 (2026-11-13)
 
 Binding for the packages named; recorded by the orchestrator from the design thread.

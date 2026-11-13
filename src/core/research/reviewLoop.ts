@@ -16,7 +16,7 @@ import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 import { defaultConfig } from '../config/schema.js'; // KS-2
-import { reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
+import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
 import { recordRetrieval } from '../knowledge/retrievalLog.js'; // KS-2
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
@@ -252,6 +252,9 @@ export function currentOutputsSection(deps: Pick<ResearchDeps, 'store'>, task: T
     ...outputs.personas.filter((p) => current.has(p.id)).map((p) => `- persona ${p.id}: ${p.slug}`),
     ...outputs.competitors.filter((c) => current.has(c.id)).map((c) => `- competitor ${c.id}: ${trunc(c.name, 200)}`),
     ...outputs.hypotheses.filter((h) => current.has(h.id)).map((h) => `- hypothesis ${h.id}: ${trunc(h.hypothesis, 200)}`),
+    // KS-2: confirmations / retractions follow the same rule (re-call the tool, or cite the fact id).
+    // Ids only: the fact's text is another item's, and this prompt section is not a logged read.
+    ...liveObservations(deps.store, task).map((o) => `- ${o.kind === 'confirm' ? 'confirmation' : 'retraction'} of finding ${o.findingId}`),
   ];
   if (!lines.length) return '';
   return (

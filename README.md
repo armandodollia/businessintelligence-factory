@@ -37,8 +37,9 @@ the agent CLIs call into, and a small React web app. Design spec:
      reviewer `expand` 3000, synthesizer `briefing` 4000 — and per-provider scale), `hardMaxTokens`
      (8000), `freshness` (`defaultDays` 90, `byEntityKind`), `extraction` (`maxTextChars`,
      `chunkTokens` 400, `maxChunkTokens` 600, `xlsxMaxRows`, `inlineMaxBytes`, `concurrency`),
-     `captions` (`required`, `minChars` 20), `dedupe` (`candidateLimit` 3, `similarityFloor`),
-     `retention` (`pruneMinAgeDays`).
+     `captions` (`required`, `minChars` 20), `dedupe` (`candidateLimit` 3, `similarityFloor` 0.5 —
+     Jaccard overlap of the word sets of the two normalized claims, 0–1; full-text bm25 only picks
+     which stored facts are compared), `retention` (`pruneMinAgeDays`).
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -168,6 +169,17 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   Strategy flags unverified recommendations with the last reviewer's objections and hides failed
   ones unless you include them ("Show failed" lists them). The Competitors page, the review queue and
   the interviewer's drill-down use only verified (or included) competitors and hypotheses.
+- **Living facts.** A finding is a fact with a stable identity across runs (a lineage of versions).
+  A later run *confirms* it, *replaces* it with a new version (price $10 → $12) or *retracts* it,
+  instead of saving a duplicate; nothing is deleted. `save_finding` checks the store first: an
+  identical current claim about the same subject is confirmed automatically (citing an artifact
+  saved in the task), and similar current facts of the business tree are returned without saving
+  until the agent says `relation: "new"`, `{confirms}` or `{replaces}`; `confirm_finding` /
+  `retract_finding` do the same explicitly. These observations apply only when the task is verified
+  (an unverified replacement stays an "unverified update" until you include it). Quotes in
+  `evidence_refs` are checked against the artifact's text. Only the current version of a fact feeds
+  synthesis; the review queue lists a fact's live version, so a new version is rated again. The
+  reviewer sees the prior claim, the facts a task confirms or retracts, and the verified quotes.
 - **Review history and disputes.** Every review round's issues are kept (`review_issues`), with
   stable issue ids across rounds when the reviewer repeats an issue, and each issue's fate: `open`,
   `fixed`, `pushed_back`, `upheld` (reasserted after a pushback) or `withdrawn` (dropped after a
@@ -180,8 +192,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   recommendation, persona, competitor or symptom hypothesis — or rejected a unit proposal; excluding
   a verified output also marks the passing review `weak-review`), `confirmed` (you included an output
   the review did not verify), `reviewer-false-positive` (an issue dropped after a pushback) and
-  `worker-miss` (an upheld issue the worker then fixed); `changed` and `retracted` are reserved for
-  the knowledge store's fact lineage. Your actions reach outcomes from one place: the feedback event
+  `worker-miss` (an upheld issue the worker then fixed); for fact versions, `confirmed` (a verified
+  confirmation), `changed` (replaced by a new version) and `retracted` (by a run, or `user-rejected`
+  when you retract it). Your actions reach outcomes from one place: the feedback event
   each action records (see Feedback log) — so each action writes its outcome once, under your
   `user.id`. An outcome can also judge a non-decision subject (e.g. a fact version), and each one is
   written once per subject, outcome and source event. The Decision log shows the counts per role,
@@ -225,13 +238,16 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   produced the item. Recorded actions: include overrides (findings, recommendations, personas,
   competitors, symptom hypotheses), profile edits, unit proposal accept / accept-with-edits / reject,
   symptom hypothesis corrections (Findings page), request and escalation answers, weight changes,
-  prompt patch approvals and calibration reverts. Ratings store the agent run and prompt version they judged. Feedback feeds calibration:
+  prompt patch approvals and calibration reverts, and fact actions (scope change, retraction,
+  accepting an unverified update). Ratings store the agent run and prompt version they judged. Feedback feeds calibration:
   excluding an output counts as a disagreement with it, including an unverified one as an agreement,
   and unit proposal rejections / edits are scaled disagreements on the proposing decision, so they
   rank among the prompt patch examples. When an agent revises an item after you rated it, the item
   returns to the review queue. The Decision log page lists the feedback with actor, time and reason.
   The export adds answered requests, the interview transcript (each turn linked to its interviewer
-  run), feedback events and each output's final review status, with the same upload exclusion.
+  run), feedback events and each output's final review status, with the same upload exclusion. The
+  exclusion also covers anything the knowledge store marks upload-derived (a fact confirmed with an
+  upload, a later version of such a fact, or a record citing one); `explainUploadDerived` says why.
 - **Usage, cost and prompts.** Every agent run's token usage (input, output, cache read/write) is
   stored with its cost, computed from the dated price table `src/core/harness/pricing.json` (USD per
   1M tokens, editable — bump its `version` / `effectiveDate` when you change a price; the codex model

@@ -9,7 +9,7 @@ import { exportTrainingData } from '../../../src/core/scoring/export.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
 import type { Task } from '../../../src/core/types.js';
-import { addTask, researchSetup, review } from '../helpers/research.js';
+import { addTask, researchSetup, review, revise } from '../helpers/research.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -116,5 +116,39 @@ describe('recurring runs keep living facts (design §18 "Recurring"; KS-2 ruling
     expect(v2.uploadCause).toBe(`lineage:${plans.id}`);
     const save = env.store.decisions.list().find((d) => (d.payload as { findingId?: string }).findingId === v2.id)!;
     expect(exportTrainingData('ws_a', { store: env.store })).not.toContain(save.id);
+  });
+
+  it('a confirmation not re-submitted in the final round is superseded; one cited by the deliverable is applied', async () => {
+    const env = setup();
+    await run(env, 'rrun_1', async (tools, task) => {
+      const a = await capture(env, tools, task, 'Three plans.');
+      await tools.call('save_finding', { claim: 'Acme sells three plans', subject: 'Acme', evidence: [a] });
+    });
+    const fact = env.store.findings.list({ claim: 'Acme sells three plans' })[0]!;
+    const twoRounds = async (cite: boolean) => {
+      const task = addTask(env.store, { runId: `rrun_${cite}` });
+      let reviews = 0;
+      const prompts: AgentRequest[] = [];
+      env.state.pick = (r): FakeScript => {
+        prompts.push(r);
+        if (r.kind === 'review') return review(reviews++ === 0 ? 2 : 9, reviews === 1 ? [{ class: 'nit', description: 'tidy' }] : []);
+        if (r.kind === 'work') {
+          return async (tools) => {
+            const a = await capture(env, tools, task, 'Still three plans.');
+            await tools.call('confirm_finding', { finding_id: fact.id, evidence: [a] });
+            await tools.call('submit_result', { summary: 'r1' });
+          };
+        }
+        return cite ? revise('fix', { summary: `still true: ${fact.id}` })(r) : revise('fix')(r);
+      };
+      await runTaskWithReview(task, env.deps);
+      const revisePrompt = prompts.find((p) => p.kind === 'revise')!.prompt;
+      expect(revisePrompt).toContain(`- confirmation of finding ${fact.id}`);
+      return knowledgeRepos(env.store).factObservations.list({ taskId: task.id })[0]!.status;
+    };
+    expect(await twoRounds(false)).toBe('superseded');
+    expect(env.store.findings.get(fact.id)!.confirmCount).toBe(0);
+    expect(await twoRounds(true)).toBe('applied');
+    expect(env.store.findings.get(fact.id)!.confirmCount).toBe(1);
   });
 });
