@@ -2,9 +2,10 @@
 /**
  * Export-exclusion ruling (design §12, "visible cost"): the decision log's export shows how many
  * judgments the default exclusion leaves out, by cause, and that including uploads includes them.
+ * Ruling R6 (wave 2): it is computed only when the user asks (a button), never on page load.
  * Behaviour in web/src/logic (formatting, the hook), markup in the view, no fetch in views.
  */
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -75,10 +76,17 @@ describe('export summary (logic)', () => {
 });
 
 describe('export summary (view)', () => {
-  it('the decision log shows the summary next to the download links, including an includeUploads link', async () => {
+  it('the decision log computes the summary only on demand (ruling R6), next to the download links, with an includeUploads link', async () => {
     window.location.hash = '#/w/ws_1/decisions';
     render(<App />);
+    // Opening the page never runs the export.
+    const button = await screen.findByRole('button', { name: 'Compute export exclusions' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(paths.filter((p) => p.includes('/export/summary'))).toEqual([]);
+    expect(screen.queryByText(/The export leaves out/)).toBeNull();
+    fireEvent.click(button);
     expect(await screen.findByText('The export leaves out 6 judgment(s) by default (and 4 other line(s)).')).toBeTruthy();
+    expect(paths.filter((p) => p.includes('/export/summary'))).toHaveLength(1);
     for (const t of ['cites an upload: 1', 'exposed run: 3', 'task of an exposed run: 2', 'references an output of such a task: 0']) {
       expect(screen.getByText(t)).toBeTruthy();
     }

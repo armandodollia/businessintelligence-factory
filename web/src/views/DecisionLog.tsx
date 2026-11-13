@@ -32,6 +32,13 @@ export function DecisionLog({ wsId }: { wsId: string }) {
           </a>
         )}
       </div>
+      <div className="row small">
+        <button disabled={exp.busy} onClick={() => void exp.compute()}>
+          Compute export exclusions
+        </button>
+        <span className="muted">Runs the whole export, so it is computed only when you ask.</span>
+      </div>
+      {exp.error && <div className="error">{exp.error}</div>}
       {exp.view && (
         <div className="small muted" aria-label="export summary">
           <div>{exp.view.headline}</div>

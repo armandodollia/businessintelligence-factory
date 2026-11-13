@@ -756,11 +756,34 @@ export function useDecisions(wsId: string | null | undefined, kind?: Decision['k
 }
 
 // --- knowledge store integration (design §12 ruling): the export's visible cost ---
-/** The export summary (what the default exclusion leaves out, by cause) and the include-uploads link. */
+/**
+ * The export summary (what the default exclusion leaves out, by cause) and the include-uploads link.
+ * Ruling R6 (wave 2): fetched ONLY on `compute()` — the route runs the whole export, so neither the
+ * Decision log nor the Metrics page loads it on open.
+ */
 export function useExportSummary(wsId: string | null | undefined) {
-  const res = useResource(`export-summary:${wsId ?? ''}`, wsId ? () => api.exportSummary(wsId) : null);
-  const view = useMemo(() => exportSummaryView(res.data), [res.data]);
-  return { view, includeUploadsUrl: wsId ? exportUrl(wsId, true) : null, error: res.error, reload: res.reload };
+  const [state, setState] = useState<{ wsId: string; data: unknown } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ wsId: string; message: string } | null>(null);
+  const compute = useCallback(async () => {
+    if (!wsId) return;
+    const owner = wsId;
+    setBusy(true);
+    setError(null);
+    try {
+      setState({ wsId: owner, data: await api.exportSummary(owner) });
+    } catch (e) {
+      setError({ wsId: owner, message: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  }, [wsId]);
+  const data = state && state.wsId === wsId ? state.data : undefined;
+  const view = useMemo(() => (data === undefined ? null : exportSummaryView(data)), [data]);
+  return {
+    view, compute, busy, error: error && error.wsId === wsId ? error.message : null,
+    includeUploadsUrl: wsId ? exportUrl(wsId, true) : null,
+  };
 }
 // --- end export summary ---
 

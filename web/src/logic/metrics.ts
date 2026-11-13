@@ -6,7 +6,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { api, metricsApi } from './api.js';
 import { exportSummaryView, type ExportSummaryView } from './exportSummary.js';
-import { useBusEvents, useResource } from './hooks.js';
+import { useBusEvents, useExportSummary, useResource } from './hooks.js';
 import { formatRate, formatTokens, formatUsd } from './usage.js';
 import { effectVerdict, pctText, type RuleEffect } from './lessons.js'; // WP-E slot
 
@@ -275,26 +275,9 @@ export function useMetrics(wsId: string | null | undefined) {
 
 /**
  * The training-export exclusion summary, fetched ONLY on `compute()`: the route runs the whole export,
- * so the metrics page never loads it on open (integration note on the Decision log's cost).
+ * so the metrics page never loads it on open. The same on-demand hook as the Decision log (ruling R6).
  */
 export function useExportSummaryOnDemand(wsId: string | null | undefined) {
-  const [state, setState] = useState<{ wsId: string; data: unknown } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ wsId: string; message: string } | null>(null);
-  const compute = useCallback(async () => {
-    if (!wsId) return;
-    const owner = wsId;
-    setBusy(true);
-    setError(null);
-    try {
-      setState({ wsId: owner, data: await api.exportSummary(owner) });
-    } catch (e) {
-      setError({ wsId: owner, message: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setBusy(false);
-    }
-  }, [wsId]);
-  const data = state && state.wsId === wsId ? state.data : undefined;
-  const view: ExportSummaryView | null = useMemo(() => (data === undefined ? null : exportSummaryView(data)), [data]);
-  return { view, compute, busy, error: error && error.wsId === wsId ? error.message : null };
+  const { view, compute, busy, error } = useExportSummary(wsId);
+  return { view, compute, busy, error };
 }
