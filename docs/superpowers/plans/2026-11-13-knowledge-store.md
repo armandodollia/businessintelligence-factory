@@ -615,6 +615,64 @@ Smaller decisions taken while building KS-0 (none changes §3, §9 or §12).
   `evidenceIncludesUpload` (delimited block); the backfill and the tests use them, so the flag
   and the export's expansion agree by construction.
 
+## KS-3 builder notes
+
+Smaller decisions taken while building KS-3 (none changes §3, §9 or §12).
+
+- **Modules:** `knowledge/entities.ts` (resolve, suggestions, merge, rename, names), `relations.ts`
+  (`RELATION_TYPES`, `addRelation`, `neighbours`), `entityLinks.ts` (one `link*` per save path, plus
+  `backfillEntityLinks`), `usable.ts` (SQL "usable" / "visible" predicates shared by graph reads and
+  the upload rule). `resolveEntity` returns `Entity` as planned; `resolveEntityDetailed` adds
+  `{ created, suggestions }`. `mergeEntities(store, survivorId, loserId, actor, { scope? })`: the
+  optional scope makes both ids answer `notFound` outside the caller's tree.
+- **Suggestions:** candidates = `entities_fts` trigram OR-query (live rows, same root and kind, 50 by
+  bm25); score = Dice coefficient of the padded character trigrams of the name keys (also against
+  each alias), floor `ENTITY_SUGGESTION_FLOOR` 0.5 (a constant, not a config key), at most 3; a pair
+  is never suggested twice in either direction, whatever its status. Names under 3 characters get
+  none. Agents never see suggestions (no tool returns them).
+- **Upload-only names (ruling 5):** `entityIsUploadOnly` in `provenance.ts` and routed through
+  `itemIsUploadDerived` (so `runIsUploadExposed` covers entity ids and merge suggestion ids).
+  References = facts (any lifecycle), competitors, personas, symptoms, hypotheses, captures and the
+  source record of every edge touching the entity (an entity named only by an edge counts). Usable =
+  `usable.ts` (symptoms, artifacts and captures are always usable). No references → not upload-only;
+  a `company` entity named after a node of its tree is never upload-only (scope names are user text).
+  Representation: `aliases` holds only publicly attested names; an upload-only name that becomes an
+  alias stays on its own merged row (merge: the loser row; rename: a new merged "shadow" row), still
+  resolvable through `findEntityByKey`. A merged row is upload-only unless its name key is in its
+  direct target's `aliases` (or equals the target's key, then it follows the target). Merging a public
+  entity into an upload-only one swaps the two rows' names (survivor id kept), so the survivor shows the
+  public name. Known limit: attestation is per entity, not per name — a public record that matches an
+  upload-only survivor through an upload-only alias attests the survivor's display name too.
+- **Merge:** cross-kind merges allowed; re-points `entity_id` in findings, competitors, personas,
+  symptoms, symptom_hypotheses, artifact_captures, and both ends of relations (edges that become
+  duplicates or self-loops are dropped); the pair's open suggestion → `accepted`, the loser's other
+  open ones are re-pointed (closed `rejected` if they collapse). Rename to a name another entity of
+  the kind holds → `EntityConflictError` (409, merge instead); to a merged row's name → the rows swap.
+- **Saves:** `save_finding` gains `entity` (`{id}` or `{kind,name}`) and `relations` (≤ 10) — KS-3
+  owns these two inputs (KS-2: do not add them again); the response carries `entityId`; a re-save of
+  the same (task, claim) re-resolves only for an explicit `entity` or a changed subject. Competitor →
+  `competitor` + `competes_with` the node's company entity; persona → `persona` (segment, no edge);
+  symptom → `symptom` (strength → `topic`); hypothesis → `cause` entity named by its text (≤ 200
+  chars) + `causes` → the symptom's entity. A record that already has an entity keeps it (user merges
+  and renames are never undone). Records of a workspace with no row get no entity (old tests only).
+  `backfillEntityLinks` (startup, after `backfillKnowledge`) adds cause entities and competitor edges
+  for rows saved before KS-3.
+- **Graph reads:** `neighbours` returns `Relation & { depth, usable }`, both directions, ordered by
+  depth, type, insertion; `mode: 'node'` (default) keeps only edges whose source record is visible
+  from the scope's `nodeIds` (facts / artifacts by `item_scopes`, typed records by workspace), `tree`
+  any node.
+- **Human actions:** `mergeEntitiesAsUser` / `renameEntityAsUser` in `feedback/actions.ts`
+  (`entity_merge` / `entity_rename`, target type `entity`, survivor's home workspace). When an
+  upload-only name is involved, `beforeJson.uploadRefs` lists the upload-derived records, so the
+  export's id expansion leaves the event out by default (tested). `FeedbackActionError` 404 for unknown
+  / other-tree ids, 409 for conflicts. `api/feedbackRoutes.ts` `TARGET_TYPES` is left to KS-7.
+- **Seams:** KS-1 calls `linkArtifactEntity(store, artifact, entityRef, ctx)` in `save_artifact` and
+  stores the id on the capture row. KS-2's `replaces` should pass `entity: { id: prior.entityId }`.
+  KS-4: entity search hits and card names must be flagged with `entityIsUploadOnly` of the row that
+  matched (a merged row for an upload-only alias) and list that id in `results`; `entityNames` gives
+  names with their status; `neighbours` for relations on cards. KS-7: `listEntities`,
+  `listMergeSuggestions` (with `uploadOnly`), `rejectMergeSuggestion`, the two actions above.
+
 ## Design-thread rulings after KS-0 (2026-11-13)
 
 Binding for the packages named; recorded by the orchestrator from the design thread.

@@ -180,3 +180,33 @@ export function linkArtifactEntity(
   }
   return entity;
 }
+
+export type EntityLinkBackfill = { hypotheses: number; competitorEdges: number };
+
+/**
+ * Startup completion of what KS-0's backfill leaves to KS-3 (idempotent, incremental): symptom
+ * hypotheses without an entity get their `cause` entity and `causes` edge; competitors without a
+ * `competes_with` edge get it. Rows of workspaces that no longer exist are skipped.
+ */
+export function backfillEntityLinks(store: Store, now: Date = new Date()): EntityLinkBackfill {
+  const r: EntityLinkBackfill = { hypotheses: 0, competitorEdges: 0 };
+  store.transaction(() => {
+    for (const h of store.symptomHypotheses.list({ entityId: null })) {
+      if (linkHypothesis(store, h, { now })) r.hypotheses++;
+    }
+    const bare = store.db
+      .prepare(
+        `SELECT c.id AS id FROM competitors c WHERE NOT EXISTS (
+           SELECT 1 FROM relations r WHERE r.source_kind = 'competitor' AND r.source_id = c.id AND r.type = 'competes_with')
+         ORDER BY c.rowid`,
+      )
+      .all() as Array<{ id: string }>;
+    for (const { id } of bare) {
+      const c = store.competitors.get(id)!;
+      if (!entityNameKey(c.name) || !store.workspaces.get(c.workspaceId)) continue;
+      linkCompetitor(store, c, { now });
+      if (knowledgeRepos(store).relations.list({ sourceKind: 'competitor', sourceId: id, type: 'competes_with' }).length) r.competitorEdges++;
+    }
+  });
+  return r;
+}

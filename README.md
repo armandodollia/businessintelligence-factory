@@ -186,6 +186,16 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `user.id`. An outcome can also judge a non-decision subject (e.g. a fact version), and each one is
   written once per subject, outcome and source event. The Decision log shows the counts per role,
   task type and prompt version (this workspace or the whole business tree).
+- **Entities and relations (knowledge store).** Every finding, competitor, persona, symptom and
+  symptom hypothesis is filed under a named *entity* of its business tree (company, competitor,
+  product, persona, topic, cause, …), matched by name or alias; separate trees never share one. A
+  finding without an explicit `entity` is filed under the competitor / persona / company entity its
+  subject names, else a unit's company name, else a topic. A near-duplicate name is saved anyway and
+  shows up as a *merge suggestion*; merging or renaming an entity is your action (feedback events
+  `entity_merge` / `entity_rename`) and keeps old names resolvable as aliases. Typed edges
+  (`competes_with`, `offers`, `has_flow`, `causes`, …) each name the record that asserts them and
+  count only while that record is usable. An entity name that only uploads mention is treated like
+  upload text (the same export and exposure rules), and keeps that status as an alias after a merge.
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.

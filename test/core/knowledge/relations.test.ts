@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { companyEntity, resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { RELATION_TYPES, addRelation, neighbours } from '../../../src/core/knowledge/relations.js';
+import { backfillEntityLinks } from '../../../src/core/knowledge/entityLinks.js';
 import { KnowledgeNotFoundError, scopeFor } from '../../../src/core/knowledge/scope.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos } from '../../../src/core/store/repos.js';
-import { art, competitor, fact, ks3Store, symptom } from './ks3fixture.js';
+import { art, competitor, fact, hypothesis, ks3Store, symptom } from './ks3fixture.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -124,5 +125,31 @@ describe('neighbours', () => {
     const x = resolveEntity(s, scopeFor(s, 'ws_b'), { kind: 'topic', name: 'X' });
     expect(() => neighbours(s, sc, x.id, { depth: 1, usableOnly: false })).toThrow(new KnowledgeNotFoundError('entity', x.id));
     expect(() => neighbours(s, sc, 'ent_unknown', { depth: 1, usableOnly: false })).toThrow(new KnowledgeNotFoundError('entity', 'ent_unknown'));
+  });
+});
+
+describe('backfillEntityLinks (rows saved before KS-3)', () => {
+  it('adds hypothesis cause entities and competitor edges once; a second run changes nothing', () => {
+    const s = ks3Store(opened);
+    symptom(s, 'sym_1', 'ws_c', 'Churn up');
+    hypothesis(s, 'hyp_1', 'ws_c', 'sym_1', 'Price increase in March');
+    competitor(s, 'cmp_1', 'ws_c', 'Globex');
+    competitor(s, 'cmp_2', 'ws_b', 'Globex');
+    expect(backfillEntityLinks(s)).toEqual({ hypotheses: 1, competitorEdges: 2 });
+    const k = knowledgeRepos(s);
+    const cause = k.entities.get(s.symptomHypotheses.get('hyp_1')!.entityId!)!;
+    expect(cause).toMatchObject({ kind: 'cause', name: 'Price increase in March', rootWorkspaceId: 'ws_a', workspaceId: 'ws_c' });
+    expect(k.relations.list({ sourceKind: 'hypothesis', sourceId: 'hyp_1' })).toMatchObject([
+      { fromEntityId: cause.id, type: 'causes', toEntityId: s.symptoms.get('sym_1')!.entityId },
+    ]);
+    const edgeA = k.relations.list({ sourceId: 'cmp_1' })[0]!;
+    const edgeB = k.relations.list({ sourceId: 'cmp_2' })[0]!;
+    expect(edgeA.rootWorkspaceId).toBe('ws_a');
+    expect(edgeB.rootWorkspaceId).toBe('ws_b');
+    expect(k.entities.get(edgeA.toEntityId)).toMatchObject({ kind: 'company', name: 'Acme Payments' });
+    const snapshot = () => [k.entities.list(), k.relations.list()];
+    const before = snapshot();
+    expect(backfillEntityLinks(s)).toEqual({ hypotheses: 0, competitorEdges: 0 });
+    expect(snapshot()).toEqual(before);
   });
 });

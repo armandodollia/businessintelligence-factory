@@ -27,6 +27,7 @@ import { attachEventRecorders, type EventRecorders } from '../core/telemetry/rec
 import { registerFeedbackOutcomes } from '../core/learning/feedbackOutcomes.js';
 // Knowledge store KS-0: idempotent backfill after migrations.
 import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.js';
+import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -79,6 +80,9 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
   // invariant rows). Idempotent; a no-op when nothing is missing.
   const knowledgeBackfill = backfillKnowledge(store);
   if (backfillChanged(knowledgeBackfill)) console.log(`[bif] knowledge store backfill: ${JSON.stringify(knowledgeBackfill)}`);
+  // Knowledge store KS-3: hypothesis cause entities and competitor edges for rows saved before KS-3.
+  const entityLinks = backfillEntityLinks(store);
+  if (entityLinks.hypotheses + entityLinks.competitorEdges > 0) console.log(`[bif] knowledge entity links: ${JSON.stringify(entityLinks)}`);
   // Learning loop: human actions (feedback events) become decision outcomes through one listener.
   registerFeedbackOutcomes();
   const artifacts = new ArtifactStore(store, dataDir);
