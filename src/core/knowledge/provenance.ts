@@ -21,8 +21,8 @@ const flag = (store: Store, table: 'artifacts' | 'chunks' | 'findings', id: stri
   return row ? row.d === 1 : undefined;
 };
 
-/** Ids an item without its own flag rests on; `undefined` when `id` is not such a record. */
-function evidenceOf(store: Store, id: string): string[] | undefined {
+/** Ids an item without its own flag rests on; `undefined` when `id` is not such a record. (Exported for KS-2's `explainUploadDerived`.) */
+export function evidenceOf(store: Store, id: string): string[] | undefined {
   const obs = knowledgeRepos(store).factObservations.get(id);
   if (obs) return [obs.findingId, ...obs.evidence];
   const c = store.competitors.get(id);
