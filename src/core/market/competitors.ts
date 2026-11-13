@@ -39,8 +39,11 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
   const owner = task && task.workspaceId === ctx.workspaceId ? task : undefined;
   const taskId = owner?.id;
   // Review tracking (migration 13): pending until the saving task's review loop ends; the round marks
-  // it as (re-)submitted in that round (superseded tracking).
-  const tracking: Pick<Competitor, 'status' | 'taskRound'> = owner ? { status: 'pending', taskRound: owner.round } : { status: 'pending' };
+  // it as (re-)submitted in that round (superseded tracking). Without an owning task nothing will
+  // ever review it: `unverified`.
+  const tracking: Pick<Competitor, 'status' | 'taskRound'> = owner
+    ? { status: 'pending', taskRound: owner.round }
+    : { status: 'unverified', taskRound: undefined };
   const now = new Date().toISOString();
   const values = { threat: input.threat, directness: input.directness, comparison: input.comparison };
 
@@ -52,13 +55,15 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
         JSON.stringify({ threat: prior.threat, directness: prior.directness, comparison: prior.comparison }) === JSON.stringify(values) &&
         (input.site ?? prior.site) === prior.site;
       if (same && evidence.length === prior.evidence.length) {
-        // Re-submitted unchanged: still current for this task's round.
-        const competitor = owner ? store.competitors.update(prior.id, { ...tracking, taskId: owner.id }) : prior;
+        // Unchanged content already verified by another task (or re-saved without a task): keep its
+        // owner and status. Otherwise it is re-submitted, current for this task's round.
+        const keep = !owner || (prior.taskId !== owner.id && prior.status === 'verified');
+        const competitor = keep ? prior : store.competitors.update(prior.id, { ...tracking, taskId: owner.id });
         return { competitor, decision: undefined, duplicate: true };
       }
       const patch: Partial<Competitor> = { ...values, evidence, updatedAt: now, ...tracking };
       if (input.site !== undefined) patch.site = input.site;
-      if (taskId) patch.taskId = taskId;
+      patch.taskId = taskId; // a change without a task clears the owner (it is unverified)
       const competitor = store.competitors.update(prior.id, patch);
       const decision = same ? undefined : record(store, ctx, competitor, input.evidence, { revision: true, previous: { threat: prior.threat, directness: prior.directness, comparison: prior.comparison } });
       return { competitor, decision, duplicate: false };

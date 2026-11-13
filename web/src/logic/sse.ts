@@ -16,6 +16,7 @@ const EVENT_NAMES = [
   'decision',
   'user_request',
   'user_request_resolved',
+  'task_status',
 ] as const;
 
 interface Channel {

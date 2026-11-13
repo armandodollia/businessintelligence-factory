@@ -33,11 +33,38 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     return !!prior && prior.symptomId === symptom.id && titleKey(prior.hypothesis) === key;
   });
   const task = ctx.taskId ? store.tasks.get(ctx.taskId) : undefined;
-  if (replay) {
-    const hypothesisId = (replay.payload as { hypothesisId: string }).hypothesisId;
+  const evidence = [...new Set(input.evidence)];
+  const prior = replay ? store.symptomHypotheses.get((replay.payload as { hypothesisId: string }).hypothesisId) : undefined;
+  if (prior) {
     // Re-submitted: current for this task's round (superseded tracking, migration 13).
-    if (task && store.symptomHypotheses.get(hypothesisId)) store.symptomHypotheses.update(hypothesisId, { taskRound: task.round, status: 'pending' });
-    return { ok: true, data: { hypothesisId, duplicate: true } };
+    const tracking = task && task.workspaceId === ctx.workspaceId ? { taskId: task.id, taskRound: task.round, status: 'pending' as const } : {};
+    const sameEvidence = JSON.stringify([...prior.evidence].sort()) === JSON.stringify([...evidence].sort());
+    if (prior.confidence === input.confidence && sameEvidence) {
+      store.symptomHypotheses.update(prior.id, tracking);
+      return { ok: true, data: { hypothesisId: prior.id, duplicate: true } };
+    }
+    // A correction (e.g. after review): persist the new confidence / evidence and log it as a revision.
+    const revision: Decision = {
+      id: newId('dec'),
+      workspaceId: ctx.workspaceId,
+      agentRunId: ctx.agentRunId,
+      role: ctx.role,
+      model: ctx.model,
+      kind: 'score',
+      payload: {
+        tool: 'save_hypothesis', hypothesisId: prior.id, symptomId: symptom.id, hypothesis: prior.hypothesis, confidence: input.confidence,
+        revision: true, previous: { confidence: prior.confidence, evidence: prior.evidence },
+      },
+      refs: [...new Set([prior.id, symptom.id, ...evidence])],
+      promptVersion: ctx.promptVersion,
+      createdAt: new Date().toISOString(),
+    };
+    store.transaction(() => {
+      store.symptomHypotheses.update(prior.id, { confidence: input.confidence, evidence, ...tracking });
+      store.decisions.insert(revision);
+    });
+    events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: revision });
+    return { ok: true, data: { hypothesisId: prior.id, duplicate: true, revised: true } };
   }
 
   const hypothesis: SymptomHypothesis = {
@@ -46,7 +73,7 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     symptomId: symptom.id,
     hypothesis: input.hypothesis.trim(),
     confidence: input.confidence,
-    evidence: [...new Set(input.evidence)],
+    evidence,
     createdAt: new Date().toISOString(),
     status: 'pending',
   };

@@ -352,13 +352,16 @@ async function reviewStep(
 
 function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unverified' | 'failed', round: number): Task {
   const { store } = deps;
-  return store.transaction(() => {
+  const done = store.transaction(() => {
     const task = store.tasks.update(taskId, { status, round });
     // Findings, recommendations and personas of the task take its status; outputs of earlier rounds
     // that were not re-submitted become `superseded`.
     applyTaskStatus(store, task, status);
     return task;
   });
+  // Live refresh: output lists in the web app reload when a task's outputs got their final status.
+  deps.events.emit({ type: 'task_status', workspaceId: done.workspaceId, taskId: done.id, status: done.status });
+  return done;
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { RunEvent } from './harness/adapter.js';
-import type { AgentRun, Decision, UserRequest } from './types.js';
+import type { AgentRun, Decision, Task, UserRequest } from './types.js';
 
 /**
  * Process-wide events (consumed by SSE in the API and by waiters in core). Later sections may
@@ -27,7 +27,17 @@ export type BusEvent =
     }
   | { type: 'decision'; workspaceId: string; decision: Decision }
   | { type: 'user_request'; workspaceId: string; request: UserRequest }
-  | { type: 'user_request_resolved'; workspaceId: string; request: UserRequest };
+  | { type: 'user_request_resolved'; workspaceId: string; request: UserRequest }
+  | {
+      /**
+       * A task's review loop ended: the task and its outputs (findings, recommendations, personas,
+       * competitors, hypotheses) now carry their final status. Views listing outputs reload on it.
+       */
+      type: 'task_status';
+      workspaceId: string;
+      taskId: string;
+      status: Task['status'];
+    };
 
 export class AbortError extends Error {
   constructor(message = 'aborted') {

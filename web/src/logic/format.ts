@@ -82,6 +82,8 @@ export function describeEvent(e: BusEvent): string {
       return `user action requested: ${e.request.kind} ${e.request.site ?? ''}`;
     case 'user_request_resolved':
       return `user action ${e.request.status}: ${e.request.kind}`;
+    case 'task_status':
+      return `task ${e.taskId} ${e.status}`;
   }
 }
 

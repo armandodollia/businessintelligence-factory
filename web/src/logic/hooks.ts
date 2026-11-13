@@ -100,6 +100,16 @@ export function useResource<T>(key: string, load: (() => Promise<T>) | null): Re
   return { ...state, reload, mutate };
 }
 
+/**
+ * Reloads an output list (findings, recommendations, personas, competitors) whenever a task of the
+ * workspace finishes its review loop (`task_status`), so review statuses update live.
+ */
+function useTaskStatusRefresh(workspaceId: string | null | undefined, reload: () => Promise<void>): void {
+  useBusEvents(workspaceId, (e) => {
+    if (e.type === 'task_status') void reload();
+  });
+}
+
 /** Subscribes to a workspace's `BusEvent` stream for the component's lifetime. */
 export function useBusEvents(workspaceId: string | null | undefined, onEvent: (e: BusEvent) => void): void {
   const ref = useRef(onEvent);
@@ -506,6 +516,7 @@ export function needsReviewFlag(x: ReviewedOutput): boolean {
 export function useFindings(wsId: string | null | undefined) {
   const findings = useResource(`findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId) : null);
   const symptoms = useResource(`symptoms:${wsId ?? ''}`, wsId ? () => api.listSymptoms(wsId) : null);
+  useTaskStatusRefresh(wsId, findings.reload);
   const action = useAction();
   /** `null` resets the override to the default (verified findings only). */
   const setIncludeInSynthesis = useCallback(
@@ -539,6 +550,7 @@ export function useFindings(wsId: string | null | undefined) {
  */
 export function useFindingIndex(wsId: string | null | undefined) {
   const res = useResource(`tree-findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId, { tree: true }) : null);
+  useTaskStatusRefresh(wsId, res.reload);
   const byId = useMemo(() => new Map((res.data ?? []).map((f) => [f.id, f])), [res.data]);
   const resolve = useCallback(
     (ids: string[]) => {
@@ -626,6 +638,7 @@ export function useCompetitors(wsId: string | null | undefined) {
   const res = useResource(`competitors:${wsId ?? ''}`, wsId ? () => api.listCompetitors(wsId) : null);
   const action = useAction();
   useBusEvents(wsId, (e) => {
+    if (e.type === 'task_status') void res.reload();
     if (e.type === 'decision' && (e.decision.payload as { tool?: string } | null)?.tool === 'save_competitor') void res.reload();
   });
   const all = useMemo(
@@ -657,6 +670,7 @@ export function useCompetitors(wsId: string | null | undefined) {
 
 export function usePersonas(wsId: string | null | undefined) {
   const res = useResource(`personas:${wsId ?? ''}`, wsId ? () => api.listPersonas(wsId) : null);
+  useTaskStatusRefresh(wsId, res.reload);
   const action = useAction();
   /** Persona-panel override; `null` resets to the default (verified personas only). */
   const setInclude = useCallback(
@@ -685,6 +699,7 @@ export function usePersonas(wsId: string | null | undefined) {
  */
 export function useRecommendations(wsId: string | null | undefined) {
   const res = useResource(`recs:${wsId ?? ''}`, wsId ? () => api.listRecommendations(wsId) : null);
+  useTaskStatusRefresh(wsId, res.reload);
   const action = useAction();
   const all = useMemo(() => [...(res.data ?? [])].sort((a, b) => b.priority - a.priority), [res.data]);
   const recommendations = useMemo(() => all.filter(shownInStrategy), [all]);
