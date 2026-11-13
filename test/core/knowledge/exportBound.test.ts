@@ -1,7 +1,8 @@
 /**
  * Export-exclusion ruling (design §12, binding): KS-6's per-task exclusion with three conditions.
  * - Bound: the exposed run, its task (reviews, deliverable decisions, outputs) and later judgments that
- *   reference those outputs — no further. A later run merely SHOWN one of those outputs is not exposed.
+ *   cite those outputs, followed along citation edges like an upload (a task whose outputs cite one has
+ *   its judgments excluded) — no further. A later run merely SHOWN one of those outputs is not exposed.
  * - Computed at export time, never stored: no flag is written, so nothing spreads through cards or
  *   briefings.
  * - Visible cost: the export summary counts the excluded judgments by cause and says `includeUploads`
@@ -80,11 +81,29 @@ async function world() {
     id: newId('dec'), workspaceId: 'ws_a', agentRunId: later.agentRunId, role: 'worker', model: later.model, kind: 'score',
     payload: { tool: 'save_recommendation', recommendationId: rec.id }, refs: [rec.id], promptVersion: 'pv', createdAt: T0,
   });
+  const laterReviewer = run('reviewer', t2.id);
+  await t.call(laterReviewer, 'submit_review', { score: 8, issues: [] });
   // T3: judges only T2's other output F2 — the exclusion does not reach it.
   const third = run('worker', task().id);
   await t.call(third, 'log_decision', { what: 'Build on the public page finding', why: 'F2', confidence: 0.6, refs: [f2.findingId] });
+  // T4: a persona panel run gives feedback on R, and the user rates R and that feedback.
+  const panel = run('persona', task().id);
+  const feedback = t.store.decisions.insert({
+    id: newId('dec'), workspaceId: 'ws_a', agentRunId: panel.agentRunId, role: 'persona', model: panel.model, kind: 'persona_feedback',
+    payload: { tool: 'submit_persona_feedback', personaId: 'per_x', input: { recommendation_id: rec.id, scores: { fit: 4 } } },
+    refs: [rec.id], promptVersion: 'pv', createdAt: T0,
+  });
+  const rate = (targetType: 'recommendation' | 'persona_feedback', targetId: string, criterion: string) =>
+    t.store.ratings.insert({
+      id: newId('rat'), workspaceId: 'ws_a', targetType, targetId, criterion, agentValue: 3, verdict: 'disagree', userValue: 1, createdAt: T0,
+    });
+  const recRating = rate('recommendation', rec.id, 'impact');
+  const feedbackRating = rate('persona_feedback', `${rec.id}:per_x`, 'fit');
 
-  return { t, up, pub, f1: f1.findingId, f2: f2.findingId, exposed, reviewer, citer, later, third, rec, recDecision, decisionsOf };
+  return {
+    t, up, pub, f1: f1.findingId, f2: f2.findingId, exposed, reviewer, citer, later, laterReviewer, third, panel, rec, recDecision, feedback,
+    recRating, feedbackRating, decisionsOf,
+  };
 }
 
 describe('export exclusion: the bound (design §12 ruling)', () => {
@@ -95,11 +114,12 @@ describe('export exclusion: the bound (design §12 ruling)', () => {
       expect(out).not.toContain(d);
     }
     expect(out).not.toContain(w.recDecision.id);
-    // The later run was only SHOWN F1: not exposed; its other judgments and its read are exported.
+    // The later run was only SHOWN F1: not exposed, and its reads are exported. But its task CITES F1
+    // (R cites it), so — as with an upload a task's outputs cite — the task's judgments are excluded.
     expect(runIsUploadExposed(w.t.store, w.later.agentRunId)).toBe(false);
     const laterOwn = w.decisionsOf(w.later.agentRunId).filter((d) => d !== w.recDecision.id);
     expect(laterOwn.length).toBeGreaterThanOrEqual(2);
-    expect(out).toEqual(expect.arrayContaining(laterOwn));
+    for (const d of [...laterOwn, ...w.decisionsOf(w.laterReviewer.agentRunId)]) expect(out).not.toContain(d);
     const reads = parse(exportTrainingData('ws_a', { store: w.t.store })).filter((l) => l.type === 'retrieval_event').map((l) => l.retrievalEvent!.id);
     const shown = w.t.rows(w.later.agentRunId);
     expect(shown.some((r) => r.resultIds.some((x) => x.id === w.f1))).toBe(true);
@@ -133,6 +153,30 @@ describe('export exclusion: the bound (design §12 ruling)', () => {
   });
 });
 
+describe('export exclusion: an output of an exposed task is followed like an upload (design §12)', () => {
+  it('T1 exposed saves F; T2 saves R citing F; persona feedback and ratings on R are all excluded', async () => {
+    const w = await world();
+    const lines = parse(exportTrainingData('ws_a', { store: w.t.store }));
+    const out = lines.filter((l) => l.type === 'decision').map((l) => l.decision!.id);
+    // T2's own judgments: the recommendation, its other saves and decisions, its review.
+    for (const d of [...w.decisionsOf(w.later.agentRunId), ...w.decisionsOf(w.laterReviewer.agentRunId)]) expect(out).not.toContain(d);
+    // The persona feedback on R, and the user's ratings of R and of that feedback.
+    expect(out).not.toContain(w.feedback.id);
+    const exportedRatings = lines.flatMap((l) => ((l as { ratings?: Array<{ id: string }> }).ratings ?? []).map((r) => r.id));
+    expect(exportedRatings).not.toContain(w.recRating.id);
+    expect(exportedRatings).not.toContain(w.feedbackRating.id);
+    expect(JSON.stringify(lines)).not.toContain(w.recRating.id);
+    expect(JSON.stringify(lines)).not.toContain(w.feedbackRating.id);
+    // The bound: T2's other output F2 is not tainted — a judgment citing only F2 is exported.
+    expect(out).toEqual(expect.arrayContaining(w.decisionsOf(w.third.agentRunId)));
+    // includeUploads brings them all back.
+    const all = parse(exportTrainingData('ws_a', { store: w.t.store }, true));
+    expect(all.filter((l) => l.type === 'decision').map((l) => l.decision!.id)).toEqual(expect.arrayContaining([w.feedback.id, w.recDecision.id]));
+    expect(JSON.stringify(all)).toContain(w.recRating.id);
+    expect(JSON.stringify(all)).toContain(w.feedbackRating.id);
+  });
+});
+
 describe('export exclusion: the visible cost (summary by cause)', () => {
   it('counts the excluded judgments by cause and says includeUploads includes them', async () => {
     const w = await world();
@@ -149,7 +193,8 @@ describe('export exclusion: the visible cost (summary by cause)', () => {
       cites_upload: w.decisionsOf(w.citer.agentRunId).length,
       exposed_run: w.decisionsOf(w.exposed.agentRunId).length,
       exposed_task: w.decisionsOf(w.reviewer.agentRunId).length,
-      exposed_output: 1,
+      // R's decision, T2's other judgments and review, and the persona feedback on R (and the panel task's).
+      exposed_output: w.decisionsOf(w.later.agentRunId).length + w.decisionsOf(w.laterReviewer.agentRunId).length + w.decisionsOf(w.panel.agentRunId).length,
     });
     expect(summary.excludedJudgments.total).toBe(Object.values(by).reduce((a, b) => a + b, 0));
     expect(summary.includeUploads).toBe(false);

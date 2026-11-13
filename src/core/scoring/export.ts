@@ -1,5 +1,5 @@
 import { artifactIdsIn } from '../harness/tools/handlers.js';
-import { taskOutputEvidence } from '../research/outputs.js';
+import { associatedOutputs, taskOutputEvidence } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
 import type { Decision, InterviewTurn, Rating, UserRequest } from '../types.js';
 // Learning loop WP-A: human feedback lines (request answers, interview turns, feedback events).
@@ -245,7 +245,8 @@ function citedDecisions(store: Store, d: Decision): Decision[] {
  * order): its provenance (`expandedRefs`, and that of decisions it cites, WP-A) reaches an internal
  * upload or upload-derived item; it was written by an upload-exposed run (or cites a judgment of one);
  * its provenance reaches the TASK of an exposed run (the task's reviews and deliverable decisions); or
- * it references an OUTPUT of such a task (directly, or as what a referenced record cites — one level).
+ * it cites an OUTPUT of such a task (directly, through a referenced record's citation edges, or because
+ * its task's outputs cite one).
  */
 function judgmentCause(store: Store, d: Decision, ex: ExportExclusion, taskEvidenceOf: (id: string) => string[]): ExclusionCause | undefined {
   const own = expandedRefs(store, d, taskEvidenceOf);
@@ -253,7 +254,10 @@ function judgmentCause(store: Store, d: Decision, ex: ExportExclusion, taskEvide
   const citedRefs = cited.flatMap((c) => expandedRefs(store, c, taskEvidenceOf));
   if (own.some((id) => ex.uploadDerived(id)) || citedRefs.some((id) => ex.uploadDerived(id))) return 'cites_upload';
   if (ex.runExposed(d.agentRunId) || cited.some((c) => ex.runExposed(c.agentRunId))) return 'exposed_run';
-  return firstCause([...own, ...citedRefs].map((id) => ex.exposedCause(id)));
+  const ids = [...own, ...citedRefs];
+  // A task whose outputs cite an output of an exposed task goes like a task whose outputs cite an
+  // upload: its judgments (reviews, deliverable, other saves) are left out (design §12, wave-2 ruling).
+  return firstCause([...ids.map((id) => ex.exposedCause(id)), ...ids.filter((id) => id.startsWith('tsk_')).map((id) => ex.taskCitesExposedOutput(id))]);
 }
 
 const TERMINAL = new Set(['verified', 'unverified', 'failed', 'superseded']);
@@ -449,10 +453,13 @@ export function uploadExclusionSet(store: Store): Set<string> {
 // - what such a run's TASK produced: the task itself (so the review and deliverable decisions of the
 //   task, whose text may carry what the exposed run read) and the task's outputs (findings,
 //   recommendations, personas, competitors, hypotheses);
-// - later judgments that REFERENCE one of those outputs: by id, or through a record they reference
-//   that cites it directly (a recommendation's findings, an observation's fact) — one level, never a
-//   chain. A later run that is merely SHOWN such an output (search, card, briefing) is not exposed by
-//   that alone, and its other judgments and its reads are exported.
+// - later judgments that CITE one of those outputs, treated like an upload-derived artifact in the
+//   expansion (wave-2 ruling): by id, through a record they reference that cites it along citation
+//   edges (a recommendation's findings, an observation's fact; as deep as `itemIsUploadDerived`
+//   goes), or because their TASK's outputs cite it (then every judgment of that task: its reviews,
+//   deliverable and other saves). That task's other outputs are not tainted, so a judgment citing
+//   only those is exported. A later run that is merely SHOWN such an output (search, card, briefing)
+//   is not exposed by that alone; its reads are exported.
 // Exposure is computed here, at export time, from the retrieval log; no flag is stored, so it cannot
 // spread through cards or briefings. Known limit: text a later run paraphrased from such an output
 // without citing it, and that is carried on two tasks later, is not caught.
@@ -546,15 +553,44 @@ class ExportExclusion extends UploadExclusionSet {
 
   /**
    * Exposure cause of an id: an exposed run, the task of one, or an output of such a task — the id
-   * itself, or what the record it names cites directly (one level: the bound).
+   * itself, or a record that cites one along its citation edges (`recordEvidenceOf`: a recommendation's
+   * findings, an observation's fact, ...), followed as deep as the upload provenance follows them
+   * (`itemIsUploadDerived`; wave-2 ruling: an exposed task's output is treated like an upload-derived
+   * artifact). Being shown an output never counts; only citing it does.
    */
   exposedCause(id: string): ExclusionCause | undefined {
     if (this.causeMemo.has(id)) return this.causeMemo.get(id);
     const { runs, tasks, outputs } = this.load();
-    const direct = (x: string): ExclusionCause | undefined =>
-      runs.has(x) ? 'exposed_run' : tasks.has(x) ? 'exposed_task' : outputs.has(x) ? 'exposed_output' : undefined;
-    const c = direct(id) ?? firstCause((recordEvidenceOf(this.exportStore, id) ?? []).map((e) => (outputs.has(e) ? 'exposed_output' : undefined)));
+    const direct = runs.has(id) ? 'exposed_run' : tasks.has(id) ? 'exposed_task' : outputs.has(id) ? 'exposed_output' : undefined;
+    const c = direct ?? (this.citesExposedOutput(id, new Set()) ? 'exposed_output' : undefined);
     this.causeMemo.set(id, c);
+    return c;
+  }
+
+  /** Whether record `id` cites an output of an exposed task along its citation edges (cycle-safe). */
+  private citesExposedOutput(id: string, seen: Set<string>): boolean {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const { outputs } = this.load();
+    return (recordEvidenceOf(this.exportStore, id) ?? []).some((e) => outputs.has(e) || this.citesExposedOutput(e, seen));
+  }
+
+  /**
+   * A task that is not itself exposed but whose outputs (`associatedOutputs`: what it saved or cited in
+   * its decisions) cite an output of an exposed task: `exposed_output`. Like a task whose outputs cite
+   * an upload (`taskEvidence`), its judgments are left out; its other outputs are not tainted.
+   */
+  taskCitesExposedOutput(taskId: string): ExclusionCause | undefined {
+    const key = `task-cites:${taskId}`;
+    if (this.causeMemo.has(key)) return this.causeMemo.get(key);
+    let c: ExclusionCause | undefined;
+    const task = this.exportStore.tasks.get(taskId);
+    if (task && !this.load().tasks.has(taskId)) {
+      const o = associatedOutputs(this.exportStore, task);
+      const ids = [...o.findings, ...o.recommendations, ...o.personas, ...o.competitors, ...o.hypotheses].map((x) => x.id);
+      c = ids.some((x) => this.exposedCause(x) !== undefined) ? 'exposed_output' : undefined;
+    }
+    this.causeMemo.set(key, c);
     return c;
   }
 

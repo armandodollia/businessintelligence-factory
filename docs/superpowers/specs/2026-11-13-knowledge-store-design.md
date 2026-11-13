@@ -506,15 +506,23 @@ fallback for facts saved as `new`.
   - **What is excluded.** Every judgment of the exposed run. The run's **task**: its
     reviews, deliverable and other decisions, and the task's outputs (findings,
     recommendations, personas, competitors, hypotheses), because a later round of
-    the task continues from the exposed context. **Later judgments that reference
-    one of those outputs**: by id, or through a record they reference that cites it
-    directly (a recommendation's findings, an observation's fact), one level only.
-    Feedback events, request answers, interview turns, retrieval events and fact
-    observations follow the same rules.
-  - **The bound.** It spreads no further. A later run that is only *shown* one of those
-    outputs (by search, a card, a briefing or `expand`) is not exposed by that. Its
-    other judgments and its reads are exported. A judgment of a later task's other
-    outputs is exported as well.
+    the task continues from the exposed context. **Later judgments that cite one of
+    those outputs**: for the export, an output of an exposed task is treated exactly
+    like an upload-derived artifact in the existing expansion, and followed along
+    explicit citation edges to the same depth the cite-based upload provenance uses
+    (`itemIsUploadDerived`): a judgment that cites it by id, or through a record it
+    references that cites it (a recommendation's findings, an observation's fact); and,
+    as with an upload a task's outputs cite, **every judgment of a task whose outputs
+    cite it** (its reviews, deliverable and other saves). Example (wave-2 ruling):
+    exposed task T1 saves fact F; synthesis task T2 saves recommendation R citing F;
+    T2's judgments, the persona feedback on R and the user's ratings of R and of that
+    feedback are all excluded. Feedback events, request answers, interview turns,
+    retrieval events and fact observations follow the same rules.
+  - **The bound.** Only citing excludes. A later run that is only *shown* one of those
+    outputs (by search, a card, a briefing or `expand`) is not exposed by that, and its
+    reads are exported. A task that cites such an output is not itself exposed: its
+    other outputs are not tainted, so a judgment that cites only those (T2's other
+    finding, say) is exported.
   - **Computed at export time, never stored.** Exposure is derived from the retrieval
     log each time the export runs. No flag is written for it, so the exclusion cannot
     spread through cards or briefings. `upload_derived` stays the only sticky flag,

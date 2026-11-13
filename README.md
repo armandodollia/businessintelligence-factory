@@ -333,11 +333,16 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   - every judgment of an **upload-exposed run**, that is a run that was *shown* upload-derived text by
     a read tool or its prompt, even if it cited none;
   - the **task of such a run**: its reviews, deliverable decisions and outputs;
-  - later judgments that **reference one of those outputs**, by id or through a record that cites it
-    directly.
+  - later judgments that **cite one of those outputs**, treated like an upload: by id, through a
+    record that cites it (a recommendation's findings), or because their task's outputs cite it (then
+    all of that task's judgments go, as when a task's outputs cite an upload). So if a synthesis task
+    saves a recommendation citing a fact from an exposed task, its judgments, persona feedback on that
+    recommendation and your ratings of either are left out.
 
-  The exclusion stops there. A later run that is only shown one of those outputs is not exposed by
-  that, and its other judgments are exported. Exposure is computed at each export from the
+  Only citing excludes. A later run that is only shown one of those outputs is not exposed by that,
+  its reads are exported, and a judgment citing only that task's other outputs is exported. The
+  Decision log computes the report below only when you press its button (it runs the whole
+  export). Exposure is computed at each export from the
   retrieval log and never stored, so it cannot spread through cards or briefings. Each export reports
   what it left out, counted by cause: cites an upload, exposed run, task of an exposed run,
   references an output of such a task. The report comes in the `x-bif-export-summary` header and

@@ -6,8 +6,8 @@
  * - the quoted text or any id it rests on is upload-derived now (`itemIsUploadDerived`, through the
  *   export's exclusion set);
  * - a run that wrote it is upload-exposed (`runIsUploadExposed`);
- * - its task is the task of an exposed run, or an id it rests on is an output of such a task, or a
- *   record citing one directly (the export's per-task bound, `exportExclusion().exposedCause`).
+ * - its task is the task of an exposed run or a task whose outputs cite an output of one, or an id it
+ *   rests on is such an output or a record citing one (the export's rule, `exportExclusion()`).
  * The check is computed when the example is built (never stored), exactly as the export does.
  */
 import { servedLine } from '../../knowledge/texts.js';
@@ -30,7 +30,7 @@ export class LessonPrivacy {
   /** The id is upload-derived, an exposed run / task / output, or cites such an output (export bound). */
   blocked(id: string | undefined): boolean {
     if (!id) return false;
-    return this.exc.runExposed(id) || this.exc.has(id);
+    return this.exc.runExposed(id) || this.exc.has(id) || (id.startsWith('tsk_') && this.exc.taskCitesExposedOutput(id) !== undefined);
   }
 
   /** The signal's text may be quoted (see module doc). */

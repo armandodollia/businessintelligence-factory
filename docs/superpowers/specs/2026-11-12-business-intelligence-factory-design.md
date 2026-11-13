@@ -299,9 +299,11 @@ Details in `2026-11-13-knowledge-store-design.md`. This section describes how th
 - **Export and uploads (§12 there, binding).** Unless `includeUploads` is set, the export leaves out
   anything that cites an internal upload or an upload-derived item. It also leaves out the judgments of a
   run that was *shown* upload-derived text (an upload-exposed run), and that run's **task**: its reviews,
-  deliverable decisions and outputs. Finally it leaves out later judgments that **reference** one of those
-  outputs, by id or through a record that cites it directly. It stops there: a later run that is only
-  shown such an output is not exposed by that. Exposure is computed from the retrieval log at each export
+  deliverable decisions and outputs. Finally it leaves out later judgments that **cite** one of those
+  outputs, which the expansion treats like an upload-derived artifact: by id, through a record that cites
+  it along citation edges, or because the judgment's task has outputs citing it (then all of that task's
+  judgments, as for an upload). Only citing excludes: a later run that is only shown such an output is not
+  exposed by that, and a judgment citing only the citing task's other outputs is exported. Exposure is computed from the retrieval log at each export
   and never stored, so it cannot spread through cards or briefings, and briefings are not thinned to avoid
   it. Every export reports how many judgments (and other lines) it left out, counted by cause: cites an
   upload, exposed run, task of an exposed run, references an output of such a task. The report states
