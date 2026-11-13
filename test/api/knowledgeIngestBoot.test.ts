@@ -1,5 +1,4 @@
 import { mkdtempSync } from 'node:fs';
-import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -8,15 +7,6 @@ import { ArtifactStore } from '../../src/core/evidence/artifacts.js';
 import { ingestorFor } from '../../src/core/knowledge/ingest.js';
 import { openStore } from '../../src/core/store/db.js';
 import { knowledgeRepos } from '../../src/core/store/repos.js';
-
-/** A free port (`boot` treats `port: 0` as "use the configured default"). */
-const freePort = () =>
-  new Promise<number>((ok) => {
-    const s = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = s.address() as AddressInfo;
-      s.close(() => ok(port));
-    });
-  });
 
 describe('knowledge store at startup (KS-1)', () => {
   it('re-queues artifacts whose text is still pending and extracts them', async () => {
@@ -29,7 +19,7 @@ describe('knowledge store at startup (KS-1)', () => {
     expect(knowledgeRepos(pre).artifactTexts.get(art.id)!.status).toBe('pending');
     pre.close();
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const b = await boot({ configPath: join(dir, 'bif.config.json'), dataDir: data, port: await freePort(), webDist: join(dir, 'no-web') });
+    const b = await boot({ configPath: join(dir, 'bif.config.json'), dataDir: data, port: 0, webDist: join(dir, 'no-web') });
     try {
       await ingestorFor({ store: b.runtime.store, artifacts: b.runtime.artifacts }).idle();
       expect(knowledgeRepos(b.runtime.store).artifactTexts.get(art.id)!.status).toBe('ok');

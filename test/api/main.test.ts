@@ -38,6 +38,25 @@ describe('boot', () => {
     }
   });
 
+  it('port 0 listens on an ephemeral port (parallel boots never collide on the configured one)', async () => {
+    const dirs = [0, 1].map(() => mkdtempSync(join(tmpdir(), 'bif-boot-')));
+    const boots = await Promise.all(
+      dirs.map((dir) => boot({ configPath: join(dir, 'bif.config.json'), dataDir: join(dir, 'data'), port: 0, webDist: join(dir, 'no-web') })),
+    );
+    try {
+      const ports = boots.map((b) => (b.server.address() as AddressInfo).port);
+      expect(new Set(ports).size).toBe(2);
+      for (const [i, b] of boots.entries()) {
+        expect(ports[i]).not.toBe(b.runtime.config.server.port);
+        expect(b.runtime.port).toBe(ports[i]);
+        // Agents are pointed at the port actually listened on.
+        expect((b.runtime.supervisor as unknown as { deps: { mcpBaseUrl: string } }).deps.mcpBaseUrl).toBe(`http://127.0.0.1:${ports[i]}`);
+      }
+    } finally {
+      await Promise.all(boots.map((b) => b.close()));
+    }
+  });
+
   it('warns at startup when browser tasks cannot get a browser', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bif-boot-'));
     const configPath = join(dir, 'bif.config.json');

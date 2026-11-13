@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve, type ServerType } from '@hono/node-server';
@@ -8,7 +9,7 @@ import type { BifConfig } from '../core/config/schema.js';
 import { EventBus } from '../core/events.js';
 import { ArtifactStore } from '../core/evidence/artifacts.js';
 import { browserStartupWarnings } from '../core/harness/browser.js';
-import { Supervisor } from '../core/harness/supervisor.js';
+import { Supervisor, type SupervisorDeps } from '../core/harness/supervisor.js';
 import { TokenRegistry } from '../core/harness/tokens.js';
 import { createToolHandlers, type HandleTool } from '../core/harness/tools/handlers.js';
 import { interviewToolHandlers } from '../core/interview/interview.js';
@@ -41,7 +42,7 @@ export type BootOptions = {
   configPath?: string;
   /** Overrides `config.dataDir`. */
   dataDir?: string;
-  /** Overrides `config.server.port`. */
+  /** Overrides `config.server.port`; `0` listens on an ephemeral port (tests). */
   port?: number;
   /** Built web app; default `<repo>/web/dist`. */
   webDist?: string;
@@ -57,7 +58,10 @@ export type Runtime = {
   handle: HandleTool;
   research: ResearchDeps;
   dataDir: string;
+  /** Port to listen on; after `boot` the port actually listened on (resolved when `0` was asked for). */
   port: number;
+  /** Points the runtime (MCP URLs given to agents) at the port actually listened on. */
+  setListeningPort(port: number): void;
   /** KS-1: the artifact store (its extraction queue is `ingestorFor`). */
   artifacts: ArtifactStore;
 };
@@ -72,12 +76,13 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
     fileValues.dataDir = config.dataDir;
     config.dataDir = opts.dataDir;
   }
+  // `port: 0` means an ephemeral port and leaves `config.server.port` alone (nothing to persist).
   if (opts.port) {
     fileValues.port = config.server.port;
     config.server.port = opts.port;
   }
   const dataDir = resolve(config.dataDir);
-  const port = config.server.port;
+  const port = opts.port === 0 ? 0 : config.server.port;
 
   const store = openStore(join(dataDir, 'bif.db'));
   // Knowledge store KS-0: complete rows the knowledge store needs (entities, url keys, upload flags,
@@ -107,7 +112,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...escalationToolHandlers(), // WP-D
     },
   });
-  const supervisor = new Supervisor({
+  const supervisorDeps: SupervisorDeps = {
     store,
     config,
     tokens,
@@ -115,7 +120,8 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
     handle,
     dataDir,
     mcpBaseUrl: `http://127.0.0.1:${port}`,
-  });
+  };
+  const supervisor = new Supervisor(supervisorDeps);
   const research: ResearchDeps = {
     store,
     config,
@@ -135,7 +141,14 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
     mcp: { tokens, handle },
     webDist: opts.webDist ?? fileURLToPath(new URL('../../web/dist', import.meta.url)),
   });
-  return { app, config, store, events, tokens, supervisor, handle, research, dataDir, port, artifacts };
+  const runtime: Runtime = {
+    app, config, store, events, tokens, supervisor, handle, research, dataDir, port, artifacts,
+    setListeningPort(p) {
+      runtime.port = p;
+      supervisorDeps.mcpBaseUrl = `http://127.0.0.1:${p}`; // read by the supervisor on every spawn
+    },
+  };
+  return runtime;
 }
 
 export type Booted = {
@@ -160,6 +173,7 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     const s = serve({ fetch: runtime.app.fetch, port: runtime.port, hostname: '127.0.0.1' }, () => ok(s));
     s.once('error', fail);
   });
+  runtime.setListeningPort((server.address() as AddressInfo).port);
   // Blocking MCP tools (request_approval) keep requests open for as long as the user takes.
   if ('requestTimeout' in server) server.requestTimeout = 0;
   // WP-D: subscribe before resuming, so events of resumed work are recorded and escalated.
