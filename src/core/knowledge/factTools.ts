@@ -126,6 +126,22 @@ async function artifactText(env: FactToolEnv, artifactId: string): Promise<Artif
   }
 }
 
+/** Neighbours `expand` may add around a chunk (`around` ≤ 3): the widest window a quote's start is looked up in. */
+const QUOTE_MAX_AROUND = 3;
+
+/**
+ * The chunk a quote that no single chunk holds starts in: the first chunk of the shortest run of
+ * consecutive chunks (up to `QUOTE_MAX_AROUND` + 1) whose text holds it whole (whitespace-normalized).
+ */
+function quoteStartChunk(chunks: TextChunk[], q: string): TextChunk | undefined {
+  for (let n = 1; n <= QUOTE_MAX_AROUND; n++) {
+    for (let i = 0; i + n < chunks.length; i++) {
+      if (squash(chunks.slice(i, i + n + 1).map((c) => c.text).join('\n\n')).includes(q)) return chunks[i];
+    }
+  }
+  return undefined;
+}
+
 export type EvidenceRefInput = { artifact_id: string; chunk_id?: string | undefined; quote?: string | undefined };
 export type VerifiedRef = Omit<FindingEvidence, 'findingId' | 'seq'>;
 
@@ -165,6 +181,10 @@ export async function verifyEvidenceRefs(
       }
       row.quote = quote;
       const hit = text.chunks.find((c) => squash(c.text).includes(q));
+      const start = hit ? undefined : quoteStartChunk(text.chunks, q);
+      // A quote across chunks: the chunk it starts in, whatever the hint (gate follow-up), so `expand <fact>`
+      // offers its passage (`expand <chunk>` with `around`) whenever one holds the whole quote.
+      if (start) row.chunkId = start.id;
       if (hit) {
         row.chunkId = hit.id;
         const at = hit.text.indexOf(quote);

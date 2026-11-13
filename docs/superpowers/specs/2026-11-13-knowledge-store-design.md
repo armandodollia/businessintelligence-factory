@@ -271,7 +271,10 @@ Responses of saves that insert a fact carry `entityId`.
   Quotes stored before the cap are served as ordinary items (cut with `full` when larger
   than a page). A quote item carries `passage` — `expand <chunk>`, with the fewest
   `around` neighbours (up to 3) whose text holds the WHOLE quote — only when such a call
-  exists: it shows the text around the quote; it is not how a cut quote is recovered.
+  exists: it shows the text around the quote; it is not how a cut quote is recovered. A quote
+  that no single chunk holds is recorded at save under the chunk where it starts (the given
+  `chunk_id` hint is ignored for it), so that passage exists whenever the quote spans at most
+  four consecutive chunks.
 - Confirmations and retractions must cite ≥ 1 artifact captured by the same task
   (a `save_artifact` capture row with the task or one of its agent runs; saving
   bytes identical to an earlier artifact still records this task's capture).

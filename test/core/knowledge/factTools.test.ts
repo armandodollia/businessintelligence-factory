@@ -233,6 +233,34 @@ describe('save_finding: relations, applies_to, evidence_refs', () => {
     expect(v).toEqual({ ok: false, error: expect.stringMatching(/at most 1200 characters: cite a shorter span or several quotes/) });
   });
 
+  it('a quote across chunks records the chunk where it starts (no hint, or a far one), so expand offers its passage', async () => {
+    const env = setup();
+    const t = task(env.store);
+    const ctx = ctxFor(t);
+    const page = captured(env, t, 'raw bytes do not matter once indexed');
+    const k = knowledgeRepos(env.store);
+    k.artifactTexts.update(page.id, { status: 'ok', charCount: 500 });
+    const texts = Array.from({ length: 6 }, (_, i) => `Section ${i} opens here. ${'Seat prices vary by region. '.repeat(3)}Section ${i} ends here.`);
+    let at = 0;
+    texts.forEach((text, i) => {
+      k.chunks.insert({ id: `chk_${i}`, artifactId: page.id, workspaceId: 'R', seq: i, headingPath: '', text, charStart: at, charEnd: at + text.length, tokenEstimate: 30 });
+      at += text.length + 2;
+    });
+    const quote = 'Section 3 ends here.\n\nSection 4 opens here.'; // spans chunks 3 and 4
+    for (const [n, hint] of [[0, undefined], [1, 'chk_0']] as const) {
+      const r = await env.handle(ctx, 'save_finding', {
+        claim: `Prices vary ${n}`, subject: 'Acme', evidence: [page.id], relation: 'new',
+        evidence_refs: [{ artifact_id: page.id, ...(hint ? { chunk_id: hint } : {}), quote }],
+      });
+      expect(r.ok).toBe(true);
+      const id = (r as { data: { findingId: string } }).data.findingId;
+      expect(k.findingEvidence.list({ findingId: id })[0]!.chunkId, `hint ${hint}`).toBe('chk_3');
+      const ex = await env.handle(ctx, 'expand', { id });
+      const q = ((ex as { data: { items: Array<Record<string, unknown>> } }).data.items).find((i) => i.type === 'quote')!;
+      expect(q.passage).toEqual({ kind: 'expand_chunk', tool: 'expand', input: { id: 'chk_3', around: 1 } });
+    }
+  });
+
   it('resolves a quote to its indexed chunk, and rejects a quote on an artifact without text', async () => {
     const env = setup();
     const t = task(env.store);
