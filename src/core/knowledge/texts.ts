@@ -16,7 +16,7 @@ import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { ArtifactText, ExtractionState, TextChunk } from '../types.js';
 import { activeIds, notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
-import { CONTENT_TRUST, fenceEvidence, redactServed } from './trust.js';
+import { CONTENT_TRUST, fenceEvidence, redactRange, redactServed, treeSecrets } from './trust.js';
 
 /** Cap on `artifact_texts.error` when stored and when served (chars, before the fence). */
 export const SERVED_ERROR_MAX_CHARS = 300;
@@ -142,3 +142,79 @@ export function servedTextState(store: Store, scope: KnowledgeScope, artifactId:
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Knowledge store KS-4: serving chunks and snippets with "redact before every cut".
+//
+// Chunk text was redacted at ingest with the identities that existed then. Identities created later
+// are redacted at serve time; since a chunk is a cut of the document, a secret that runs across a
+// chunk boundary is redacted against the neighbouring chunks (`redactRange`), so neither chunk shows
+// half of it. Snippets are windows of a chunk chosen AFTER the same range redaction.
+
+/** `chunk`'s text in its artifact with up to one neighbour on each side, and where the chunk sits in it. */
+function chunkContext(store: Store, chunk: TextChunk): { full: string; start: number; end: number } {
+  const near = store.db
+    .prepare('SELECT id FROM chunks WHERE artifact_id = ? AND seq IN (?, ?) ORDER BY seq')
+    .all(chunk.artifactId, chunk.seq - 1, chunk.seq + 1) as Array<{ id: string }>;
+  const repo = knowledgeRepos(store).chunks;
+  const rows = near.map((r) => repo.get(r.id)!);
+  const prev = rows.find((r) => r.seq === chunk.seq - 1);
+  const next = rows.find((r) => r.seq === chunk.seq + 1);
+  const gap = (n: number) => (n <= 0 ? '' : n === 1 ? ' ' : '\n'.repeat(Math.min(n, 4)));
+  let full = '';
+  if (prev) full += prev.text + gap(chunk.charStart - prev.charEnd);
+  const start = full.length;
+  full += chunk.text;
+  const end = full.length;
+  if (next) full += gap(next.charStart - chunk.charEnd) + next.text;
+  return { full, start, end };
+}
+
+/**
+ * The text of `chunk` (or of `[from, to)` within it) as served to a caller in `workspaceId`: secrets of
+ * the caller's tree redacted across the chunk's boundaries, NOT fenced (callers fence).
+ */
+export function servedChunkText(store: Store, workspaceId: string, chunk: TextChunk, from = 0, to = chunk.text.length): string {
+  const secrets = treeSecrets(store, workspaceId);
+  if (!secrets.length) return chunk.text.slice(from, to);
+  const c = chunkContext(store, chunk);
+  return redactRange(c.full, c.start + from, c.start + Math.min(to, chunk.text.length), secrets);
+}
+
+/** Longest snippet served by search (design §9: ≤ 200 chars). */
+export const SNIPPET_MAX_CHARS = 200;
+
+/**
+ * A search snippet of a chunk: a window of at most `maxChars` around the first occurrence of one of
+ * `terms` (case-insensitive; the chunk start when none occurs), redacted across chunk boundaries
+ * BEFORE the window is cut, then capped and fenced with the artifact id the hit is reported under.
+ */
+export function chunkSnippet(
+  store: Store,
+  workspaceId: string,
+  reportedArtifactId: string,
+  chunk: TextChunk,
+  terms: readonly string[],
+  maxChars = SNIPPET_MAX_CHARS,
+): string {
+  const lower = chunk.text.toLowerCase();
+  let at = -1;
+  for (const t of terms) {
+    const i = t ? lower.indexOf(t.toLowerCase()) : -1;
+    if (i >= 0 && (at < 0 || i < at)) at = i;
+  }
+  const lead = Math.floor(maxChars / 3);
+  let from = at < 0 ? 0 : Math.max(0, at - lead);
+  const to = Math.min(chunk.text.length, from + maxChars);
+  from = Math.max(0, Math.min(from, to - maxChars));
+  let text = servedChunkText(store, workspaceId, chunk, from, to);
+  if (from > 0) text = `…${text}`;
+  if (to < chunk.text.length) text = `${text}…`;
+  return fenceEvidence(reportedArtifactId, capText(text, maxChars + 2));
+}
+
+/** Agent- or user-written store text (claims, titles, descriptions, names) as served: redacted whole, then cut. */
+export function servedLine(store: Store, workspaceId: string, text: string, maxChars: number): string {
+  return capText(redactServed(store, workspaceId, text), maxChars);
+}
+// --- end KS-4 -------------------------------------------------------------------------------------

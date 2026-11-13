@@ -22,10 +22,10 @@ import { knowledgeRepos, newId } from '../store/repos.js';
 import type { ExtractionState } from '../types.js';
 import { descendants, rootOf } from '../workspace/tree.js';
 import { knowledgeSettings, type KnowledgeSettings } from './config.js';
-import { blocksText, chunk, contentHash, estimateTokens, extract, normalizeText } from './extract/index.js';
+import { blocksText, capBlocks, chunk, contentHash, estimateTokens, extract, normalizeText } from './extract/index.js';
 import type { Block, Extracted, ExtractOptions } from './extract/types.js';
 import { capText, chunkCount, SERVED_ERROR_MAX_CHARS, textTruncated } from './texts.js';
-import { redactServed, stripFences } from './trust.js';
+import { redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
 
 export type IngestDeps = { store: Store; artifacts: ArtifactStore; config?: Pick<BifConfig, 'knowledge'> };
 
@@ -80,9 +80,37 @@ function sanitizeBlocks(store: Store, workspaceId: string, blocks: Block[]): Blo
 
 const sanitizeError = (store: Store, workspaceId: string, e: string | undefined): string | undefined => {
   if (!e) return undefined;
-  const line = normalizeText(stripFences(redactServed(store, workspaceId, e))).replace(/\s+/g, ' ');
+  // KS-1a cuts its message at 300 chars (marked `…`) before any redaction: drop a secret cut there.
+  const raw = e.endsWith('…') ? `${stripSecretTail(e.slice(0, -1), treeSecrets(store, workspaceId))}…` : e;
+  const line = normalizeText(stripFences(redactServed(store, workspaceId, raw))).replace(/\s+/g, ' ');
   return line ? capText(line, SERVED_ERROR_MAX_CHARS) : undefined;
 };
+
+/**
+ * KS-4 ruling "redact before cutting": the full normalized text is redacted, THEN capped at
+ * `maxTextChars` and chunked. `extract` is asked for `maxTextChars + margin` (margin = the longest
+ * secret of the tree), so a secret straddling the configured cap is still whole when redaction runs;
+ * if `extract` itself had to cut (at cap + margin), a secret it cut in half is dropped from the tail.
+ */
+function redactThenCap(
+  store: Store,
+  workspaceId: string,
+  extracted: Extracted,
+  maxTextChars: number,
+  secrets: readonly string[],
+): { blocks: Block[]; status: ExtractionState; error?: string } {
+  let blocks = sanitizeBlocks(store, workspaceId, extracted.blocks);
+  const cutUpstream = extracted.status === 'too_large' && extracted.blocks.length > 0;
+  if (cutUpstream && blocks.length) {
+    const last = blocks[blocks.length - 1]!;
+    const text = stripSecretTail(last.text, secrets).trimEnd();
+    blocks = text ? [...blocks.slice(0, -1), { ...last, text }] : blocks.slice(0, -1);
+  }
+  const capped = capBlocks(blocks, maxTextChars);
+  if (!capped.cut && !cutUpstream) return { blocks, status: extracted.status, ...(extracted.error ? { error: extracted.error } : {}) };
+  const error = capped.error ?? `text exceeds maxTextChars (${maxTextChars}); kept the first ${blocksText(capped.blocks).length} characters`;
+  return { blocks: capped.blocks, status: 'too_large', error };
+}
 
 const messageOf = (e: unknown): string => (e instanceof Error ? e.message : String(e)) || 'extraction failed';
 
@@ -116,12 +144,14 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
     if (!before) k.artifactTexts.insert({ artifactId, workspaceId: art.workspaceId, status: 'pending', charCount: 0, tokenEstimate: 0 });
 
     const settings = knowledgeSettings(deps.config ?? {}).extraction;
+    const secrets = treeSecrets(store, art.workspaceId);
+    const margin = secrets.reduce((m, x) => Math.max(m, x.length), 0);
     let extracted: Extracted;
     try {
       const bytes = readFileSync(artifacts.filePath(art));
       const filename = art.title && /\.[A-Za-z0-9]{1,10}$/.test(art.title) ? art.title : art.path;
       extracted = await (opts.extract ?? extract)(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), art.mime, {
-        maxTextChars: settings.maxTextChars,
+        maxTextChars: settings.maxTextChars + margin,
         xlsxMaxRows: settings.xlsxMaxRows,
         filename,
       });
@@ -129,14 +159,15 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
       extracted = { status: 'failed', extractor: 'none@1', blocks: [], error: messageOf(e) };
     }
 
-    const blocks = sanitizeBlocks(store, art.workspaceId, extracted.blocks);
-    let status: ExtractionState = extracted.status;
+    const served = redactThenCap(store, art.workspaceId, extracted, settings.maxTextChars, secrets);
+    const blocks = served.blocks;
+    let status: ExtractionState = served.status;
     if (status === 'ok' && blocks.length === 0) status = 'empty';
     const hasText = blocks.length > 0 && (status === 'ok' || status === 'too_large');
     const text = hasText ? blocksText(blocks) : '';
     const hash = hasText ? contentHash(blocks) : undefined;
     const pieces = hasText ? chunk(blocks, { chunkTokens: settings.chunkTokens, maxChunkTokens: settings.maxChunkTokens }) : [];
-    const error = sanitizeError(store, art.workspaceId, extracted.error);
+    const error = sanitizeError(store, art.workspaceId, served.error);
 
     store.transaction(() => {
       const cur = k.artifactTexts.get(artifactId);

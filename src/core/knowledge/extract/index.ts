@@ -151,8 +151,19 @@ function finish(raw: Block[], extractor: string, maxTextChars: number): Extracte
     blocks.push(out);
   }
   if (blocks.length === 0) return { status: 'empty', extractor, blocks: [] };
+  const capped = capBlocks(blocks, maxTextChars);
+  if (!capped.cut) return { status: 'ok', extractor, blocks };
+  return { status: 'too_large', extractor, blocks: capped.blocks, error: capped.error };
+}
+
+/**
+ * Caps `blocksText(blocks)` at `maxTextChars`: the blocks that fit, the last one cut (exported for
+ * KS-1 ingest, which redacts identity secrets BEFORE applying the cap). `cut` and the `too_large`
+ * message when anything was left out.
+ */
+export function capBlocks(blocks: Block[], maxTextChars: number): { blocks: Block[]; cut: boolean; error?: string } {
   const max = Math.max(0, Math.floor(maxTextChars));
-  if (blocksText(blocks).length <= max) return { status: 'ok', extractor, blocks };
+  if (blocksText(blocks).length <= max) return { blocks, cut: false };
   const kept: Block[] = [];
   let used = 0;
   for (const b of blocks) {
@@ -168,12 +179,7 @@ function finish(raw: Block[], extractor: string, maxTextChars: number): Extracte
     if (text) kept.push({ ...b, text });
     break;
   }
-  return {
-    status: 'too_large',
-    extractor,
-    blocks: kept,
-    error: `text exceeds maxTextChars (${max}); kept the first ${blocksText(kept).length} characters`,
-  };
+  return { blocks: kept, cut: true, error: `text exceeds maxTextChars (${max}); kept the first ${blocksText(kept).length} characters` };
 }
 
 /** One line, bounded: parser messages can quote input, and the error is stored and shown. */
