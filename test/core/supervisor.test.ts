@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -428,6 +428,9 @@ describe('Supervisor post-cap fixes', () => {
     const res = await sup.run(cli({ lines: CLAUDE_FIXTURE, stubbornChild: true }));
     expect(res).toMatchObject({ status: 'done', exitCode: 0 });
     expect(res.reason).toBeUndefined();
+    // The grandchild had installed its SIGTERM handler before the CLI went on (fake-cli waits for its
+    // ready file; a fixed sleep let a slow start under load die on SIGTERM and end the reap early).
+    expect(existsSync(join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd', 'child.ready'))).toBe(true);
     // The reap really outlasted the idle timeout (so the watchdog had the chance to misfire).
     expect(Date.now() - started).toBeGreaterThanOrEqual(killGraceMs);
     expect(killGraceMs).toBeGreaterThan(idleTimeoutMs);

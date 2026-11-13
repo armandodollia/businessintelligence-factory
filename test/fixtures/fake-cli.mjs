@@ -4,7 +4,8 @@
 // { lines?: string[], delayMs?: number, exitCode?: number, sleepForever?: boolean,
 //   ignoreSigterm?: boolean, counterFile?: string, attempts?: Array<{ lines, exitCode }>,
 //   stubbornChild?: boolean }
-// `stubbornChild` spawns a grandchild that ignores SIGTERM and writes its pid to child.pid.
+// `stubbornChild` spawns a grandchild that ignores SIGTERM, writes its pid to child.pid and, once its handler
+// is installed, child.ready (the CLI waits for that file).
 // With `counterFile`, invocation N (1-based) uses attempts[N-1] (last one repeats).
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -24,12 +25,16 @@ if (script.counterFile) {
 }
 if (plan.ignoreSigterm) process.on('SIGTERM', () => {});
 if (plan.stubbornChild) {
-  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30);"], {
-    stdio: 'ignore',
-  });
+  // The grandchild writes child.ready once its SIGTERM handler is installed; the CLI waits for it (a fixed
+  // sleep was not enough under load: a grandchild still starting died on SIGTERM and the reap ended early).
+  const child = spawn(
+    process.execPath,
+    ['-e', "process.on('SIGTERM', () => {}); require('node:fs').writeFileSync('child.ready', '1'); setInterval(() => {}, 1 << 30);"],
+    { stdio: 'ignore' },
+  );
   writeFileSync('child.pid', String(child.pid));
   child.unref(); // the CLI may exit and leave it behind
-  await new Promise((r) => setTimeout(r, 200)); // let the grandchild install its handler
+  for (let waited = 0; !existsSync('child.ready') && waited < 30_000; waited += 10) await new Promise((r) => setTimeout(r, 10));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
