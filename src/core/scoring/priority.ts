@@ -5,7 +5,7 @@ import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Criteria, Decision, Recommendation } from '../types.js';
-import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, pctFraction, toNumber } from './criteria.js';
+import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, toNumber } from './criteria.js';
 
 export type PriorityConfig = { weights?: Record<string, number>; personaWeight?: number };
 
@@ -14,25 +14,48 @@ const round2 = (v: number) => Math.round(v * 100) / 100;
 
 const LEVELS: Record<string, number> = { 'very low': 1, low: 2, medium: 3, moderate: 3, high: 4, 'very high': 5 };
 
-/** A `range` value (cost) on the 1–5 scale: a number, a level word, or a numeric range within 1–5. */
-function rangeTo15(v: unknown): number | undefined {
-  const n = toNumber(v);
-  if (n !== undefined) return n >= 1 && n <= 5 ? n : undefined;
+const SUFFIX: Record<string, number> = { k: 1e3, m: 1e6, mm: 1e6, b: 1e9, bn: 1e9 };
+
+/**
+ * Money amount → cost score on 1–5, log scale: ≤ $1k → 1, $10k → 2, $100k → 3, $1M → 4,
+ * ≥ $10M → 5 (score = clamp(log10(amount) − 2, 1, 5); currency is ignored).
+ */
+export function costAmountScore(amount: number): number {
+  return amount <= 1000 ? 1 : clamp(Math.log10(amount) - 2, 1, 5);
+}
+
+/**
+ * Cost (`range` scale) → 1–5 score where higher = more expensive (inverted later):
+ * - a level word: very low 1, low 2, medium/moderate 3, high 4, very high 5;
+ * - a plain number or plain range within 1–5 with no currency or k/M/B suffix ("3", "2-3"): a score;
+ * - otherwise a money amount or range ("$10–$50", "10k-50k", "$1M–$5M", "$1-5M", 250000): the
+ *   arithmetic midpoint (a suffix on the upper bound also applies to a bare lower bound), scored
+ *   with `costAmountScore`.
+ * Undefined when unparseable.
+ */
+export function costScore(v: unknown): number | undefined {
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || v < 0) return undefined;
+    return v >= 1 && v <= 5 ? v : costAmountScore(v);
+  }
   if (typeof v !== 'string') return undefined;
   const s = v.trim().toLowerCase();
   if (LEVELS[s] !== undefined) return LEVELS[s];
-  const m = /^(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)$/.exec(s);
-  if (m) {
-    const mid = (Number(m[1]) + Number(m[2])) / 2;
-    if (mid >= 1 && mid <= 5) return mid;
-  }
-  return undefined;
+  const re = /([$€£])?\s*(\d+(?:\.\d+)?)\s*(mm|bn|k|m|b)?\b/g;
+  const tokens = [...s.replace(/,/g, '').matchAll(re)].slice(0, 2);
+  if (!tokens.length) return undefined;
+  const money = /[$€£]/.test(s) || tokens.some((t) => t[3]);
+  const last = tokens.at(-1)![3];
+  const values = tokens.map((t) => Number(t[2]) * (SUFFIX[t[3] ?? last ?? ''] ?? 1));
+  const mid = values.reduce((a, b) => a + b, 0) / values.length;
+  if (!money) return mid >= 1 && mid <= 5 ? mid : costAmountScore(mid);
+  return costAmountScore(mid);
 }
 
 /**
  * A recommendation criterion normalized to 0–5 where higher is better (difficulty, cost, risk and
- * timeToValue inverted as 6 − v). Undefined when missing or not normalizable (e.g. cost
- * "$10k–$50k"); such criteria are left out of the weighted mean.
+ * timeToValue inverted as 6 − v). `confidence` is a percent 0–100 (→ v/100·5). Undefined when
+ * missing or unparseable; such criteria are left out of the weighted mean.
  */
 export function normalizeCriterion(key: string, value: unknown): number | undefined {
   const def = CRITERIA.recommendation.find((c) => c.key === key);
@@ -40,9 +63,9 @@ export function normalizeCriterion(key: string, value: unknown): number | undefi
   let v: number | undefined;
   if (def.scale === 'pct') {
     const n = toNumber(value);
-    return n === undefined ? undefined : pctFraction(n) * 5;
+    return n === undefined ? undefined : (clamp(n, 0, 100) / 100) * 5;
   }
-  if (def.scale === 'range') v = rangeTo15(value);
+  if (def.scale === 'range') v = costScore(value);
   else {
     const n = toNumber(value);
     v = n === undefined ? undefined : clamp(n, 1, 5);
@@ -94,11 +117,24 @@ export function scoreRecommendations(workspaceId: string, deps: { store: Store; 
   );
 }
 
-/** Rejects criteria keys outside `CRITERIA.recommendation` (excluding `priority`, which is computed). */
-function checkRecommendationCriteria(c: Criteria): string | undefined {
+/**
+ * Validates recommendation criteria: keys among the 8 evidence criteria (`priority` is computed);
+ * 1-5 keys numbers in 1–5; `confidence` a percent 0–100; `cost` parseable by `costScore`.
+ */
+export function checkRecommendationCriteria(c: Criteria): string | undefined {
   const allowed = new Set<string>(RECOMMENDATION_KEYS);
   const unknown = Object.keys(c).filter((k) => !allowed.has(k));
-  return unknown.length ? `unknown recommendation criteria: ${unknown.join(', ')} (allowed: ${[...allowed].join(', ')})` : undefined;
+  if (unknown.length) return `unknown recommendation criteria: ${unknown.join(', ')} (allowed: ${[...allowed].join(', ')})`;
+  for (const [k, v] of Object.entries(c)) {
+    const scale = CRITERIA.recommendation.find((d) => d.key === k)!.scale;
+    const n = toNumber(v);
+    if (scale === 'pct' && (n === undefined || n < 0 || n > 100)) return `criteria.${k} must be a percent 0–100`;
+    if (scale === '1-5' && (n === undefined || n < 1 || n > 5)) return `criteria.${k} must be a number 1–5`;
+    if (scale === 'range' && costScore(v) === undefined) {
+      return `criteria.${k} must be a 1–5 score, low/medium/high, or a money amount/range like "$10k–$50k"`;
+    }
+  }
+  return undefined;
 }
 
 const fail = (error: string): ToolResult => ({ ok: false, error });

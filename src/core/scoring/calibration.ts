@@ -25,8 +25,9 @@ export const MIN_WEIGHT_SAMPLES = 5;
 const round = (v: number, d = 3) => Math.round(v * 10 ** d) / 10 ** d;
 
 /**
- * Rating agreement per (targetType, criterion): `n` ratings, share that agreed, and the mean
- * signed difference user − agent over ratings where both values are numeric (an agree counts as 0).
+ * Rating agreement per (targetType, criterion): `n` ratings, share that agreed, and `meanDelta` =
+ * mean of `normalizedDelta` (user − agent as a signed fraction of the criterion's scale span: 1-5 →
+ * /4, pct → fraction points, trend → /2, range → relative) over comparable ratings; an agree is 0.
  */
 export function calibrationReport(workspaceId: string, deps: { store: Store }): CalibrationReport {
   const groups = new Map<string, { targetType: TargetType; criterion: string; ratings: Rating[] }>();
@@ -37,15 +38,12 @@ export function calibrationReport(workspaceId: string, deps: { store: Store }): 
     g.ratings.push(r);
   }
   const byCriterion = [...groups.values()].map(({ targetType, criterion, ratings }) => {
+    const scale = criterionDef(targetType, criterion)?.scale;
     const deltas: number[] = [];
     for (const r of ratings) {
-      if (r.verdict === 'agree') {
-        if (toNumber(r.agentValue) !== undefined) deltas.push(0);
-        continue;
-      }
-      const a = toNumber(r.agentValue);
-      const u = toNumber(r.userValue);
-      if (a !== undefined && u !== undefined) deltas.push(u - a);
+      if (!scale) continue;
+      const d = normalizedDelta(scale, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue);
+      if (d !== undefined) deltas.push(d);
     }
     return {
       targetType,

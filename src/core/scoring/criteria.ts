@@ -1,7 +1,9 @@
 import type { Rating } from '../types.js';
 
 /**
- * `1-5`: integer-ish score 1–5. `pct`: percent 0–100 (values ≤ 1 are read as a 0–1 fraction).
+ * `1-5`: score 1–5. `pct`: percent. Recommendation `confidence` and symptom `causeConfidence` are
+ * 0–100 (validated by save_recommendation / save_symptom); persona field and log_decision confidences
+ * are 0–1 fractions, so rating comparisons (`pctFraction`) read values ≤ 1 as fractions.
  * `trend`: one of ↑ → ↓. `range`: free numeric value or range (e.g. cost "$10k–$50k", review 0–10).
  */
 export type Scale = '1-5' | 'pct' | 'trend' | 'range';
