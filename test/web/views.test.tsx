@@ -36,8 +36,22 @@ const pending = {
   createdAt: '2026-11-12T00:00:00.000Z',
 };
 
+const loggedDecision = {
+  id: 'dec_1',
+  workspaceId: 'ws_1',
+  agentRunId: 'ar_1',
+  role: 'worker',
+  model: { provider: 'claude', model: 'sonnet' },
+  promptVersion: 'v1',
+  kind: 'decision',
+  payload: { tool: 'log_decision', what: 'Focus on pricing pages', why: 'w', confidence: 0.7 },
+  refs: [],
+  createdAt: '2026-11-12T00:00:00.000Z',
+};
+
 function respond(path: string): unknown {
   if (path.endsWith('/recommendations')) return [rec];
+  if (path.endsWith('/decisions')) return [loggedDecision];
   if (path.includes('/requests')) return [pending];
   if (path.endsWith('/interview')) return { turns: [], coverage: { basics: false } };
   if (path.endsWith('/rollup')) return { symptoms: [], recommendations: [], findings: [] };
@@ -124,10 +138,18 @@ describe('web views', () => {
     expect(screen.getByText(/excluded: not verified/)).toBeTruthy();
   });
 
+  it('decision log rates a decision confidence inline', async () => {
+    window.location.hash = '#/w/ws_1/decisions';
+    render(<App />);
+    expect(await screen.findByText('confidence')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Agree' }).length).toBeGreaterThan(0);
+  });
+
   it('renders workspaces and settings', async () => {
     window.location.hash = '#/settings';
     render(<App />);
-    expect(await screen.findByText(/Persona weight/)).toBeTruthy();
+    expect(await screen.findByText(/Strategy page/)).toBeTruthy();
+    expect(screen.queryByText(/Persona weight in priority/)).toBeNull();
     cleanup();
     window.location.hash = '#/';
     render(<App />);

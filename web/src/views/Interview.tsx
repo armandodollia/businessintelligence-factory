@@ -6,7 +6,8 @@ export function Interview({ wsId }: { wsId: string }) {
   const send = async () => {
     const text = form.values.text;
     form.reset();
-    await iv.send(text);
+    // Put the text back when the server did not store the message.
+    if (!(await iv.send(text))) form.set('text', text);
   };
 
   return (

@@ -21,6 +21,7 @@ import { exportTrainingData } from '../core/scoring/export.js';
 import { scoreRecommendations } from '../core/scoring/priority.js';
 import { RatingError, rateCriterion } from '../core/scoring/ratings.js';
 import { reviewQueue } from '../core/scoring/reviewQueue.js';
+import { decisionReviewQueue } from '../core/scoring/decisionQueue.js';
 import type { Store } from '../core/store/db.js';
 import { newId } from '../core/store/repos.js';
 import { recordSystemDecision } from '../core/systemDecision.js';
@@ -48,6 +49,11 @@ export type AppDeps = {
   webDist?: string;
   /** SSE keep-alive interval (default 15 s). */
   sseHeartbeatMs?: number;
+  /**
+   * Config-file values of fields overridden at boot (`BIF_DATA_DIR`, `PORT`). Persisting writes
+   * these back instead of the runtime override, unless the user changed the field since boot.
+   */
+  fileValues?: { dataDir?: string; port?: number };
 };
 
 /** Error with an HTTP status, rendered as `{ error, ...extra }`. */
@@ -172,8 +178,28 @@ export function createApp(deps: AppDeps): Hono {
     return ws;
   };
 
+  const bootDataDir = config.dataDir;
+  const bootPort = config.server.port;
+  /** Writes the config file, keeping boot-time env overrides out of it. */
   const persistConfig = () => {
-    if (deps.configPath) writeFileSync(deps.configPath, `${JSON.stringify(config, null, 2)}\n`);
+    if (!deps.configPath) return;
+    const out = structuredClone(config);
+    const file = deps.fileValues ?? {};
+    if (file.dataDir !== undefined && out.dataDir === bootDataDir) out.dataDir = file.dataDir;
+    if (file.port !== undefined && out.server.port === bootPort) out.server.port = file.port;
+    writeFileSync(deps.configPath, `${JSON.stringify(out, null, 2)}\n`);
+  };
+
+  /**
+   * After `config.scoring` changed from `before`: rescores every workspace and logs a
+   * `set_scoring_weights` Decision in `logIn` (the workspaces whose log should show it).
+   */
+  const scoringChanged = (before: BifConfig['scoring'], logIn: string[], source: string): Decision[] => {
+    const after = structuredClone(config.scoring);
+    for (const ws of store.workspaces.list()) scoreRecommendations(ws.id, { store, config });
+    return logIn.map((workspaceId) =>
+      recordSystemDecision({ store, events }, { workspaceId, actor: 'user', payload: { tool: 'set_scoring_weights', source, before, after } }),
+    );
   };
 
   // --- workspaces & business map ------------------------------------------------------------
@@ -335,7 +361,10 @@ export function createApp(deps: AppDeps): Hono {
     workspace(input.workspaceId);
     return c.json(rateCriterion(input as Parameters<typeof rateCriterion>[0], { store }), 201);
   });
-  app.get('/api/workspaces/:id/review-queue', (c) => c.json(reviewQueue(workspace(c.req.param('id')).id, { store })));
+  app.get('/api/workspaces/:id/review-queue', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json([...reviewQueue(id, { store }), ...decisionReviewQueue(id, { store })]);
+  });
   app.get('/api/workspaces/:id/calibration', (c) => {
     const id = workspace(c.req.param('id')).id;
     return c.json({
@@ -377,12 +406,8 @@ export function createApp(deps: AppDeps): Hono {
     };
     config.scoring = after;
     persistConfig();
-    for (const ws of store.workspaces.list()) scoreRecommendations(ws.id, { store, config });
-    const decision = recordSystemDecision(
-      { store, events },
-      { workspaceId: id, actor: 'user', payload: { tool: 'set_scoring_weights', before, after } },
-    );
-    return c.json({ ...config.scoring, decisionId: decision.id });
+    const [decision] = scoringChanged(before, [id], 'scoring-weights');
+    return c.json({ ...config.scoring, decisionId: decision!.id });
   });
   app.get('/api/workspaces/:id/export', (c) => {
     const id = workspace(c.req.param('id')).id;
@@ -406,7 +431,7 @@ export function createApp(deps: AppDeps): Hono {
     const id = workspace(c.req.param('id')).id;
     const input = await body(c, schemas.newSchedule);
     checkCron(input.cron);
-    const s: Schedule = { id: newId('sch'), workspaceId: id, name: input.name, cron: input.cron, phases: input.phases, enabled: input.enabled ?? true };
+    const s: Schedule = { id: newId('sch'), workspaceId: id, name: input.name, cron: input.cron, phases: input.phases, enabled: input.enabled ?? true, activatedAt: new Date().toISOString() };
     return c.json(store.schedules.insert(s), 201);
   });
   app.patch('/api/workspaces/:id/schedules', async (c) => {
@@ -416,6 +441,8 @@ export function createApp(deps: AppDeps): Hono {
     if (!s || s.workspaceId !== id) throw new HttpError(404, `schedule '${scheduleId}' not found in workspace '${id}'`);
     if (patch.cron) checkCron(patch.cron);
     const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<Schedule>;
+    // Re-enabling resets the baseline: occurrences missed while disabled are not run.
+    if (clean.enabled === true && !s.enabled) clean.activatedAt = new Date().toISOString();
     return c.json(store.schedules.update(scheduleId, clean));
   });
 
@@ -433,8 +460,14 @@ export function createApp(deps: AppDeps): Hono {
       throw new HttpError(400, 'request body must be JSON');
     }
     const next = parseConfig(raw, 'PUT /api/config');
+    const before = structuredClone(config.scoring);
     replaceConfig(config, next);
     persistConfig();
+    // Weights are global: a change made here rescores and is logged in every workspace, exactly
+    // like `PUT .../scoring-weights`.
+    if (JSON.stringify(before) !== JSON.stringify(config.scoring)) {
+      scoringChanged(before, store.workspaces.list().map((w) => w.id), 'config');
+    }
     return c.json(config);
   });
 

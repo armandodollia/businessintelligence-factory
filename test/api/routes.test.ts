@@ -204,6 +204,33 @@ describe('ratings and review', () => {
     expect((await t.json('PUT', `/api/workspaces/${t.ws.id}/scoring-weights`, { weights: { vibes: 1 } })).status).toBe(400);
   });
 
+  it('review queue includes unrated decision confidence and review score; rating drops them', async () => {
+    const t = setup();
+    const c1 = ctx(t.ws.id);
+    const logged = t.store.decisions.insert({
+      id: newId('dec'), workspaceId: t.ws.id, agentRunId: c1.agentRunId, role: 'worker', model: c1.model, promptVersion: 'v1',
+      kind: 'decision', payload: { tool: 'log_decision', what: 'Focus on pricing', why: 'w', confidence: 0.6 }, refs: [],
+      createdAt: new Date().toISOString(),
+    });
+    const review = t.store.decisions.insert({
+      ...logged, id: newId('dec'), role: 'reviewer', kind: 'review', payload: { tool: 'submit_review', score: 6, issues: [] },
+    });
+    // System decisions carry no agent values and are not queued.
+    t.store.decisions.insert({ ...logged, id: newId('dec'), agentRunId: 'user', payload: { actor: 'user', tool: 'set_scoring_weights' } });
+    const q1 = await t.json('GET', `/api/workspaces/${t.ws.id}/review-queue`);
+    const decisionItems = q1.body.filter((i: { targetType: string }) => i.targetType === 'decision');
+    expect(decisionItems).toEqual([
+      { targetType: 'decision', targetId: logged.id, title: 'Focus on pricing', criteria: { confidence: 0.6 }, unrated: ['confidence'] },
+      expect.objectContaining({ targetId: review.id, criteria: { score: 6 }, unrated: ['score'] }),
+    ]);
+    const r = await t.json('POST', '/api/ratings', {
+      workspaceId: t.ws.id, targetType: 'decision', targetId: logged.id, criterion: 'confidence', verdict: 'agree',
+    });
+    expect(r.status).toBe(201);
+    const q2 = await t.json('GET', `/api/workspaces/${t.ws.id}/review-queue`);
+    expect(q2.body.filter((i: { targetType: string }) => i.targetType === 'decision').map((i: { targetId: string }) => i.targetId)).toEqual([review.id]);
+  });
+
   it('export downloads JSONL', async () => {
     const t = setup();
     const res = await t.app.request(`/api/workspaces/${t.ws.id}/export`);
@@ -312,6 +339,59 @@ describe('schedules and config', () => {
     const list = await t.json('GET', `/api/workspaces/${t.ws.id}/schedules`);
     expect((list.body as Schedule[]).map((s) => s.enabled)).toEqual([false]);
     expect((await t.json('PATCH', `/api/workspaces/${t.ws.id}/schedules`, { id: 'sch_nope', enabled: true })).status).toBe(404);
+  });
+
+  it('schedules get an activation baseline on create and on re-enable only', async () => {
+    const t = setup();
+    const c = await t.json('POST', `/api/workspaces/${t.ws.id}/schedules`, { name: 'daily', cron: '0 9 * * *', phases: ['scoring'] });
+    const created = Date.parse(c.body.activatedAt);
+    expect(Math.abs(created - Date.now())).toBeLessThan(5000);
+    t.store.schedules.update(c.body.id, { activatedAt: '2026-01-01T00:00:00.000Z' });
+    const renamed = await t.json('PATCH', `/api/workspaces/${t.ws.id}/schedules`, { id: c.body.id, name: 'daily 2', enabled: true });
+    expect(renamed.body.activatedAt).toBe('2026-01-01T00:00:00.000Z'); // already enabled: unchanged
+    await t.json('PATCH', `/api/workspaces/${t.ws.id}/schedules`, { id: c.body.id, enabled: false });
+    const re = await t.json('PATCH', `/api/workspaces/${t.ws.id}/schedules`, { id: c.body.id, enabled: true });
+    expect(Date.parse(re.body.activatedAt)).toBeGreaterThan(Date.parse('2026-01-01T00:00:00.000Z'));
+  });
+
+  it('PUT config with changed scoring rescores and logs a Decision in every workspace', async () => {
+    const t = setup();
+    const other = createWorkspace(t.store, { name: 'Beta', sector: 'retail' });
+    const rec = addRec(t.store, other.id, { priority: 0 });
+    const g = await t.json('GET', '/api/config');
+    const p = await t.json('PUT', '/api/config', { ...g.body, scoring: { personaWeight: 0, weights: { upside: 2 } } });
+    expect(p.status).toBe(200);
+    expect(t.store.recommendations.get(rec.id)!.priority).toBeGreaterThan(0);
+    for (const id of [t.ws.id, other.id]) {
+      const ds = t.store.decisions.list({ workspaceId: id }).map((d) => d.payload as Record<string, unknown>);
+      expect(ds).toEqual([expect.objectContaining({ tool: 'set_scoring_weights', source: 'config', actor: 'user' })]);
+    }
+    // Unchanged scoring: nothing logged.
+    await t.json('PUT', '/api/config', { ...p.body, loop: { ...p.body.loop, maxRounds: 4 } });
+    expect(t.store.decisions.list({ workspaceId: t.ws.id })).toHaveLength(1);
+  });
+
+  it('persisting config keeps boot-time dataDir/port overrides out of the file', async () => {
+    const t = researchSetup(opened);
+    const configPath = join(t.dir, 'bif.config.json');
+    t.config.dataDir = '/tmp/override-data';
+    t.config.server.port = 5555;
+    const app = createApp({
+      store: t.store, artifacts: t.artifacts, events: t.events, config: t.config, research: t.deps, configPath,
+      fileValues: { dataDir: 'data', port: 4317 },
+    });
+    const put = (b: unknown) => app.request('/api/config', { method: 'PUT', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
+    const current = (await (await app.request('/api/config')).json()) as any;
+    expect((await put({ ...current, loop: { ...current.loop, maxRounds: 4 } })).status).toBe(200);
+    let file = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(file.dataDir).toBe('data');
+    expect(file.server.port).toBe(4317);
+    expect(file.loop.maxRounds).toBe(4);
+    expect(t.config.dataDir).toBe('/tmp/override-data'); // runtime keeps the override
+    // A value the user changes explicitly is persisted.
+    expect((await put({ ...current, server: { ...current.server, port: 6000 } })).status).toBe(200);
+    file = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(file.server.port).toBe(6000);
   });
 
   it('GET/PUT config validates, applies in place and persists', async () => {

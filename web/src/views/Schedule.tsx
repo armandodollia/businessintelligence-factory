@@ -10,8 +10,7 @@ export function Schedule({ wsId }: { wsId: string }) {
   const v = form.values;
 
   const create = async () => {
-    await s.create({ name: v.name.trim(), cron: v.cron.trim(), phases: v.phases, enabled: v.enabled });
-    form.reset();
+    if (await s.create({ name: v.name.trim(), cron: v.cron.trim(), phases: v.phases, enabled: v.enabled })) form.reset();
   };
 
   return (

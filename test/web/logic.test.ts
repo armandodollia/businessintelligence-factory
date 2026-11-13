@@ -105,7 +105,8 @@ describe('web logic hooks', () => {
     routes['POST /api/workspaces/ws_1/interview'] = (body) => {
       const text = (body as { text: string }).text;
       stored.push(turn('t2', 'user', text), turn('t3', 'agent', 'Who are your customers?'));
-      return stored[2];
+      // Real route shape: { turn, turns, coverage }.
+      return { turn: stored[2], turns: [...stored], coverage: { basics: true } };
     };
 
     const { result } = renderHook(() => useInterview('ws_1'));

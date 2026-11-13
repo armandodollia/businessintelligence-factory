@@ -54,7 +54,15 @@ It stays logged into the throwaway accounts the agents create.
   profile into a site by hand, launch the same browser server once with that profile directory.
 - **T3 backend** (`"backend": "t3"`): no browser MCP server is passed; agents are told to use the
   T3 Code browser tools. This only works when the agent CLIs run inside T3 Code with those tools
-  available. The profile is then whatever T3 Code's browser uses.
+  available. The harness cannot choose or check the browser profile in this mode: agents use
+  whatever profile T3 Code's browser is running with. The same rule still applies, so it must be a
+  **dedicated research profile, never your everyday one**. Before using this backend:
+  - run the app from a T3 Code project or environment set aside for research, whose browser is
+    signed into nothing personal (no personal email, banking, password manager or SSO sessions);
+  - check by opening the T3 Code browser and confirming it has none of your own sessions or saved
+    passwords;
+  - if you cannot guarantee that, use the MCP backend with `{{profileDir}}`, where the harness
+    enforces the separate profile itself.
 
 `limits.maxBrowserRuns` (default 2) caps concurrent browser-using runs.
 
@@ -148,8 +156,8 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
   retried) and the task's one retry applies. Rate-limit text that OpenCode does print on stderr is
   detected, but it does not shorten the hang. Lower `idleTimeoutMs` if you use OpenCode's free tier.
 - **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth.
-- **Config changes** to worker/browser limits and the port need a restart. When started with
-  `BIF_DATA_DIR`/`PORT`, saving the config from the UI persists those overridden values.
+- **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
+  overrides are runtime-only and are not written into `bif.config.json` when you save settings.)
 - **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
 - **"What changed" only compares artifacts that findings cite.**
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with

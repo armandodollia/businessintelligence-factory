@@ -282,4 +282,8 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE findings ADD COLUMN include_in_synthesis INTEGER;
   `,
+  // 9: Section E fix r1 — schedule activation baseline (creation / last re-enable time).
+  `
+  ALTER TABLE schedules ADD COLUMN activated_at TEXT;
+  `,
 ];

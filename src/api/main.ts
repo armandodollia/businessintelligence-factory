@@ -54,8 +54,16 @@ export type Runtime = {
 export function createRuntime(opts: BootOptions = {}): Runtime {
   const configPath = resolve(opts.configPath ?? 'bif.config.json');
   const config = loadConfig(existsSync(configPath) ? configPath : undefined);
-  if (opts.dataDir) config.dataDir = opts.dataDir;
-  if (opts.port) config.server.port = opts.port;
+  // Env/CLI overrides apply at runtime only; the file keeps its own values (see AppDeps.fileValues).
+  const fileValues: { dataDir?: string; port?: number } = {};
+  if (opts.dataDir) {
+    fileValues.dataDir = config.dataDir;
+    config.dataDir = opts.dataDir;
+  }
+  if (opts.port) {
+    fileValues.port = config.server.port;
+    config.server.port = opts.port;
+  }
   const dataDir = resolve(config.dataDir);
   const port = config.server.port;
 
@@ -99,6 +107,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
     config,
     research,
     configPath,
+    fileValues,
     mcp: { tokens, handle },
     webDist: opts.webDist ?? fileURLToPath(new URL('../../web/dist', import.meta.url)),
   });

@@ -1,6 +1,7 @@
-import { formatValue, shortDate, summarize } from '../logic/format.js';
+import { decisionCriteria, formatValue, shortDate, summarize } from '../logic/format.js';
 import { useCalibration, useDecisions, useForm, usePromptPatch } from '../logic/hooks.js';
 import type { Decision, PatchRole } from '../logic/types.js';
+import { CriteriaRatings } from './CriterionRating.js';
 
 const KINDS: Decision['kind'][] = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'];
 
@@ -39,6 +40,7 @@ export function DecisionLog({ wsId }: { wsId: string }) {
             <th>Payload</th>
             <th>Refs</th>
             <th>Prompt</th>
+            <th>Rate</th>
           </tr>
         </thead>
         <tbody>
@@ -62,6 +64,9 @@ export function DecisionLog({ wsId }: { wsId: string }) {
               </td>
               <td className="small">{d.refs.join(', ')}</td>
               <td className="small">{d.promptVersion}</td>
+              <td>
+                <DecisionRatings wsId={wsId} decision={d} />
+              </td>
             </tr>
           ))}
         </tbody>
@@ -151,4 +156,11 @@ function PromptPatchPanel({ wsId }: { wsId: string }) {
       )}
     </section>
   );
+}
+
+/** Inline rating of a decision's agent values (confidence, review score); nothing when none. */
+function DecisionRatings({ wsId, decision }: { wsId: string; decision: Decision }) {
+  const criteria = decisionCriteria(decision);
+  if (Object.keys(criteria).length === 0) return null;
+  return <CriteriaRatings workspaceId={wsId} targetType="decision" targetId={decision.id} criteria={criteria} />;
 }

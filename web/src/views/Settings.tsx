@@ -9,19 +9,10 @@ export function Settings() {
       <p className="muted">Edits <code>bif.config.json</code> (providers, models, roles, loop, limits, browser, identity, action policy, scoring).</p>
       {c.error && <div className="error">{c.error}</div>}
       {c.loading && <div className="muted">loading…</div>}
-      <div className="row">
-        <label>
-          Persona weight in priority (simulated feedback; default 0)
-          <input
-            type="number"
-            min={0}
-            step={0.1}
-            value={c.personaWeight}
-            disabled={!!c.parseError}
-            onChange={(e) => c.setPersonaWeight(Number(e.target.value))}
-          />
-        </label>
-      </div>
+      <p className="muted">
+        Priority weights and the persona weight are edited on each workspace's Strategy page; a scoring change saved here
+        also rescores every workspace and is logged as a decision.
+      </p>
       <textarea className="code" rows={30} spellCheck={false} value={c.text} onChange={(e) => c.setText(e.target.value)} />
       {c.parseError && <div className="error">Invalid JSON: {c.parseError}</div>}
       <div className="row">

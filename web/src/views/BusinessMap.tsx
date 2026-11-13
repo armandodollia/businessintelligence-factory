@@ -211,7 +211,12 @@ function ProposalCard(props: {
         </div>
       )}
       <div className="row">
-        <button className="primary" disabled={props.busy} onClick={() => void props.accept(p.id, hasEdits ? edits : undefined)}>
+        <button
+          className="primary"
+          disabled={props.busy || v.audiences.length === 0}
+          title={v.audiences.length === 0 ? 'Select at least one audience' : undefined}
+          onClick={() => void props.accept(p.id, hasEdits ? edits : undefined)}
+        >
           {hasEdits ? 'Accept with edits' : 'Accept'}
         </button>
         <button onClick={() => form.set('editing', !v.editing)}>{v.editing ? 'Hide edit' : 'Edit'}</button>
