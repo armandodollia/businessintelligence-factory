@@ -496,16 +496,12 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
     // A hit is one item of the store; `expand` of its id returns it whole.
     items: hits.map((h) => ({ value: h.hit, refs: h.refs, upload: h.upload, recover: () => ({ kind: 'expand_id', tool: 'expand', input: { id: h.hit.id } }) })),
   });
-  let page = pageWith(notes);
-  // KS-7 (user decision, design §3): a node-scoped search says how many more matches exist elsewhere in
-  // the business. First page only; counts only (no text, no ids; the retrieval row is unchanged); left
-  // out when it would cost a hit of this page or shorten one (the response budget always holds).
+  // KS-7 (user decision 14, design §3) as ruled after the paging rework: a node-scoped search with
+  // matches elsewhere in the business says how many, on page 1 ALWAYS — the page is measured with the
+  // note, so it reserves the room even when that costs a hit (the cursor still reaches that hit). First
+  // page only; counts only (no text, no ids; the retrieval row is unchanged); at most `50+` per kind.
   const elsewhere = mode === 'node' && !input.cursor ? elsewhereNote(c, kinds, terms, relaxed ? 'OR' : 'AND') : undefined;
-  if (elsewhere) {
-    const withNote = pageWith([...notes, elsewhere]);
-    const hitsOf = (p: AssembledPage) => JSON.stringify(p.data.hits);
-    if (hitsOf(withNote) === hitsOf(page) && withNote.truncated === page.truncated) page = withNote;
-  }
+  const page = pageWith(elsewhere ? [...notes, elsewhere] : notes);
   return {
     data: page.data, results: page.results, uploadDerived: page.uploadDerived, truncated: page.truncated, relaxed,
     query: input.query ?? '', scopeLabel: input.narrowed ? `node:${input.narrowed}` : mode,

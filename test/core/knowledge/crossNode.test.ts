@@ -143,16 +143,24 @@ describe('search: "elsewhere in the business" count', () => {
     const w = world();
     for (let i = 0; i < 12; i++) w.t.fact('ws_c', `HR note number ${i} about payments approvals and their long waiting times in the queue`);
     const c = w.t.ctx('ws_c');
-    // The first page carries the line when it fits beside the hits (it never costs one: decision 14);
-    // pages are measured exactly, so whether it fits depends on the room the last hit leaves.
-    let shown = 0;
-    for (let budget = 250; budget <= 450; budget += 5) {
-      const r = await w.t.call<{ tokens: number; hits: unknown[]; notes?: string[] }>(c, 'search', { query: 'approvals', max_tokens: budget });
+    // Design ruling (decision 14): page 1 always carries the line, room reserved for it even when that
+    // costs a hit; the cursor still reaches every hit, and later pages do not repeat it.
+    const all = (await w.t.call<{ hits: Array<{ id: string }> }>(c, 'search', { query: 'approvals', max_tokens: 8000 })).hits.map((h) => h.id);
+    for (let budget = 200; budget <= 450; budget += 5) {
+      const r = await w.t.call<{ tokens: number; hits: Array<{ id: string }>; notes?: string[]; cursor?: string }>(c, 'search', { query: 'approvals', max_tokens: budget });
       expect(r.tokens).toBeLessThanOrEqual(budget);
       expect(r.hits.length).toBeGreaterThan(0);
-      if ((r.notes ?? []).some((n) => n.includes('elsewhere'))) shown++;
+      expect((r.notes ?? []).some((n) => n.includes('elsewhere')), `budget ${budget}`).toBe(true);
+      const ids = r.hits.map((h) => h.id);
+      let cursor = r.cursor;
+      while (cursor) {
+        const p = await w.t.call<{ hits: Array<{ id: string }>; notes?: string[]; cursor?: string }>(c, 'search', { query: 'approvals', max_tokens: budget, cursor });
+        expect((p.notes ?? []).some((n) => n.includes('elsewhere'))).toBe(false);
+        ids.push(...p.hits.map((h) => h.id));
+        cursor = p.cursor;
+      }
+      expect(ids, `budget ${budget}`).toEqual(all);
     }
-    expect(shown).toBeGreaterThan(0);
     const whole = await w.t.call<{ notes?: string[] }>(c, 'search', { query: 'approvals' });
     expect((whole.notes ?? []).some((n) => n.includes('elsewhere'))).toBe(true);
   });

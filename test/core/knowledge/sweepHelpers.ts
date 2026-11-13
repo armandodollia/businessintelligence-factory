@@ -64,7 +64,11 @@ export function sweepBudgets(tool: KnowledgeReadTool, extra: number[] = []): num
   return [...out].filter((b) => b >= 1).sort((a, b) => a - b);
 }
 
-export type SweepCase = { name: string; tool: KnowledgeReadTool; input: Record<string, unknown>; key: 'items' | 'lines' | 'hits' | 'changes' };
+export type SweepCase = {
+  name: string; tool: KnowledgeReadTool; input: Record<string, unknown>; key: 'items' | 'lines' | 'hits' | 'changes';
+  /** A note page 1 must carry at every budget (a node-scoped search with matches elsewhere: decision 14). */
+  firstNote?: RegExp;
+};
 
 /** Pages of one request from `cursor` (or the start), each checked (see module doc). */
 async function run(t: Ks4, c: RunContext, cs: SweepCase, budget: number, stats: SweepStats, from?: string): Promise<Page[]> {
@@ -191,6 +195,7 @@ export async function sweepRequest(t: Ks4, c: RunContext, cs: SweepCase, budgets
     if (!from) {
       const header = Object.fromEntries(Object.entries(pages[0]!).filter(([k]) => !ENVELOPE.has(k) && k !== cs.key));
       expect(header, `${label}: the first page carries the whole header`).toEqual(ref.header);
+      if (cs.firstNote) expect((pages[0]!.notes ?? []).some((n) => cs.firstNote!.test(n)), `${label}: page 1 carries the note ${cs.firstNote}`).toBe(true);
     }
     // No empty page while content remains: each page but a final empty list serves an item.
     pages.forEach((p, i) => {
@@ -278,6 +283,8 @@ export async function sweepWorld(opened: Store[]) {
   for (const f of [...facts.slice(0, 6), F, X]) {
     k.factObservations.insert({ id: newId('obs'), workspaceId: 'ws_a', lineageId: f.id, findingId: f.id, kind: 'create', evidence: [], status: 'applied', createdAt: new Date().toISOString(), appliedAt: new Date().toISOString() });
   }
+  // Matches outside node scope for a search from ws_c (its sibling ws_d): the "elsewhere" note.
+  for (let i = 0; i < 12; i++) t.fact('ws_d', `Zephyr labs pricing fact ${i} ${'with sibling detail '.repeat(i % 4)}`);
   // Node card: many profile keys, keys full of escapes (s3), symptoms with quoted titles.
   const prof: Record<string, number> = {};
   for (let i = 0; i < 25; i++) prof[`key_${i}_${'x'.repeat(i * 9)}`] = i;
@@ -328,6 +335,8 @@ export const SWEEP_SPECS: Record<string, Spec> = {
   // search and list_changes (a role note on every page for the synthesizer)
   'search': { shard: 'B', make: () => ({ name: 'search', tool: 'search', input: { query: 'zephyr' }, key: 'hits' }) },
   'search, scope tree': { shard: 'D', make: () => ({ name: 'search tree', tool: 'search', input: { query: 'zephyr pricing', scope: 'tree', limit: 30 }, key: 'hits' }) },
+  'search from ws_c with matches elsewhere: page 1 always carries the note': { shard: 'C', caller: 'ws_c', make: () => ({ name: 'search elsewhere', tool: 'search', input: { query: 'zephyr' }, key: 'hits', firstNote: /^more matches elsewhere in the business \(outside node scope\): fact 12;/ }) },
+  'search from ws_c, synthesizer with a role note and matches elsewhere': { shard: 'D', caller: 'ws_c', role: 'synthesizer', make: () => ({ name: 'search elsewhere synthesizer', tool: 'search', input: { query: 'zephyr pricing', include_unverified: true }, key: 'hits', firstNote: /^more matches elsewhere in the business/ }) },
   'search, synthesizer with a role note': { shard: 'B', role: 'synthesizer', make: () => ({ name: 'search synthesizer', tool: 'search', input: { query: 'zephyr', include_unverified: true }, key: 'hits' }) },
   'list_changes': { shard: 'A', make: () => ({ name: 'list_changes', tool: 'list_changes', input: { since: '2026-10-01' }, key: 'changes' }) },
   'list_changes, synthesizer': { shard: 'B', role: 'synthesizer', make: () => ({ name: 'list_changes synthesizer', tool: 'list_changes', input: { since: '2026-10-01' }, key: 'changes' }) },

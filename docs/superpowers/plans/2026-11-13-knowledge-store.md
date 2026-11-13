@@ -1318,8 +1318,9 @@ target serves. Design §7.3 and §9 ("Paging") state the binding rules; the choi
   Below a floor `assemblePage` would raise the page's budget with a note; the sweep fails if it ever does.
 - **Quote cap.** `QUOTE_MAX_CHARS` = 1 200 (`factTools.ts`), enforced by the tool schema and by
   `verifyEvidenceRefs` ("cite a shorter span or several quotes").
-- **Elsewhere note.** Unchanged rule (added only when the page's hits are identical with it); with exact
-  pages it appears only when the last hit leaves room, so `crossNode` checks a range of budgets.
+- **Elsewhere note (gate follow-up ruling).** Always on page 1 of a node-scoped search with matches
+  elsewhere: page 1 is measured with it (room reserved, even at the cost of a hit, which opens page 2).
+  The sweep requires it on page 1 at every budget (`firstNote` of a `SweepCase`).
 - **Retrieval rows** are deduplicated per page (`uniqueRefs`), search included.
 - **Tests.** Acceptance: `pagingSweep[A-D].test.ts` (shapes in `sweepHelpers.ts` `SWEEP_SPECS`, four
   shards so they run in parallel): 28 request shapes, about 105 budgets each from 1 to 2 400 plus restarts

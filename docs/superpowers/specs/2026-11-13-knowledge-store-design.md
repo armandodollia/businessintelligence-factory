@@ -65,7 +65,9 @@ Approved by the user later (2026-11-13, after the KS-4 gate):
     (§7.1) are confirmed as built.
 14. **"Elsewhere" count on `search`.** A node-scoped search that also has matches outside node
     scope says, in one line, how many more matches exist elsewhere in the business per kind and that
-    `scope: "tree"` returns them. Counts only (no text, no ids); nothing when zero.
+    `scope: "tree"` returns them. Counts only (no text, no ids); nothing when zero. Ruled after the
+    paging rework: the line is always on page 1 when there are such matches, its room reserved even
+    when that costs a hit (the cursor still reaches it).
 15. **Causal edges cross nodes by default.** On a symptom's card and in `expand` of a symptom or
     cause entity, `causes` and `addresses` relations are listed tree-wide without `scope: "tree"`,
     each labelled with its source node. Every other relation type keeps the node boundary.
@@ -412,8 +414,10 @@ A node-scoped `search` (first page) adds one note when the same query matches mo
 the tree: `more matches elsewhere in the business (outside node scope): fact 2, entity 1; repeat
 with scope "tree" to see them` — counts only, per kind, capped at `ELSEWHERE_COUNT_CAP` = 50 (`50+`;
 `+` also when the 100-row pool was full, so the count is a lower bound), no text and no ids; the
-retrieval row is unchanged; the note is added only when the page's items are identical with and
-without it (it never costs or shortens a hit), so the response budget always holds (decision 14).
+retrieval row is unchanged. Page 1 always carries it when there are such matches (design ruling after
+the paging rework, decision 14): the page is measured with the note, so its room is reserved even when
+that leaves a hit for page 2 — the cursor still reaches every hit, and the budget always holds. Later
+pages do not repeat it. The search floor (200) holds the note with every kind at `50+` and a role note.
 
 Search query handling: the agent's text is never passed to `MATCH` raw. It is
 tokenized, each token quoted, joined with AND; quoted phrases are kept. Zero hits →
