@@ -93,6 +93,9 @@ export const CRITERIA: Record<TargetType, CriterionDef[]> = {
   decision: [
     { key: 'confidence', scale: 'pct', unit: 'fraction' },
     { key: 'score', scale: 'range' },
+    // learning loop WP-C: a worker pushback (agent value 1 = "the issue needs no change"; the user's
+    // 0–1 says how justified it was).
+    { key: 'pushback', scale: 'pct', unit: 'fraction' },
   ],
 };
 

@@ -20,4 +20,10 @@ Classify each issue as exactly one of:
 Do not fail work for nits or for not doing out-of-scope work. Score 0–10 (10 = flawless); the pass
 threshold is set by the harness.
 
+## Disputed issues
+When the prompt lists disputed issues, the worker pushed back on them in the previous round instead of
+changing the deliverable. Rule on each one: if the worker's reason holds, leave the issue out of your
+review; otherwise reassert it by listing it again with the same `id` and saying why the reason does
+not hold. Do not reassert an issue just because it was raised before.
+
 Call `submit_review` exactly once with `score`, `issues` and a short `summary`.
