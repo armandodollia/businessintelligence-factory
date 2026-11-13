@@ -14,6 +14,7 @@ const TARGET_TYPES = [
   'finding', 'recommendation', 'persona', 'competitor', 'hypothesis', 'profile', 'unit_proposal', 'user_request', 'scoring_weights', 'prompt',
   'entity', 'artifact', // knowledge store KS-3 / KS-7
   'lesson', // learning loop WP-E
+  'lessons', 'audit_schedule', // KS-8 final gate (Opus 5)
 ] as const satisfies readonly FeedbackTargetType[];
 
 const schemas = {

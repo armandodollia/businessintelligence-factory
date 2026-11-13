@@ -69,6 +69,14 @@ export const FEEDBACK_KINDS = [
   /** The user rejected a lesson proposal (nothing changed). */
   'lesson_reject',
   // --- end learning loop WP-E ---
+  // --- KS-8 final gate (Opus finding 5): every human action has an actor ---
+  /** The user asked to retire an active rule (target type `lesson`, target id = the retire proposal). */
+  'lesson_retire_request',
+  /** The user ran the lessons engine now (target type `lessons`, target id = the business-tree root). */
+  'lessons_evaluate',
+  /** The user enabled / disabled or changed an audit schedule (target type `audit_schedule`). */
+  'audit_schedule_change',
+  // --- end KS-8 final gate ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -88,8 +96,11 @@ export type FeedbackTargetType =
   | 'entity'
   // knowledge store KS-6 / KS-7: an artifact (`artifact_prune`)
   | 'artifact'
-  // learning loop WP-E: a lesson proposal (`lesson_accept`, `lesson_reject`)
-  | 'lesson';
+  // learning loop WP-E: a lesson proposal (`lesson_accept`, `lesson_reject`, `lesson_retire_request`)
+  | 'lesson'
+  // KS-8 final gate: the lessons engine of a tree (`lessons_evaluate`), an audit schedule (`audit_schedule_change`)
+  | 'lessons'
+  | 'audit_schedule';
 
 export interface FeedbackEvent {
   id: string;

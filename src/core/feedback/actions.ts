@@ -59,6 +59,8 @@ import { lessonsSettings } from '../learning/lessons/settings.js';
 import { lessonRepos } from '../learning/lessons/store.js';
 import type { LessonProposal, LessonRule } from '../learning/lessons/types.js';
 import { rootOf } from '../workspace/tree.js';
+import { evaluateLessons, proposeRuleRetirement } from '../learning/lessons/engine.js'; // KS-8 final gate
+import { getAuditSchedule, updateAuditSchedule, type AuditSchedule } from '../learning/reviewerAudit.js'; // KS-8 final gate
 import { actorOf } from './events.js';
 
 /** User-facing validation error of a feedback action (the API maps it to 400). */
@@ -995,3 +997,55 @@ export function rejectLessonProposalAsUser(
   });
 }
 // --- end learning loop WP-E ----------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// KS-8 final gate (Opus finding 5): the remaining human actions record their actor. The API passes
+// `actorOf(config)`; nothing takes the actor from a request body.
+
+/** The user changes an audit schedule (`updateAuditSchedule`): one `audit_schedule_change` event, before → after. */
+export function updateAuditScheduleAsUser(
+  store: Store,
+  id: string,
+  patch: { enabled?: boolean; cron?: string; n?: number },
+  opts: ActorOpts = {},
+): AuditSchedule {
+  return store.transaction(() => {
+    const before = getAuditSchedule(store, id);
+    if (!before) throw new FeedbackActionError(`audit schedule '${id}' not found`, 404);
+    const after = updateAuditSchedule(store, id, patch);
+    const view = (s: AuditSchedule) => ({ enabled: s.enabled, cron: s.cron, n: s.n });
+    recordFeedback(store, {
+      workspaceId: before.workspaceId, actor: actor(opts), kind: 'audit_schedule_change', targetType: 'audit_schedule', targetId: id,
+      beforeJson: view(before), afterJson: view(after), ...(opts.reason ? { reason: opts.reason } : {}),
+    });
+    return after;
+  });
+}
+
+/** The user runs the lessons engine of a tree now: one `lessons_evaluate` event listing the new proposals. */
+export function evaluateLessonsAsUser(
+  deps: { store: Store; config: Parameters<typeof evaluateLessons>[0]['config'] },
+  rootWorkspaceId: string,
+  opts: ActorOpts = {},
+): LessonProposal[] {
+  const proposals = evaluateLessons(deps, rootWorkspaceId);
+  recordFeedback(deps.store, {
+    workspaceId: rootWorkspaceId, actor: actor(opts), kind: 'lessons_evaluate', targetType: 'lessons', targetId: rootWorkspaceId,
+    afterJson: { proposalIds: proposals.map((p) => p.id) },
+  });
+  return proposals;
+}
+
+/** The user asks to retire an active rule: the pending proposal and one `lesson_retire_request` event (undefined: no such rule). */
+export function proposeRuleRetirementAsUser(store: Store, ruleId: string, rootWorkspaceId: string, opts: ActorOpts = {}): LessonProposal | undefined {
+  return store.transaction(() => {
+    const p = proposeRuleRetirement(store, ruleId, rootWorkspaceId);
+    if (!p) return undefined;
+    recordFeedback(store, {
+      workspaceId: rootWorkspaceId, actor: actor(opts), kind: 'lesson_retire_request', targetType: 'lesson', targetId: p.id,
+      afterJson: { ruleId }, ...(opts.reason ? { reason: opts.reason } : {}),
+    });
+    return p;
+  });
+}
+// --- end KS-8 final gate ---

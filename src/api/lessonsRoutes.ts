@@ -8,10 +8,10 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
-import { acceptLessonProposalAsUser, FeedbackActionError, rejectLessonProposalAsUser } from '../core/feedback/actions.js';
+import { acceptLessonProposalAsUser, evaluateLessonsAsUser, FeedbackActionError, proposeRuleRetirementAsUser, rejectLessonProposalAsUser } from '../core/feedback/actions.js';
 import { actorOf } from '../core/feedback/events.js';
 import { activeRules } from '../core/learning/lessons/appendix.js';
-import { evaluateLessons, proposeRuleRetirement, rulesWithEffect } from '../core/learning/lessons/engine.js';
+import { rulesWithEffect } from '../core/learning/lessons/engine.js';
 import { nextRetroAt, runRetro } from '../core/learning/lessons/retro.js';
 import { lessonsSettings } from '../core/learning/lessons/settings.js';
 import { lessonRepos } from '../core/learning/lessons/store.js';
@@ -101,7 +101,7 @@ export function mountLessonsRoutes(app: Hono, deps: LessonsRouteDeps): void {
     `${base}/evaluate`,
     wrap((c) => {
       const { root } = caller(c);
-      return c.json({ proposals: evaluateLessons({ store, config }, root) });
+      return c.json({ proposals: evaluateLessonsAsUser({ store, config }, root, { actor: actorOf(config) }) });
     }),
   );
 
@@ -130,7 +130,7 @@ export function mountLessonsRoutes(app: Hono, deps: LessonsRouteDeps): void {
     `${base}/rules/:rid/propose-retire`,
     wrap((c) => {
       const { root } = caller(c);
-      const p = proposeRuleRetirement(store, c.req.param('rid')!, root);
+      const p = proposeRuleRetirementAsUser(store, c.req.param('rid')!, root, { actor: actorOf(config) });
       if (!p) throw new NotFound(`active lesson rule '${c.req.param('rid')}' not found`);
       return c.json(p);
     }),

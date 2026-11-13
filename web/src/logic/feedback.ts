@@ -34,6 +34,10 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   // learning loop WP-E
   lesson_accept: 'lesson proposal accepted',
   lesson_reject: 'lesson proposal rejected',
+  // KS-8 final gate (Opus 5)
+  lesson_retire_request: 'rule retirement requested',
+  lessons_evaluate: 'lessons engine run',
+  audit_schedule_change: 'audit schedule changed',
 };
 
 const short = (v: unknown, max = 80): string => {

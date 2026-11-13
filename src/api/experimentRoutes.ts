@@ -7,6 +7,7 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { BifConfig } from '../core/config/schema.js';
 import { modelRefSchema } from '../core/config/schema.js';
+import { FeedbackActionError, updateAuditScheduleAsUser } from '../core/feedback/actions.js'; // KS-8 final gate (Opus 5)
 import { actorOf } from '../core/feedback/events.js';
 import { compareExperiment, ExperimentError, listExperiments, startExperiment } from '../core/learning/experiments.js';
 import {
@@ -18,7 +19,6 @@ import {
   listAudits,
   listAuditSchedules,
   startReviewerAudit,
-  updateAuditSchedule,
 } from '../core/learning/reviewerAudit.js';
 import type { ResearchDeps } from '../core/research/deps.js';
 import type { Store } from '../core/store/db.js';
@@ -70,6 +70,7 @@ function fail(c: Context, e: unknown): Response {
   if (e instanceof AuditError || e instanceof ExperimentError) {
     return c.json({ error: e.message }, e.code === 'not_found' ? 404 : e.code === 'forbidden' ? 403 : 400);
   }
+  if (e instanceof FeedbackActionError) return c.json({ error: e.message }, e.status);
   throw e;
 }
 
@@ -128,7 +129,7 @@ export function mountWpfRoutes(app: Hono, deps: WpfRouteDeps, workspace: (id: st
       if (b.data.enabled !== undefined) patch.enabled = b.data.enabled;
       if (b.data.cron !== undefined) patch.cron = b.data.cron;
       if (b.data.n !== undefined) patch.n = b.data.n;
-      return c.json(updateAuditSchedule(store, c.req.param('id'), patch));
+      return c.json(updateAuditScheduleAsUser(store, c.req.param('id'), patch, { actor: actorOf(config) }));
     } catch (e) {
       return fail(c, e);
     }
