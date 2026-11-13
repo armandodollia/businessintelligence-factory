@@ -193,4 +193,10 @@ export const MIGRATIONS: readonly string[] = [
     data TEXT NOT NULL
   );
   `,
+  // 2: Section B — prompt version on agent runs (so run tokens resolve to a full RunContext
+  // after a restart) and a lookup index for per-run decisions.
+  `
+  ALTER TABLE agent_runs ADD COLUMN prompt_version TEXT;
+  CREATE INDEX decisions_run ON decisions (agent_run_id);
+  `,
 ];

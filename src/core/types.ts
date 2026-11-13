@@ -88,6 +88,8 @@ export interface AgentRun {
   exitCode?: number;
   startedAt: string;
   endedAt?: string;
+  /** Prompt version the run was started with (migration 2). */
+  promptVersion?: string;
 }
 
 export interface Decision {
