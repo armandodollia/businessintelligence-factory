@@ -239,6 +239,11 @@ export interface WhatChangedPayload {
   newFindings?: string[];
   removedSubjects?: string[];
   changedArtifacts?: ChangedArtifact[];
+  // --- knowledge store KS-5: fact lineage of the next run (absent on older diffs) ---
+  replaced?: Array<{ from: string; to: string }>;
+  retracted?: string[];
+  confirmed?: number;
+  // --- end KS-5 ---
 }
 
 /** One "what changed" entry as shown on the Research page. */
@@ -250,6 +255,10 @@ export interface ChangeEntry {
   newFindings: string[];
   removedSubjects: string[];
   changedArtifacts: ChangedArtifact[];
+  /** KS-5: replaced facts (old → new version), retracted facts and the confirmation count. */
+  replaced: Array<{ from: string; to: string }>;
+  retracted: string[];
+  confirmed: number;
   /** True when the diff found nothing. */
   empty: boolean;
 }

@@ -258,6 +258,7 @@ describe('orchestrator phases', () => {
     });
     s.store.personas.insert({
       id: 'per_1', workspaceId: 'ws_a', slug: 'ops-olivia', segment: 'ops', profile: {}, agentMdPath: 'x', version: 1,
+      status: 'verified', // KS-5: the briefing lists usable personas (design §7.2)
     } as never);
     const rr: ResearchRun = { id: 'rrun_x', workspaceId: 'ws_a', phase: 'competitor_discovery', status: 'running', startedAt: '' };
     const p = orchestratorPrompt(s.store, s.config, rr, 1);

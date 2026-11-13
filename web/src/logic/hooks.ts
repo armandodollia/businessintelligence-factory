@@ -906,6 +906,9 @@ export function toChangeEntry(d: Decision): ChangeEntry | null {
   const newFindings = p.newFindings ?? [];
   const removedSubjects = p.removedSubjects ?? [];
   const changedArtifacts = p.changedArtifacts ?? [];
+  const replaced = p.replaced ?? []; // KS-5
+  const retracted = p.retracted ?? []; // KS-5
+  const confirmed = p.confirmed ?? 0; // KS-5
   return {
     id: d.id,
     createdAt: d.createdAt,
@@ -914,7 +917,12 @@ export function toChangeEntry(d: Decision): ChangeEntry | null {
     newFindings,
     removedSubjects,
     changedArtifacts,
-    empty: newFindings.length === 0 && removedSubjects.length === 0 && changedArtifacts.length === 0,
+    replaced,
+    retracted,
+    confirmed,
+    empty:
+      newFindings.length === 0 && removedSubjects.length === 0 && changedArtifacts.length === 0 &&
+      replaced.length === 0 && retracted.length === 0 && confirmed === 0,
   };
 }
 

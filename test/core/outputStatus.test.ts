@@ -68,7 +68,8 @@ describe('review status of task outputs', () => {
     expect(byClaim['Acme Pro costs $10 per seat']!.status).toBe('superseded');
     // The revise prompt told the worker which outputs are current and the superseded rule.
     const revisePrompt = t.requests.find((r) => r.kind === 'revise')!.prompt;
-    expect(revisePrompt).toMatch(/## Your current outputs\n- finding fnd_\w+: Acme Pro costs \$10/);
+    // KS-5: the outputs are fenced (store text is untrusted data), one line per output.
+    expect(revisePrompt).toMatch(/## Your current outputs\n[^\n]*untrusted[^\n]*\n<<<EVIDENCE outputs\n- finding fnd_\w+: Acme Pro costs \$10/);
     // The round-2 reviewer only sees the current ("$20") finding.
     const reviewerPrompts = t.requests.filter((r) => r.kind === 'review').map((r) => r.prompt);
     expect(reviewerPrompts[1]).toContain('Acme Pro costs $20 per seat');

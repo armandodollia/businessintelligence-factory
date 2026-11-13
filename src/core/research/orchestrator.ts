@@ -1,19 +1,27 @@
 import type { BifConfig } from '../config/schema.js';
 import { PROVIDER_IDS } from '../config/schema.js';
 import { AbortError } from '../events.js';
-import { synthesisFindingsSection } from '../evidence/synthesis.js';
 import { isOurProcessGroup } from '../harness/procinfo.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
 import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
-import { listUploads } from '../internal/uploads.js';
+import { uploadPromptLines } from '../internal/uploads.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Pipeline, ResearchRun, Task, TaskType, Workspace } from '../types.js';
 import { recordWhatChanged } from '../scheduler/whatChanged.js';
-import { treeContext } from '../workspace/businessMap.js';
+import { treeContext, treeLines } from '../workspace/businessMap.js';
+import { CronExpressionParser } from 'cron-parser'; // KS-5
+import { orchestratorBriefing, promptReadsOf } from '../knowledge/briefing.js'; // KS-5
+import type { PromptRead } from '../knowledge/promptReads.js'; // KS-5
+import { servedLine } from '../knowledge/texts.js'; // KS-5
+import { factScope } from '../knowledge/facts.js'; // KS-5
+import { previousRun } from '../scheduler/whatChanged.js'; // KS-5
+import type { RetrievalResultRef } from '../types.js'; // KS-5
+import { estimateTokens } from '../knowledge/budget.js'; // KS-5
+import { anyUploadDerived } from '../knowledge/readCommon.js'; // KS-5
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
 import { PipelineBusyError, tryLockPipeline } from './lock.js';
@@ -102,6 +110,8 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
       /** `default`: configured default for the type; `override`: the orchestrator chose another model. */
       modelSource: 'default' | 'override';
       defaultModel: ModelRef;
+      /** KS-5: facts the task is asked to re-check (shown with their claims in the worker's prompt). */
+      recheckFactIds?: string[];
     }> = [];
     const rejected: Array<{ index: number; type: string; reason: string; duplicateOf?: string }> = [];
     const now = new Date().toISOString();
@@ -118,6 +128,8 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
         reason = `duplicate of task ${dupOf} already in this phase run (same type, subject and brief)`;
       } else if (remaining <= 0) {
         reason = `exceeds limits.maxTasksPerRun (${config.limits.maxTasksPerRun}) for this phase run`;
+      } else {
+        reason = recheckProblem(store, ctx.workspaceId, t.recheck_fact_ids); // KS-5
       }
       if (reason) {
         rejected.push(dupOf && reason.startsWith('duplicate') ? { index, type: t.type, reason, duplicateOf: dupOf } : { index, type: t.type, reason });
@@ -145,6 +157,7 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
       accepted.push({
         index, taskId: task.id, type: t.type, model, defaultModel,
         modelSource: t.model && !sameModel(t.model, defaultModel) ? 'override' : 'default',
+        ...(t.recheck_fact_ids?.length ? { recheckFactIds: [...new Set(t.recheck_fact_ids)] } : {}), // KS-5
       });
     });
     // Explicit model overrides are listed on their own so they are easy to audit and rate.
@@ -175,31 +188,19 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
 // ---------------------------------------------------------------------------
 // context
 
-function trunc(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
-}
-
-/** Context sections about the workspace itself (profile, symptoms, findings, personas). */
-export function workspaceContext(store: Store, ws: Workspace): string[] {
+/**
+ * Context sections about the workspace itself: name, its own profile and its internal uploads (id,
+ * file type, size, upload date — no title: design-thread ruling on §12, KS-5). Symptoms, findings and personas are part of the knowledge briefing since KS-5
+ * (`orchestratorBriefing`: node scope, redacted, budgeted and logged as a prompt read).
+ */
+export function workspaceContext(store: Store, ws: Workspace, dataDir?: string): string[] {
   const profile = store.profiles.get(ws.id)?.data ?? {};
-  const symptoms = store.symptoms.list({ workspaceId: ws.id });
-  const findings = store.findings.list({ workspaceId: ws.id });
-  const personas = store.personas.list({ workspaceId: ws.id });
-  // Uploads as id + title only (profile.uploads, incl. sha-deduped ones); contents via read_artifact.
-  const uploads = listUploads(ws.id, { store });
+  // Uploads as metadata only (profile.uploads, incl. sha-deduped ones); contents via expand / read_artifact.
+  const uploads = uploadPromptLines(ws.id, { store, ...(dataDir ? { dataDir } : {}) });
   return [
     `# Workspace ${ws.id}\nName: ${ws.name}\nSector: ${ws.sector}`,
     `## Profile\n\`\`\`json\n${JSON.stringify(profile, null, 2)}\n\`\`\``,
-    `## Symptoms and strengths\n${
-      symptoms.map((s) => `- [${s.id}] (${s.kind}) ${s.title}: ${trunc(s.detail, 300)}`).join('\n') || '- (none yet)'
-    }`,
-    `## Existing findings\n${
-      findings.map((f) => `- [${f.id}] (${f.status}) ${f.subject}: ${trunc(f.claim, 200)}`).join('\n') || '- (none yet)'
-    }`,
-    `## Internal uploads (cite by id when relevant)\n${
-      uploads.map((u) => `- [${u.id}] ${u.title}`).join('\n') || '- (none)'
-    }`,
-    `## Personas\n${personas.map((p) => `- [${p.id}] ${p.slug} (${p.segment})`).join('\n') || '- (none yet)'}`,
+    `## Internal uploads (cite by id when relevant)\n${uploads.join('\n')}`,
   ];
 }
 
@@ -231,27 +232,42 @@ export function runHistory(store: Store, task: Task): string[] {
   );
 }
 
-function taskSummary(store: Store, t: Task): string {
-  const lines = [`- [${t.id}] ${t.type} → ${t.status} (round ${t.round})${t.subject ? `, subject ${t.subject}` : ''}`];
-  lines.push(`  brief: ${trunc(t.brief, 300)}`);
+/** Findings named per task in a results summary (the rest: their count). */
+const SUMMARY_FINDINGS = 5;
+
+/**
+ * One task of a results summary. KS-5: text is redacted before it is cut, and the findings whose claims
+ * are shown are returned as `refs` (the summary is a logged prompt read).
+ */
+function taskSummary(store: Store, t: Task): { text: string; refs: RetrievalResultRef[] } {
+  const line = (s: string, n: number) => servedLine(store, t.workspaceId, s, n);
+  const lines = [`- [${t.id}] ${t.type} → ${t.status} (round ${t.round})${t.subject ? `, subject ${line(t.subject, 200)}` : ''}`];
+  lines.push(`  brief: ${line(t.brief, 300)}`);
   const history = runHistory(store, t);
   if (t.status === 'failed') {
     lines.push(`  FAILED: ${history.length ? 'all attempts failed' : 'task could not run'}`);
   }
   if (history.length) lines.push(`  run history: ${history.join('; ')}`);
-  if (t.result !== undefined) lines.push(`  result: ${trunc(JSON.stringify(t.result), 1500)}`);
-  const findings = store.findings.list({ taskId: t.id });
-  if (findings.length) lines.push(`  findings: ${findings.map((f) => `[${f.id}] ${trunc(f.claim, 120)}`).join('; ')}`);
-  return lines.join('\n');
+  if (t.result !== undefined) lines.push(`  result: ${line(JSON.stringify(t.result), 1500)}`);
+  const findings = store.findings.list({ taskId: t.id }).filter((f) => f.workspaceId === t.workspaceId && f.status !== 'superseded');
+  const shown = findings.slice(0, SUMMARY_FINDINGS);
+  if (findings.length) {
+    lines.push(`  findings: ${shown.map((f) => `[${f.id}] ${line(f.claim, 120)}`).join('; ')}${findings.length > shown.length ? `; … ${findings.length - shown.length} more (search)` : ''}`);
+  }
+  return { text: lines.join('\n'), refs: shown.map((f) => ({ id: f.id, kind: 'fact' })) };
 }
 
 /** Results of a research run's tasks (with failed-run history), for the orchestrator's follow-up round. */
 export function resultsSummary(store: Store, rr: ResearchRun): string {
-  return store.tasks
+  return resultsSummaryWithRefs(store, rr).text;
+}
+
+function resultsSummaryWithRefs(store: Store, rr: ResearchRun): { text: string; refs: RetrievalResultRef[] } {
+  const parts = store.tasks
     .list({ runId: rr.id })
     .filter((t) => t.workspaceId === rr.workspaceId)
-    .map((t) => taskSummary(store, t))
-    .join('\n');
+    .map((t) => taskSummary(store, t));
+  return { text: parts.map((p) => p.text).join('\n'), refs: parts.flatMap((p) => p.refs) };
 }
 
 /**
@@ -259,32 +275,56 @@ export function resultsSummary(store: Store, rr: ResearchRun): string {
  * orchestrator knows about them. Empty string when there were none.
  */
 export function previousPhaseProblems(store: Store, rr: ResearchRun): string {
+  return previousPhaseProblemsWithRefs(store, rr).text;
+}
+
+function previousPhaseProblemsWithRefs(store: Store, rr: ResearchRun): { text: string; refs: RetrievalResultRef[] } {
   const prev = store.researchRuns
     .list({ workspaceId: rr.workspaceId })
     .filter((r) => r.id !== rr.id && r.status !== 'running' && r.startedAt <= rr.startedAt)
     .at(-1);
-  if (!prev) return '';
+  if (!prev) return { text: '', refs: [] };
   const affected = store.tasks
     .list({ runId: prev.id })
     .filter((t) => t.workspaceId === rr.workspaceId && (t.status === 'failed' || runHistory(store, t).length > 0));
-  if (!affected.length) return '';
-  return `## Problems in the previous phase (${prev.phase}, ${prev.id})\n${affected.map((t) => taskSummary(store, t)).join('\n')}\n\nRe-plan this work in the current phase if it still matters and fits its task types.`;
+  if (!affected.length) return { text: '', refs: [] };
+  const parts = affected.map((t) => taskSummary(store, t));
+  return {
+    text: `## Problems in the previous phase (${prev.phase}, ${prev.id})\n${parts.map((p) => p.text).join('\n')}\n\nRe-plan this work in the current phase if it still matters and fits its task types.`,
+    refs: parts.flatMap((p) => p.refs),
+  };
 }
 
 /** Full orchestrator prompt for one round. */
 export function orchestratorPrompt(store: Store, config: BifConfig, rr: ResearchRun, round: number): string {
+  return orchestratorPromptWithReads(store, config, rr, round).prompt;
+}
+
+/**
+ * The orchestrator prompt and its prompt reads (KS-5): the knowledge briefing and the task results
+ * carry store text, so each is a `PromptRead` logged on the run before it starts.
+ */
+export function orchestratorPromptWithReads(store: Store, config: BifConfig, rr: ResearchRun, round: number, now: Date = new Date()): { prompt: string; reads: PromptRead[] } {
   const ws = store.workspaces.get(rr.workspaceId) ?? {
     id: rr.workspaceId, name: rr.workspaceId, sector: '', createdAt: rr.startedAt,
   } as Workspace;
   const existing = store.tasks.list({ runId: rr.id });
   const remaining = Math.max(0, config.limits.maxTasksPerRun - existing.length);
-  // Synthesis may only build on verified (or user-included) findings: replace the findings list.
-  const context = workspaceContext(store, ws).map((section) =>
-    rr.phase === 'synthesis' && section.startsWith('## Existing findings') ? synthesisFindingsSection(store, ws.id) : section,
-  );
+  // --- KS-5: the knowledge briefing replaces the "Existing findings" / tree-context lists ---
+  const briefing = orchestratorBriefing({ store, config, now }, {
+    workspaceId: ws.id,
+    provider: config.roles.orchestrator.provider,
+    phase: rr.phase,
+    ...changesSinceOf(store, rr),
+    ...recheckUntilOf(store, rr, now),
+    treeLines: store.workspaces.get(ws.id) ? treeLines(store, ws) : [],
+  });
+  const reads = promptReadsOf(briefing);
+  // --- end KS-5 ---
   const parts = [
-    ...context,
+    ...workspaceContext(store, ws, config.dataDir),
     ...treeContext(store, ws),
+    ...(briefing.section ? [briefing.section] : []),
     `## Phase: ${rr.phase} (orchestrator round ${round} of ${MAX_ORCHESTRATOR_ROUNDS})\nGoal: ${phaseGoal(rr.phase, ws)}`,
     `## Allowed task types\n${PHASE_TASK_TYPES[rr.phase].map((t) => `- ${t}`).join('\n') || '- (none)'}`,
     `## Allowed models\n${allowedModels(config).map((m) => `- {"provider":"${m.provider}","model":"${m.model}"}`).join('\n')}`,
@@ -293,19 +333,75 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
       .join('\n') || '- (no task types in this phase)'}`,
     `## Task budget\n${remaining} more task(s) may be proposed in this phase run (limits.maxTasksPerRun = ${config.limits.maxTasksPerRun}).`,
   ];
-  const problems = previousPhaseProblems(store, rr);
-  if (problems) parts.push(problems);
+  const results: RetrievalResultRef[] = [];
+  let resultTokens = 0;
+  const problems = previousPhaseProblemsWithRefs(store, rr);
+  if (problems.text) {
+    parts.push(problems.text);
+    results.push(...problems.refs);
+    resultTokens += estimateTokens(problems.text);
+  }
   const denials = policyDenialsSection(store, rr.workspaceId, 'orchestrator'); // WP-D
   if (denials) parts.push(denials);
   if (existing.length) {
+    const summary = resultsSummaryWithRefs(store, rr);
+    results.push(...summary.refs);
+    resultTokens += estimateTokens(summary.text);
     parts.push(
       round > 1
-        ? `## Results of this phase's tasks so far\n${resultsSummary(store, rr)}\n\nPropose follow-up tasks only where they add real value (e.g. retry failed tasks that still matter, fill gaps).`
-        : `## Tasks already in this phase run\n${resultsSummary(store, rr)}`,
+        ? `## Results of this phase's tasks so far\n${summary.text}\n\nPropose follow-up tasks only where they add real value (e.g. retry failed tasks that still matter, fill gaps).`
+        : `## Tasks already in this phase run\n${summary.text}`,
     );
   }
-  return parts.join('\n\n');
+  // KS-5: the claims of task findings shown above are a read as well.
+  if (results.length) {
+    const unique = [...new Map(results.map((r) => [r.id, r])).values()];
+    reads.push({ query: `task results ${rr.id}`, scope: 'node', results: unique, tokensReturned: resultTokens, uploadDerived: anyUploadDerived(store, unique) });
+  }
+  return { prompt: parts.join('\n\n'), reads };
 }
+
+// --- knowledge store KS-5: recurring runs ---------------------------------------------------------
+
+/** "Changes since": the previous run of the same schedule and phase, else the node's last finished run. */
+function changesSinceOf(store: Store, rr: ResearchRun): { changesSince?: string } {
+  const prev =
+    previousRun({ store }, rr) ??
+    store.researchRuns
+      .list({ workspaceId: rr.workspaceId })
+      .filter((r) => r.id !== rr.id && r.status === 'done' && r.startedAt <= rr.startedAt)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      .at(-1);
+  return prev ? { changesSince: prev.startedAt } : {};
+}
+
+/** Scheduled runs: facts reaching their TTL before the schedule's next run are due (manual runs: stale only). */
+function recheckUntilOf(store: Store, rr: ResearchRun, now: Date): { recheckUntil?: Date } {
+  const schedule = rr.scheduleId ? store.schedules.get(rr.scheduleId) : undefined;
+  if (!schedule) return {};
+  try {
+    return { recheckUntil: CronExpressionParser.parse(schedule.cron, { currentDate: now }).next().toDate() };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `recheck_fact_ids` of a proposed task: each must be a current fact of the caller's business tree.
+ * Unknown and other-tree ids get the same text (design §12). `undefined` when valid.
+ */
+function recheckProblem(store: Store, workspaceId: string, ids: readonly string[] | undefined): string | undefined {
+  if (!ids?.length) return undefined;
+  const tree = factScope(store, workspaceId).treeIds;
+  for (const id of ids) {
+    const f = store.findings.get(id);
+    if (!f || !tree.includes(f.workspaceId)) return `recheck_fact_ids: finding '${id}' not found`;
+    if ((f.lifecycle ?? 'current') !== 'current') return `recheck_fact_ids: finding '${id}' is ${f.lifecycle} (re-check the current version)`;
+  }
+  return undefined;
+}
+
+// --- end KS-5 -------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // phase execution
@@ -326,10 +422,12 @@ async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: num
     { event: 'orchestrator_round_started', researchRunId: rr.id, phase: rr.phase, round },
     [rr.id],
   );
+  const { prompt, reads } = orchestratorPromptWithReads(store, config, rr, round); // KS-5: briefing reads
   const res = await runAgent(deps, {
     kind: 'orchestrate', role: 'orchestrator', workspaceId: rr.workspaceId, round, attempt: 1,
-    prompt: orchestratorPrompt(store, config, rr, round), systemPrompt: system,
+    prompt, systemPrompt: system,
     model, needsBrowser: false, promptVersion: version, researchRunId: rr.id,
+    ...(reads.length ? { promptReads: reads } : {}),
   });
   throwIfAborted(deps.signal);
   const proposed = store.tasks.list({ runId: rr.id }).length - before;

@@ -14,52 +14,60 @@ import type {
   UnitProposal,
   Workspace,
 } from '../types.js';
-import { ancestors, audiencesOf, children, createWorkspace, descendants, sameTree, scopeOf, siblings } from './tree.js';
+import { ancestors, audiencesOf, children, createWorkspace, descendants, scopeOf, siblings } from './tree.js';
+import type { BriefLine } from '../knowledge/briefing.js'; // KS-5
+import { servedLine } from '../knowledge/texts.js'; // KS-5
 
 // ---------------------------------------------------------------------------
 // reading across the tree
 
 // `read_workspace` is a knowledge read tool since KS-4 (node card + counts: knowledge/cards.ts).
 
-const trunc = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+// --- knowledge store KS-5: tree context as briefing lines (design §11 "Tree context") ---------------
+// One line per related node (ancestors, children, siblings): name and scope, redacted then cut — no
+// findings and no profile values (KS-5 replaces the pre-KS `relatedSection`, which listed every finding
+// of every ancestor and sibling and never redacted). Their knowledge is one call away: `get_card` /
+// `read_workspace` with the node id, or `search` with `scope: "tree"`.
 
-function describeScope(ws: Workspace): string {
+function describeScope(store: Store, viewer: string, ws: Workspace): string {
   const s = scopeOf(ws);
-  return `${s.level} "${s.name}"${s.description ? `: ${s.description}` : ''}`;
+  return `${s.level} "${servedLine(store, viewer, s.name, 120)}"${s.description ? `: ${servedLine(store, viewer, s.description, 200)}` : ''}`;
 }
 
-function relatedSection(store: Store, label: string, ws: Workspace): string {
-  const profile = store.profiles.get(ws.id)?.data ?? {};
-  const findings = store.findings.list({ workspaceId: ws.id });
+/** Tree context lines for `ws`'s briefing (parents first, then children, then siblings); none for a one-node tree. */
+export function treeLines(store: Store, ws: Workspace, max = 12): BriefLine[] {
+  const line = (label: string, n: Workspace): BriefLine => {
+    const keys = Object.keys(store.profiles.get(n.id)?.data ?? {});
+    const profile = label === 'Sibling' || !keys.length ? '' : `; profile keys: ${keys.slice(0, 12).map((k) => servedLine(store, ws.id, k, 40)).join(', ')}`;
+    return {
+      text: `- ${label}: [${n.id}] ${servedLine(store, ws.id, n.name, 120)} (${describeScope(store, ws.id, n)}; audiences: ${audiencesOf(n).join(', ')}${profile})`,
+      refs: [], upload: false,
+    };
+  };
+  const nodes = [
+    ...ancestors(store, ws.id).map((a, i) => line(i === 0 ? 'Parent' : `Ancestor (${i + 1} up)`, a)),
+    ...children(store, ws.id).map((c) => line('Child', c)),
+    ...siblings(store, ws.id).map((s) => line('Sibling', s)),
+  ];
+  if (!nodes.length) return [];
+  const shown = nodes.slice(0, max);
   return [
-    `### ${label}: [${ws.id}] ${ws.name} (${describeScope(ws)}; audiences: ${audiencesOf(ws).join(', ')})`,
-    `Profile: ${trunc(JSON.stringify(profile), 2000)}`,
-    `Findings (cite as evidence; source ${ws.id}):`,
-    findings.map((f) => `- [${f.id}] (${f.status}) ${f.subject}: ${trunc(f.claim, 160)}`).join('\n') || '- (none)',
-  ].join('\n');
+    { text: 'Business tree (other nodes: get_card / read_workspace with their id, or search with scope "tree"):', refs: [], upload: false, heading: true },
+    ...shown,
+    ...(nodes.length > shown.length ? [{ text: `- … ${nodes.length - shown.length} more node(s): read_workspace`, refs: [], upload: false }] : []),
+  ];
 }
 
 /**
- * Orchestrator context for the business tree: this node's scope and audiences, then ancestors'
- * (nearest first) and siblings' profiles + finding titles, each tagged with its source workspace.
+ * Orchestrator context for the business tree: this node's scope and audiences. The related nodes are
+ * part of the knowledge briefing (`treeLines`, KS-5).
  */
 export function treeContext(store: Store, ws: Workspace): string[] {
-  const out = [
-    `## Scope\n${describeScope(ws)}\nAudiences: ${audiencesOf(ws).join(', ')}\nFrame every task to this scope and these audiences.`,
+  return [
+    `## Scope\n${describeScope(store, ws.id, ws)}\nAudiences: ${audiencesOf(ws).join(', ')}\nFrame every task to this scope and these audiences.`,
   ];
-  const anc = ancestors(store, ws.id);
-  const sib = siblings(store, ws.id);
-  if (anc.length || sib.length) {
-    out.push(
-      [
-        '## Business tree (read-only references; use read_workspace for any other node of this tree)',
-        ...anc.map((a, i) => relatedSection(store, i === 0 ? 'Parent' : `Ancestor (${i + 1} up)`, a)),
-        ...sib.map((s) => relatedSection(store, 'Sibling', s)),
-      ].join('\n\n'),
-    );
-  }
-  return out;
 }
+// --- end KS-5 ------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // mapping

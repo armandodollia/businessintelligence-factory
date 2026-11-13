@@ -149,19 +149,20 @@ describe('interview', () => {
     expect(t.store.interview.list({ workspaceId: 'ws_a' }).map((x) => x.role)).toEqual(['user']);
   });
 
-  it('prompt includes scope, audiences, transcript, coverage and uploads (id+title)', () => {
+  it('prompt includes scope, audiences, transcript, coverage and uploads (metadata, no title: KS-5 ruling)', () => {
     const t = setup();
     const up = uploadInternal('ws_a', { name: 'kpis.csv', bytes: new TextEncoder().encode('a,b\n1,2'), mime: 'text/csv' }, t);
     t.store.interview.insert({ id: 'it_1', workspaceId: 'ws_a', role: 'user', text: 'We sell widgets', createdAt: 'x' });
     const ws = { ...t.ws, scope: { level: 'division' as const, name: 'Widgets EU', description: 'EU widget unit' }, audiences: ['external' as const, 'internal' as const] };
-    const p = buildInterviewPrompt(ws, t.store);
+    const p = buildInterviewPrompt(ws, t.store, t.dir);
     expect(p).toContain('division');
     expect(p).toContain('Widgets EU');
     expect(p).toContain('external, internal');
     expect(p).toContain('We sell widgets');
     for (const topic of INTERVIEW_TOPICS) expect(p).toContain(topic);
-    expect(p).toContain(up.id);
-    expect(p).toContain('kpis.csv');
+    expect(p).toContain(`- ${up.id} (spreadsheet, 7 B, uploaded ${up.capturedAt.slice(0, 10)})`);
+    expect(p).toContain('Use `expand` or `read_artifact`');
+    expect(p).not.toContain('kpis.csv'); // a file name is upload-derived text
     expect(p).not.toContain('a,b');
   });
 
@@ -184,5 +185,30 @@ describe('uploads', () => {
     uploadInternal('ws_a', { name: 'deck.pdf', bytes: new Uint8Array([1, 2, 3]), mime: 'application/pdf' }, t);
     expect(t.store.profiles.get('ws_a')!.data.uploads).toEqual([a.id]);
     expect(listUploads('ws_a', t)).toEqual([{ id: a.id, title: 'deck.pdf' }]);
+  });
+});
+
+// --- knowledge store KS-5: the drill-down is a logged prompt read of usable facts only ---------------
+describe('interview drill-down (KS-5)', () => {
+  it('shows usable facts only, redacted, and logs them as a prompt read before the run starts', async () => {
+    const t = setup();
+    const { knowledgeRepos } = await import('../../src/core/store/repos.js');
+    t.store.identities.insert({ id: 'idn_1', workspaceId: 'ws_a', site: 'x.test', name: 'n', email: 'n@x.test', password: 'Zq9xK2mPw7Lr', createdAt: 'now' });
+    t.store.symptoms.insert({ id: 'sym_1', workspaceId: 'ws_a', kind: 'symptom', title: 'renewals down', detail: 'd', criteria: {}, evidence: [] });
+    const fact = (id: string, claim: string, lifecycle: 'current' | 'replaced') =>
+      t.store.findings.insert({ id, workspaceId: 'ws_a', runId: 'r', taskId: 't', subject: 'Acme', claim, criteria: {}, evidence: [], status: 'verified', lifecycle, createdAt: 'now' });
+    fact('fnd_cur', 'CURRENT_CLAIM price rose; login Zq9xK2mPw7Lr', 'current');
+    fact('fnd_old', 'OLD_VERSION_CLAIM price was flat', 'replaced');
+    t.store.symptomHypotheses.insert({ id: 'hyp_1', workspaceId: 'ws_a', symptomId: 'sym_1', hypothesis: 'price rise drove churn', confidence: 60, evidence: ['fnd_cur', 'fnd_old'], createdAt: 'now', status: 'verified' });
+    const prompt = buildInterviewPrompt(t.ws, t.store);
+    expect(prompt).toContain('CURRENT_CLAIM');
+    expect(prompt).not.toContain('OLD_VERSION_CLAIM');
+    expect(prompt).not.toContain('Zq9xK2mPw7Lr');
+    await sendInterviewMessage('ws_a', 'hello', { ...t, fake: async () => 'Did churned accounts mention price?' });
+    const run = t.store.agentRuns.list({ role: 'interviewer' })[0]!;
+    const [row] = knowledgeRepos(t.store).retrievalEvents.list({ agentRunId: run.id });
+    expect(row).toMatchObject({ tool: 'prompt_context', role: 'interviewer', promptVersion: run.promptVersion });
+    expect(row!.resultIds.map((r) => r.id)).toEqual(expect.arrayContaining(['hyp_1', 'fnd_cur']));
+    expect(row!.resultIds.map((r) => r.id)).not.toContain('fnd_old');
   });
 });

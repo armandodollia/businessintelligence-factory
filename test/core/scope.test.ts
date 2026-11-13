@@ -159,9 +159,13 @@ describe('business tree', () => {
     expect(p).toContain('division "Payments"');
     expect(p).toContain('Audiences: external');
     expect(p).toMatch(new RegExp(`Parent: \\[${t.company.id}\\] Acme`));
-    expect(p).toContain('Berlin');
+    // KS-5: one line per related node (design §11): an ancestor's profile keys, not its values or findings.
+    expect(p).toContain('profile keys: hq');
+    expect(p).not.toContain('Berlin');
     expect(p).toMatch(new RegExp(`Sibling: \\[${t.sibling.id}\\] Lending`));
-    expect(p).toContain('[fnd_sib]');
+    // A sibling's findings are not listed by default: they are one tree-wide search away.
+    expect(p).not.toContain('[fnd_sib]');
+    expect(p).toContain('search with scope "tree"');
     expect(p).not.toContain('Globex');
   });
 });

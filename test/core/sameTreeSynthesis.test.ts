@@ -52,11 +52,15 @@ const ctx = (workspaceId: string, extra: Partial<RunContext> = {}): RunContext =
 const recInput = (finding_ids: string[]) => ({ title: 'Bundle payments and lending', summary: 's', criteria: { upside: 4 }, finding_ids });
 
 describe('same-tree synthesis', () => {
-  it('synthesis findings list covers eligible findings of the whole tree, tagged by source node', () => {
+  // KS-5: the synthesis briefing follows node scope — the node, its sub-units and what it inherits from
+  // its parents, tagged by source node. A sibling's facts are counted and reachable with a tree-wide
+  // search (and may still be cited: next test), but never listed by default; other trees never.
+  it('synthesis briefing lists eligible facts of the node and its parents, tagged by source; siblings are counted, not listed', () => {
     const t = setup();
     const section = synthesisFindingsSection(t.store, t.division.id);
-    expect(section).toContain(`[fnd_parent] Acme: PARENT_CLAIM churn is up (source ${t.company.id})`);
-    expect(section).toContain(`[fnd_sibling] Acme: SIBLING_CLAIM loans grow (source ${t.sibling.id})`);
+    expect(section).toMatch(new RegExp(`\\[fnd_parent\\] PARENT_CLAIM churn is up \\([^)]*source ${t.company.id}\\)`));
+    expect(section).not.toContain('SIBLING_CLAIM');
+    expect(section).toContain('1 usable fact(s) in other parts of this business: search with scope "tree"');
     expect(section).not.toContain('UNVERIFIED_CLAIM');
     expect(section).not.toContain('OTHER_TREE_CLAIM');
   });

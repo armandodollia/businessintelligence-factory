@@ -73,8 +73,13 @@ describe('unverified results are excluded from synthesis (spec §7.2)', () => {
     expect(p).toContain('PENDING_CLAIM'); // user override
     expect(p).not.toContain('UNVERIFIED_CLAIM');
     expect(p).toMatch(/1 other finding\(s\) are unverified/);
-    // Other phases still see every finding with its status.
-    expect(orchestratorPrompt(s.store, s.config, { ...rr, phase: 'deep_dives' }, 1)).toContain('UNVERIFIED_CLAIM');
+    // KS-5: other phases list usable facts too (design §7.2) and count the rest, which the orchestrator
+    // can still read with search + include_unverified.
+    const deep = orchestratorPrompt(s.store, s.config, { ...rr, phase: 'deep_dives' }, 1);
+    expect(deep).not.toContain('UNVERIFIED_CLAIM');
+    expect(deep).toContain('VERIFIED_CLAIM');
+    expect(deep).toMatch(/1 unverified \/ pending \/ excluded/);
+    expect(deep).toContain('include_unverified');
 
     const task = addTask(s.store, { phase: 'synthesis', type: 'synthesize_recommendations' });
     const w = workPrompt(s, task);

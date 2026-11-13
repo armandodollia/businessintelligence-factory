@@ -281,6 +281,12 @@ export const toolInputSchemas = {
             .describe('Omit to use the configured default for the task type (listed in your prompt); set only to override it'),
           needs_browser: z.boolean(),
           acceptance_criteria: z.array(z.string().min(1)).min(1),
+          // Knowledge store KS-5: facts the task must re-check (confirm, replace or retract).
+          recheck_fact_ids: z
+            .array(id)
+            .max(50)
+            .optional()
+            .describe('Current fact ids (fnd_…) this task must re-check: listed with their claims in the worker prompt'),
         }),
       )
       .min(1),
