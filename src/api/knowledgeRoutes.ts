@@ -47,6 +47,8 @@ class NotFound extends Error {}
 const reason = z.string().max(2000).optional();
 const schemas = {
   reason: z.object({ reason }),
+  // KS-6 × KS-7: retract as a duplicate of another fact of the same tree (`duplicate-saved` trigger b).
+  retract: z.object({ reason, duplicateOf: z.string().min(1).optional() }),
   accept: z.object({ survivorId: z.string().min(1).optional(), reason }),
   merge: z.object({ survivorId: z.string().min(1), loserId: z.string().min(1), reason }),
   rename: z.object({ name: z.string().min(1).max(200), reason }),
@@ -233,8 +235,8 @@ export function mountKnowledgeRoutes(app: Hono, deps: KnowledgeRouteDeps): void 
   }));
 
   app.post(`${base}/facts/:factId/retract`, wrap(async (c) => {
-    const b = await body(c, schemas.reason);
-    return c.json(retractFactAsUser(store, c.req.param('factId')!, actorOpts(c, b.reason)));
+    const b = await body(c, schemas.retract);
+    return c.json(retractFactAsUser(store, c.req.param('factId')!, { ...actorOpts(c, b.reason), ...(b.duplicateOf ? { duplicateOf: b.duplicateOf } : {}) }));
   }));
 
   app.put(`${base}/facts/:factId/scopes`, wrap(async (c) => {

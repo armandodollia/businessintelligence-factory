@@ -165,6 +165,41 @@ describe('Knowledge view', () => {
     expect(calls.filter((c) => c.method !== 'GET').every((c) => !JSON.stringify(c.body ?? {}).includes('actor'))).toBe(true);
   });
 
+  it('retracts a fact as a duplicate of another (duplicateOf, KS-6 trigger b); a 404 is shown as the error', async () => {
+    seed();
+    window.location.hash = '#/w/ws_1/knowledge';
+    render(<App />);
+    expect(await screen.findByText('Globex')).toBeTruthy();
+    await act(async () => {
+      screen.getByRole('button', { name: 'Globex' }).click();
+    });
+    routes[`GET ${K}/items/fnd_old`] = () => ({ tokens: 10, truncated: false, kind: 'fact', id: 'fnd_old', claim: 'Globex charges $10', lifecycle: 'current', items: [] });
+    await act(async () => {
+      (await screen.findByRole('button', { name: '[fnd_old]' })).click();
+    });
+    const field = await screen.findByLabelText('Duplicate of (fact id)');
+    const button = screen.getByRole('button', { name: 'Retract as a duplicate' }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    // Another tree's id (or an unknown one): the server answers 404, the view shows it.
+    routes[`POST ${K}/facts/fnd_old/retract`] = () => ({ error: "finding 'fnd_other_tree' not found" });
+    statusOf[`POST ${K}/facts/fnd_old/retract`] = 404;
+    fireEvent.change(field, { target: { value: ' fnd_other_tree ' } });
+    await act(async () => {
+      screen.getByRole('button', { name: 'Retract as a duplicate' }).click();
+    });
+    await flush();
+    expect(await screen.findByText(/finding 'fnd_other_tree' not found/)).toBeTruthy();
+    routes[`POST ${K}/facts/fnd_old/retract`] = () => ({ id: 'fnd_old', lifecycle: 'retracted' });
+    statusOf[`POST ${K}/facts/fnd_old/retract`] = 200;
+    fireEvent.change(screen.getByLabelText('Duplicate of (fact id)'), { target: { value: 'fnd_keep' } });
+    await act(async () => {
+      screen.getByRole('button', { name: 'Retract as a duplicate' }).click();
+    });
+    await flush();
+    const posts = calls.filter((c) => c.method === 'POST' && c.path === `${K}/facts/fnd_old/retract`);
+    expect(posts.map((c) => c.body)).toEqual([{ duplicateOf: 'fnd_other_tree' }, { duplicateOf: 'fnd_keep' }]);
+  });
+
   it('shows the storage report and prunes only what the user selected; a refusal lists why', async () => {
     seed();
     routes[`GET ${K}/gc`] = () => ({

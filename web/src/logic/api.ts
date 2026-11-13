@@ -257,7 +257,9 @@ export const knowledgeApi = {
   mergeSuggestions: (wsId: string, scope: KScope) => get<import('./knowledge.js').MergeSuggestionRow[]>(kn(wsId, '/merge-suggestions', { scope })),
   acceptSuggestion: (wsId: string, id: string) => post<unknown>(kn(wsId, `/merge-suggestions/${enc(id)}/accept`)),
   rejectSuggestion: (wsId: string, id: string) => post<unknown>(kn(wsId, `/merge-suggestions/${enc(id)}/reject`)),
-  retractFact: (wsId: string, id: string, reason?: string) => post<unknown>(kn(wsId, `/facts/${enc(id)}/retract`), reason ? { reason } : {}),
+  /** `duplicateOf` (KS-6 × KS-7): retract as a duplicate of another fact of the same tree (`duplicate-saved` trigger b). */
+  retractFact: (wsId: string, id: string, reason?: string, duplicateOf?: string) =>
+    post<unknown>(kn(wsId, `/facts/${enc(id)}/retract`), { ...(reason ? { reason } : {}), ...(duplicateOf ? { duplicateOf } : {}) }),
   acceptReplacement: (wsId: string, id: string) => post<unknown>(kn(wsId, `/facts/${enc(id)}/accept-replacement`)),
   setFactScopes: (wsId: string, id: string, workspaceIds: string[]) =>
     request<{ workspaceIds: string[] }>('PUT', kn(wsId, `/facts/${enc(id)}/scopes`), { workspaceIds }),

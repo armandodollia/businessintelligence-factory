@@ -11,8 +11,10 @@ import { listFeedback } from '../../src/core/feedback/events.js';
 import { resolveEntity } from '../../src/core/knowledge/entities.js';
 import { scopeFor } from '../../src/core/knowledge/scope.js';
 import type { Store } from '../../src/core/store/db.js';
-import { knowledgeRepos } from '../../src/core/store/repos.js';
-import { ks4 } from '../core/knowledge/ks4fixture.js';
+import { registerFeedbackOutcomes } from '../../src/core/learning/feedbackOutcomes.js';
+import { listOutcomes } from '../../src/core/learning/outcomes.js';
+import { knowledgeRepos, newId } from '../../src/core/store/repos.js';
+import { ks4, T0 } from '../core/knowledge/ks4fixture.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -239,3 +241,47 @@ describe('gc report and prune', () => {
   });
 });
 
+
+describe('retract as a duplicate (KS-6 `duplicate-saved` trigger b on the KS-7 route)', () => {
+  it('duplicateOf reaches the fact_retract event and the duplicate-saved outcome; another tree answers like an unknown id', async () => {
+    const s = setup();
+    const release = registerFeedbackOutcomes();
+    try {
+      // The agent was shown the payments fact by the duplicate handshake and saved its claim as `new`.
+      const page = await s.t.page('ws_c', 'Globex undercuts Payments on card fees.');
+      const task = s.t.store.tasks.insert({
+        id: newId('tsk'), workspaceId: 'ws_c', runId: newId('rrun'), phase: 'deep_dives', type: 'news_scan', brief: 'b',
+        model: { provider: 'claude', model: 'sonnet' }, needsBrowser: false, acceptanceCriteria: ['a'], status: 'running', round: 1, createdAt: T0,
+      });
+      const c = s.t.ctx('ws_c', 'worker', { taskId: task.id });
+      const claim = 'Globex undercuts Payments on card fees';
+      const hs = await s.t.call<{ saved: boolean; candidates: Array<{ id: string }> }>(c, 'save_finding', { claim, subject: 'Globex', evidence: [page.id] });
+      expect(hs.saved).toBe(false);
+      expect(hs.candidates.map((x) => x.id)).toContain(s.payments.id);
+      const saved = await s.t.call<{ findingId: string }>(c, 'save_finding', { claim, subject: 'Globex', evidence: [page.id], relation: 'new' });
+
+      // Out of tree and unknown duplicates: the same 404, nothing retracted, nothing logged.
+      const foreign = await s.call('POST', s.k('ws_c', `/facts/${saved.findingId}/retract`), { duplicateOf: s.beta.id });
+      const unknown = await s.call('POST', s.k('ws_c', `/facts/${saved.findingId}/retract`), { duplicateOf: 'fnd_unknown' });
+      expect([foreign.status, unknown.status]).toEqual([404, 404]);
+      expect(foreign.body.error).toBe(`finding '${s.beta.id}' not found`);
+      expect(foreign.body.error.replace(/'[^']+'/, "'X'")).toBe(unknown.body.error.replace(/'[^']+'/, "'X'"));
+      expect(JSON.stringify(foreign.body)).not.toContain('Beta');
+      expect(s.t.store.findings.get(saved.findingId)!.lifecycle ?? 'current').toBe('current');
+      expect(listFeedback(s.t.store)).toEqual([]);
+      // Its own lineage is refused; a non-string is a bad request.
+      expect((await s.call('POST', s.k('ws_c', `/facts/${saved.findingId}/retract`), { duplicateOf: saved.findingId })).status).toBe(400);
+      expect((await s.call('POST', s.k('ws_c', `/facts/${saved.findingId}/retract`), { duplicateOf: 7 })).status).toBe(400);
+
+      const r = await s.call('POST', s.k('ws_c', `/facts/${saved.findingId}/retract`), { reason: 'same fact', duplicateOf: s.payments.id });
+      expect(r.status).toBe(200);
+      expect(r.body.lifecycle).toBe('retracted');
+      const [event] = listFeedback(s.t.store, { kind: 'fact_retract' });
+      expect(event).toMatchObject({ actor: 'ana@acme', targetId: saved.findingId, afterJson: { duplicateOf: s.payments.id } });
+      const dup = listOutcomes(s.t.store).filter((o) => o.label === 'duplicate-saved');
+      expect(dup).toEqual([expect.objectContaining({ subjectId: saved.findingId, actor: 'ana@acme', source: 'user_reject' })]);
+    } finally {
+      release();
+    }
+  });
+});

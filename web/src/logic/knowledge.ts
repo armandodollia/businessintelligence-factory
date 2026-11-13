@@ -174,6 +174,8 @@ export function useKnowledgeView(wsId: string) {
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** Draft id of the fact the open fact duplicates ("Retract as a duplicate"). */
+  const [duplicateOf, setDuplicateOf] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
 
   const search = useResource(`k-search:${wsId}:${scope}:${submitted}`, submitted.trim() ? () => knowledgeApi.search(wsId, submitted, scope) : null);
@@ -222,6 +224,20 @@ export function useKnowledgeView(wsId: string) {
   );
 
   const retractFact = useCallback((id: string, reason?: string) => act(() => knowledgeApi.retractFact(wsId, id, reason), `retracted ${id}`), [act, wsId]);
+  /**
+   * Retracts fact `id` as a duplicate of the drafted fact id (KS-6 `duplicate-saved` trigger b). The
+   * server checks the duplicate is in this business (an id of another business answers "not found").
+   */
+  const retractAsDuplicate = useCallback(
+    async (id: string, reason?: string) => {
+      const other = duplicateOf.trim();
+      if (!other) return false;
+      const ok = await act(() => knowledgeApi.retractFact(wsId, id, reason, other), `retracted ${id} as a duplicate of ${other}`);
+      if (ok) setDuplicateOf('');
+      return ok;
+    },
+    [act, wsId, duplicateOf],
+  );
   const acceptReplacement = useCallback((id: string) => act(() => knowledgeApi.acceptReplacement(wsId, id), `applied update ${id}`), [act, wsId]);
   const acceptSuggestion = useCallback((id: string) => act(() => knowledgeApi.acceptSuggestion(wsId, id), 'entities merged'), [act, wsId]);
   const rejectSuggestion = useCallback((id: string) => act(() => knowledgeApi.rejectSuggestion(wsId, id), 'suggestion rejected'), [act, wsId]);
@@ -250,7 +266,7 @@ export function useKnowledgeView(wsId: string) {
     suggestions: suggestions.data ?? [],
     changes: changes.data ?? null,
     gcOpen, setGcOpen, gc: gc.data ?? null, gcError: gc.error, selected, toggleSelected, pruneSelected,
-    retractFact, acceptReplacement, acceptSuggestion, rejectSuggestion,
+    retractFact, duplicateOf, setDuplicateOf, retractAsDuplicate, acceptReplacement, acceptSuggestion, rejectSuggestion,
     busy, actionError, notice,
   };
 }

@@ -683,10 +683,17 @@ function callerFact(store: Store, id: string, opts: KnowledgeActionOpts): Findin
 
 const factOpts = (opts: KnowledgeActionOpts) => ({ actor: actor(opts), ...(opts.reason ? { reason: opts.reason } : {}) });
 
-/** The user retracts a current fact (`retractFactByUser`: a `fact_retract` event). 409 when not current. */
-export function retractFactAsUser(store: Store, findingId: string, opts: KnowledgeActionOpts = {}): Finding {
+/**
+ * The user retracts a current fact (`retractFactByUser`: a `fact_retract` event). 409 when not current.
+ * `duplicateOf` (KS-6 `duplicate-saved` trigger b): retract it as a duplicate of another fact of the
+ * same tree — an id of another tree answers the same 404 as an unknown id; its own lineage is a 400.
+ */
+export function retractFactAsUser(store: Store, findingId: string, opts: KnowledgeActionOpts & { duplicateOf?: string } = {}): Finding {
   callerFact(store, findingId, opts);
-  return factAction(() => retractFactByUser(store, findingId, factOpts(opts)));
+  if (opts.duplicateOf !== undefined) callerFact(store, opts.duplicateOf, opts);
+  return factAction(() =>
+    retractFactByUser(store, findingId, { ...factOpts(opts), ...(opts.duplicateOf !== undefined ? { duplicateOf: opts.duplicateOf } : {}) }),
+  );
 }
 
 /** The user relabels the nodes a fact applies to (`setFactScopes`: a `fact_scope_change` event). Nodes outside the fact's tree: 404. */

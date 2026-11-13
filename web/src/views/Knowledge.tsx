@@ -218,6 +218,17 @@ function ItemDetail({ k }: { k: View }) {
           Retract this fact
         </button>
       )}
+      {isFact && it.lifecycle === 'current' && (
+        <div className="row">
+          <label>
+            Duplicate of (fact id){' '}
+            <input value={k.duplicateOf} onChange={(e) => k.setDuplicateOf(e.target.value)} placeholder="fnd_…" />
+          </label>
+          <button disabled={k.busy || !k.duplicateOf.trim()} onClick={() => void k.retractAsDuplicate(String(it.id))}>
+            Retract as a duplicate
+          </button>
+        </div>
+      )}
       <ul className="item-parts">
         {(it.items ?? []).map((raw, i) => {
           const p = itemPart(raw);
