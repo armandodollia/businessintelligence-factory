@@ -500,8 +500,38 @@ fallback for facts saved as `new`.
   expansion agree.
 - **Upload exposure.** A run that was *shown* upload-derived text — by any read
   tool or by its assembled prompt — is recorded as upload-exposed
-  (`retrieval_events.upload_derived`). The export excludes that run's judgments by
-  default, like upload-linked decisions today (`includeUploads` still overrides).
+  (`retrievalLog.runIsUploadExposed`: a logged read flagged `upload_derived`, or one
+  that served an item that is upload-derived now). By default, unless `includeUploads`,
+  the export excludes per task (ruling at the KS-5/6/7 integration, binding):
+  - **What is excluded.** Every judgment of the exposed run. The run's **task**: its
+    reviews, deliverable and other decisions, and the task's outputs (findings,
+    recommendations, personas, competitors, hypotheses), because a later round of
+    the task continues from the exposed context. **Later judgments that reference
+    one of those outputs**: by id, or through a record they reference that cites it
+    directly (a recommendation's findings, an observation's fact), one level only.
+    Feedback events, request answers, interview turns, retrieval events and fact
+    observations follow the same rules.
+  - **The bound.** It spreads no further. A later run that is only *shown* one of those
+    outputs (by search, a card, a briefing or `expand`) is not exposed by that. Its
+    other judgments and its reads are exported. A judgment of a later task's other
+    outputs is exported as well.
+  - **Computed at export time, never stored.** Exposure is derived from the retrieval
+    log each time the export runs. No flag is written for it, so the exclusion cannot
+    spread through cards or briefings. `upload_derived` stays the only sticky flag,
+    and it covers uploads, not exposure. Briefings are not thinned to reduce exposure.
+  - **Visible cost.** Every export has a summary that counts the excluded judgments
+    (and, separately, the other lines) by cause, in this order: *cites an upload*,
+    *exposed run*, *task of an exposed run*, *references an output of such a task*.
+    Each line counts once, under its first cause. The summary states that
+    `includeUploads` includes them. The API returns it as the `x-bif-export-summary`
+    header of the JSONL download and from `GET /api/workspaces/:id/export/summary`.
+    The decision log shows it next to the download links, with an "including uploads"
+    link.
+  - **Known limit.** The rule does not catch uncited text that a run paraphrased from
+    an exposed task's output when that text is carried on two tasks later: the later
+    judgment cites neither the output nor a record that cites it. Another known
+    limit: a run whose only retrieval rows were lost (it crashed before a prompt read
+    was logged) cannot be found exposed.
 - **Reviewer slice** enforced by the dispatcher (§9).
 - Captions and descriptions written about an upload are upload-derived.
 
