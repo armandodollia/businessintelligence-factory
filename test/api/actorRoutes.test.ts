@@ -78,9 +78,9 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/calibration/prompt-patch': { exempt: 'computes a proposal and writes nothing; applying it is the actored route below' },
   'POST /api/unit-proposals/:id': { test: 'test/api/feedbackRoutes.test.ts' },
   'POST /api/findings/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
-  'POST /api/recommendations/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
-  'POST /api/personas/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
-  'POST /api/competitors/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/recommendations/:id/include': { test: HERE },
+  'POST /api/personas/:id/include': { test: HERE },
+  'POST /api/competitors/:id/include': { test: HERE },
   'POST /api/hypotheses/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
   'POST /api/hypotheses/:id/correct': { test: 'test/api/feedbackRoutes.test.ts' },
   'PATCH /api/workspaces/:id/profile': { test: 'test/api/feedbackRoutes.test.ts' },
@@ -105,7 +105,35 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/experiments': { test: 'test/api/experimentRoutes.test.ts' },
 };
 
+/**
+ * Whether test source `src` sends a request for `route` ("METHOD /path/:param"): the method, then a path
+ * literal matching the route segment by segment (a `:param` is a `${…}` or a literal id), or
+ * `request(<path>, { method })`. Knowledge routes may be written through the knowledge test's prefix
+ * helper, `s.k(<workspace>, '/rest')`.
+ */
+function requestsRoute(src: string, route: string): boolean {
+  const [method, path] = route.split(' ') as [string, string];
+  const seg = (x: string) => (x.startsWith(':') ? String.raw`(?:\$\{[^}]+\}|[A-Za-z0-9_-]+)` : x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = (p: string) => p.split('/').map(seg).join('/');
+  const q = "['`]";
+  const forms = [`'${method}',\\s*${q}${pattern(path)}${q}`, `${q}${pattern(path)}${q},\\s*\\{\\s*method:\\s*'${method}'`];
+  const prefix = '/api/workspaces/:id/knowledge';
+  if (path.startsWith(prefix)) forms.push(`'${method}',\\s*s\\.k\\([^,]+,\\s*${q}${pattern(path.slice(prefix.length))}${q}\\)`);
+  return forms.some((f) => new RegExp(f).test(src));
+}
+
 describe('every mutating route records its actor (re-gate, Opus 4)', () => {
+  it('the "proven elsewhere" check matches a real request for the route, not a word of its path', () => {
+    expect(requestsRoute("call('POST', `/api/findings/${fid}/include`, {})", 'POST /api/findings/:id/include')).toBe(true);
+    expect(requestsRoute("call('POST', '/api/hypotheses/hyp_1/correct', {})", 'POST /api/hypotheses/:id/correct')).toBe(true);
+    expect(requestsRoute("call('POST', s.k('ws_c', `/facts/${f.id}/retract`), {})", 'POST /api/workspaces/:id/knowledge/facts/:factId/retract')).toBe(true);
+    expect(requestsRoute("app.request(`/api/workspaces/${t.a.id}/uploads`, { method: 'POST', body: form })", 'POST /api/workspaces/:id/uploads')).toBe(true);
+    // A mention of the last word, another method or another path is not a request for the route.
+    expect(requestsRoute('// include the findings', 'POST /api/findings/:id/include')).toBe(false);
+    expect(requestsRoute("call('GET', `/api/findings/${fid}/include`)", 'POST /api/findings/:id/include')).toBe(false);
+    expect(requestsRoute("call('POST', `/api/recommendations/${id}/include`, {})", 'POST /api/findings/:id/include')).toBe(false);
+  });
+
   it('enumerates the mutating routes of the real app: each is proven, or exempt with a reason', async () => {
     const t = setup();
     const app = createApp({ store: t.store, artifacts: lessonsHarness(t, () => undefined).artifacts, events: lessonsHarness(t, () => undefined).events, config: t.config, research: lessonsHarness(t, () => undefined).deps });
@@ -116,10 +144,23 @@ describe('every mutating route records its actor (re-gate, Opus 4)', () => {
     for (const [route, how] of Object.entries(ROUTES)) {
       if ('exempt' in how) continue;
       const src = readFileSync(how.test, 'utf8');
-      const tail = route.split(' ')[1]!.split('/').filter((x) => x && !x.startsWith(':')).at(-1)!;
-      expect(src, `${how.test} proves ${route}`).toContain(tail);
+      expect(requestsRoute(src, route), `${how.test} sends ${route}`).toBe(true);
       expect(src, `${how.test} checks an actor`).toMatch(/actor/);
     }
+  });
+
+  it('including a recommendation, persona or competitor records an include_override with the configured actor', async () => {
+    const t = setup();
+    const T = '2026-11-01T00:00:00.000Z';
+    t.store.recommendations.insert({ id: 'rec_1', workspaceId: t.a.id, title: 'r', summary: 's', criteria: {}, findingIds: [], personaFeedback: [], priority: 1, createdAt: T });
+    t.store.personas.insert({ id: 'per_1', workspaceId: t.a.id, slug: 'p', segment: 's', agentMdPath: 'x', version: 1, profile: {} } as never);
+    t.store.competitors.insert({ id: 'cmp_1', workspaceId: t.a.id, name: 'c', threat: 3, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 }, evidence: [], createdAt: T, updatedAt: T } as never);
+    expect((await t.call('POST', `/api/recommendations/rec_1/include`, { include: true, actor: 'mallory' })).status).toBe(200);
+    expect((await t.call('POST', `/api/personas/per_1/include`, { include: true })).status).toBe(200);
+    expect((await t.call('POST', `/api/competitors/cmp_1/include`, { include: true })).status).toBe(200);
+    expect(listFeedback(t.store, { kind: 'include_override' }).map((e) => [e.actor, e.targetType, e.targetId]).sort()).toEqual([
+      ['erin', 'competitor', 'cmp_1'], ['erin', 'persona', 'per_1'], ['erin', 'recommendation', 'rec_1'],
+    ]);
   });
 
   it('workspace create, interview message, upload, research start, schedule create / update, config change and the retro record a user_action with the configured actor', async () => {
