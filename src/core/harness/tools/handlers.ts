@@ -117,59 +117,77 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     opts: ToolCallOptions,
   ): Promise<ToolResult> {
     if (opts.signal?.aborted) return fail('call cancelled');
-    const id = newId('ureq');
+    // A replay of the same request from the same run (e.g. after a rate-limit retry) waits on the
+    // request that is already pending instead of asking the user twice.
+    const replayOf = store.userRequests
+      .list({ agentRunId: ctx.agentRunId, status: 'pending' })
+      .find((r) => r.workspaceId === ctx.workspaceId && r.kind === kind && r.site === site && r.details === details);
+    const id = replayOf?.id ?? newId('ureq');
     // Register the waiter before the row exists so a fast resolve cannot be missed. `local`
     // tears the waiter down if the insert fails.
     const local = new AbortController();
     const signal = opts.signal ? AbortSignal.any([opts.signal, local.signal]) : local.signal;
     const waiter = events.waitFor((e) => e.type === 'user_request_resolved' && e.request.id === id, signal);
     waiter.catch(() => {});
-    const request: UserRequest = {
-      id,
-      workspaceId: ctx.workspaceId,
-      agentRunId: ctx.agentRunId,
-      kind,
-      site,
-      details,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-    if (ctx.taskId !== undefined) request.taskId = ctx.taskId;
-    try {
-      store.transaction(() => {
-        // Read the task inside the transaction so concurrent requests see each other.
-        const task = taskOf(ctx);
-        if (task) {
-          if (task.status !== 'waiting_user') {
-            // First pending request for this task: remember the status to restore later.
-            request.taskPriorStatus = task.status;
-            store.tasks.update(task.id, { status: 'waiting_user' });
-          } else {
-            // Already waiting: carry the original prior status from a sibling pending request.
-            const prior = store.userRequests
-              .list({ taskId: task.id, status: 'pending' })
-              .find((r) => r.workspaceId === ctx.workspaceId && r.taskPriorStatus)?.taskPriorStatus;
-            if (prior) request.taskPriorStatus = prior;
-          }
-        }
-        store.userRequests.insert(request);
-      });
-    } catch (err) {
-      local.abort();
-      throw err;
-    }
-    events.emit({ type: 'user_request', workspaceId: ctx.workspaceId, request });
-    try {
-      const e = await waiter;
-      // Task status restoration happens in resolveUserRequest (works after restarts too).
-      const resolved = (e as Extract<typeof e, { type: 'user_request_resolved' }>).request;
+    const answer = (resolved: UserRequest): ToolResult => {
       const data: Record<string, unknown> = {
         requestId: id,
         status: resolved.status,
         approved: resolved.status === 'resolved',
       };
       if (resolved.response !== undefined) data.response = resolved.response;
+      if (replayOf) data.reused = true;
       return okData(data);
+    };
+    if (replayOf) {
+      // It may have been answered between the lookup and the waiter registration.
+      const now = store.userRequests.get(id);
+      if (now && now.status !== 'pending') {
+        local.abort();
+        return answer(now);
+      }
+    }
+    if (!replayOf) {
+      const request: UserRequest = {
+        id,
+        workspaceId: ctx.workspaceId,
+        agentRunId: ctx.agentRunId,
+        kind,
+        site,
+        details,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+      if (ctx.taskId !== undefined) request.taskId = ctx.taskId;
+      try {
+        store.transaction(() => {
+          // Read the task inside the transaction so concurrent requests see each other.
+          const task = taskOf(ctx);
+          if (task) {
+            if (task.status !== 'waiting_user') {
+              // First pending request for this task: remember the status to restore later.
+              request.taskPriorStatus = task.status;
+              store.tasks.update(task.id, { status: 'waiting_user' });
+            } else {
+              // Already waiting: carry the original prior status from a sibling pending request.
+              const prior = store.userRequests
+                .list({ taskId: task.id, status: 'pending' })
+                .find((r) => r.workspaceId === ctx.workspaceId && r.taskPriorStatus)?.taskPriorStatus;
+              if (prior) request.taskPriorStatus = prior;
+            }
+          }
+          store.userRequests.insert(request);
+        });
+      } catch (err) {
+        local.abort();
+        throw err;
+      }
+      events.emit({ type: 'user_request', workspaceId: ctx.workspaceId, request });
+    }
+    try {
+      const e = await waiter;
+      // Task status restoration happens in resolveUserRequest (works after restarts too).
+      return answer((e as Extract<typeof e, { type: 'user_request_resolved' }>).request);
     } catch (err) {
       if (err instanceof AbortError) {
         return fail(`call cancelled; user request ${id} stays pending until the user answers it`);
@@ -354,7 +372,9 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       if (!extra) return announce(fail(`tool '${name}' is not available yet in this build`));
       const result = await extra(ctx, parsed.data, deps, opts);
       const kind = EXTRA_DECISION_KIND[name];
-      if (result.ok && kind) {
+      // A handler that recognised a replayed call (`duplicate: true`) already has its Decision.
+      const replayed = result.ok && (result.data as { duplicate?: unknown } | null)?.duplicate === true;
+      if (result.ok && kind && !replayed) {
         const d = recordDecision(ctx, kind, { tool: name, input: parsed.data, result: result.data }, ctx.taskId ? [ctx.taskId] : []);
         events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
       }

@@ -290,6 +290,36 @@ describe('tool handlers', () => {
   });
 });
 
+describe('replayed user requests', () => {
+  it('same run + same (kind, site, details) reuses the pending request', async () => {
+    const s = setup();
+    const task = addTask(s.store);
+    const c = ctx('worker', { taskId: task.id });
+    const input = { action: 'request a demo', site: 'acme.com', details: 'pricing hidden' };
+    const first = s.handle(c, 'request_approval', input);
+    await tick();
+    const replay = s.handle(c, 'request_approval', input);
+    const other = s.handle(c, 'request_approval', { ...input, details: 'something else' });
+    await tick();
+    const pending = s.store.userRequests.list({ status: 'pending' });
+    expect(pending).toHaveLength(2);
+    expect(s.seen.filter((e) => e.type === 'user_request')).toHaveLength(2);
+    const target = pending.find((r) => r.details.endsWith('pricing hidden'))!;
+    resolveUserRequest({ store: s.store, events: s.events }, target.id, 'resolved', 'ok');
+    const [a, b] = await Promise.all([first, replay]);
+    expect(a).toMatchObject({ ok: true, data: { requestId: target.id, approved: true } });
+    expect(b).toMatchObject({ ok: true, data: { requestId: target.id, approved: true, reused: true } });
+    resolveUserRequest({ store: s.store, events: s.events }, pending.find((r) => r.id !== target.id)!.id, 'denied');
+    expect(await other).toMatchObject({ ok: true, data: { approved: false } });
+    // Another run asking the same thing gets its own request.
+    const fresh = s.handle(ctx('worker', { taskId: task.id }), 'request_approval', input);
+    await tick();
+    expect(s.store.userRequests.list({ status: 'pending' })).toHaveLength(1);
+    resolveUserRequest({ store: s.store, events: s.events }, s.store.userRequests.list({ status: 'pending' })[0]!.id, 'resolved');
+    await fresh;
+  });
+});
+
 describe('tokens', () => {
   it('rejects unknown token; resolves after store reopen; revoke', () => {
     const { store, dbPath } = setup();

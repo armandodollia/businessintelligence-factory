@@ -87,6 +87,32 @@ describe('orchestrator phases', () => {
     expect(s.store.decisions.list({ kind: 'task_proposal' })).toHaveLength(1);
   });
 
+  it('identical replayed propose_tasks from the same run inserts nothing new', async () => {
+    const results: Array<Record<string, unknown>> = [];
+    const tasks = [spec('news_scan'), spec('public_filings')];
+    const s = setup({
+      config: (c) => (c.limits.maxTasksPerRun = 3),
+      pick: (r) => {
+        if (r.kind === 'orchestrate') {
+          return r.round === 1
+            ? async (t) => {
+                results.push((await t.call('propose_tasks', { tasks })) as Record<string, unknown>);
+                results.push((await t.call('propose_tasks', { tasks })) as Record<string, unknown>); // replay
+                // budget untouched by the replay: one more task still fits
+                results.push((await t.call('propose_tasks', { tasks: [spec('news_scan', { brief: 'other' })] })) as Record<string, unknown>);
+              }
+            : nothing;
+        }
+        return r.kind === 'work' ? submitWork({ summary: 'x' }, `claim ${r.task!.id}`) : review(9);
+      },
+    });
+    const rr = await startPhase('ws_a', 'deep_dives', s.deps);
+    expect(results[1]).toEqual({ ...results[0], duplicate: true });
+    expect((results[2]!.accepted as unknown[]).length).toBe(1);
+    expect(s.store.tasks.list({ runId: rr.id })).toHaveLength(3);
+    expect(s.store.decisions.list({ kind: 'task_proposal' })).toHaveLength(2);
+  });
+
   it('runs accepted tasks through review loop', async () => {
     const s = setup({
       pick: (r) =>
@@ -313,7 +339,8 @@ describe('resumeInterrupted', () => {
     const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
     const exited = new Promise<NodeJS.Signals | null>((r) => child.on('exit', (_c, sig) => r(sig)));
     const started = processStartTime(child.pid!)!;
-    expect(started).toBeTruthy();
+    expect(Number.isFinite(Date.parse(started))).toBe(true); // LC_ALL=C format
+    expect(started).toMatch(/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4}$/);
     expect(killOrphanGroup(child.pid!, 'Mon Jan  1 00:00:00 2001')).toBe(false); // pid reused / before boot
     expect(killOrphanGroup(child.pid!, undefined)).toBe(false); // unverifiable
     expect(killOrphanGroup(child.pid!, started.replace(/\d\d:\d\d:\d\d/, '00:00:00'))).toBe(false); // other process

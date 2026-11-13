@@ -3,6 +3,7 @@ import { PROVIDER_IDS } from '../config/schema.js';
 import { AbortError } from '../events.js';
 import { isOurProcessGroup } from '../harness/procinfo.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
+import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
@@ -47,6 +48,14 @@ export function currentResearchRun(store: Store, workspaceId: string): ResearchR
 export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps) => {
   const input = rawInput as ToolInput<'propose_tasks'>;
   const { store, config } = deps;
+  // Identical replay from the same orchestrator run (e.g. after a rate-limit retry): return the
+  // original outcome; no new tasks, no budget used, and the dispatcher writes no second Decision.
+  const key = JSON.stringify(input);
+  const replay = findReplay(store, ctx, 'propose_tasks', 'run', (p) => JSON.stringify(p.input) === key);
+  if (replay) {
+    const original = (replay.payload as { result?: Record<string, unknown> }).result ?? {};
+    return { ok: true, data: { ...original, duplicate: true } };
+  }
   const rr = currentResearchRun(store, ctx.workspaceId);
   if (!rr) return { ok: false, error: 'no research phase is running for this workspace' };
   const allowedTypes = PHASE_TASK_TYPES[rr.phase];

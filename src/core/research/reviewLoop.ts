@@ -50,6 +50,24 @@ function taskHeader(task: Task): string {
   return lines.join('\n');
 }
 
+/**
+ * Answers to the task's earlier user requests (registrations, approvals, ...), for every worker
+ * prompt (initial work and revisions, also after a restart). Empty string when there are none.
+ */
+export function answeredRequestsSection(deps: Pick<ResearchDeps, 'store'>, task: Task): string {
+  const answered = deps.store.userRequests
+    .list({ taskId: task.id })
+    .filter((r) => r.workspaceId === task.workspaceId && r.status !== 'pending');
+  if (!answered.length) return '';
+  return (
+    '## Earlier requests to the user for this task (already answered)\n' +
+    answered
+      .map((r) => `- ${r.kind}${r.site ? ` on ${r.site}` : ''}: ${r.details}\n  → ${r.status}${r.response ? `: ${r.response}` : ''}`)
+      .join('\n') +
+    '\nUse these answers; do not ask again. The research browser profile keeps any session the user set up.'
+  );
+}
+
 /** Prompt for the initial worker run. Includes answers to the task's earlier user requests (after a restart). */
 export function workPrompt(deps: Pick<ResearchDeps, 'store'>, task: Task): string {
   const parts = [
@@ -57,24 +75,14 @@ export function workPrompt(deps: Pick<ResearchDeps, 'store'>, task: Task): strin
     `## Brief\n${task.brief}`,
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
   ];
-  const answered = deps.store.userRequests
-    .list({ taskId: task.id })
-    .filter((r) => r.workspaceId === task.workspaceId && r.status !== 'pending');
-  if (answered.length) {
-    parts.push(
-      '## Earlier requests to the user (from a previous, interrupted run of this task)\n' +
-        answered
-          .map((r) => `- ${r.kind}${r.site ? ` on ${r.site}` : ''}: ${r.details}\n  → ${r.status}${r.response ? `: ${r.response}` : ''}`)
-          .join('\n') +
-        '\nContinue from there; the research browser profile keeps any session the user set up.',
-    );
-  }
+  const answered = answeredRequestsSection(deps, task);
+  if (answered) parts.push(answered);
   parts.push('Finish by calling `submit_result` with your deliverable.');
   return parts.join('\n\n');
 }
 
 /** Prompt for a revision run: brief, criteria, current deliverable and the reviewer's issues. */
-export function revisePrompt(task: Task, issues: ReviewIssue[]): string {
+export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<ResearchDeps, 'store'>): string {
   const issueLines = issues.map((i) => {
     const ev = i.evidence?.length ? ` (evidence: ${i.evidence.join(', ')})` : '';
     return `- [${i.id}] (${i.class}) ${i.description}${ev}`;
@@ -86,7 +94,10 @@ export function revisePrompt(task: Task, issues: ReviewIssue[]): string {
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     `## Your current deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     `## Review issues\n${issueLines.join('\n') || '- (none)'}`,
-  ].join('\n\n');
+    deps ? answeredRequestsSection(deps, task) : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /**
@@ -132,7 +143,7 @@ async function workerStep(
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
     throwIfAborted(deps.signal);
     const task = store.tasks.get(taskId)!;
-    const prompt = kind === 'work' ? workPrompt(deps, task) : revisePrompt(task, issues);
+    const prompt = kind === 'work' ? workPrompt(deps, task) : revisePrompt(task, issues, deps);
     const res = await runAgent(deps, {
       kind, role, workspaceId: task.workspaceId, task, round, attempt, prompt, systemPrompt: system,
       model: task.model, needsBrowser: task.needsBrowser, promptVersion: version,
@@ -177,7 +188,7 @@ async function reviewStep(
   deps: ResearchDeps,
   taskId: string,
   round: number,
-): Promise<{ score: number; issues: ReviewIssue[] }> {
+): Promise<{ valid: boolean; score: number; issues: ReviewIssue[] }> {
   const { store, config } = deps;
   const task = store.tasks.get(taskId)!;
   const system = reviewerSystemPrompt(config);
@@ -192,7 +203,7 @@ async function reviewStep(
   const review = getRunOutputs(store, res.agentRunId).review;
   // A review counts only if the reviewer run itself finished successfully.
   if (res.status === 'done' && review && Number.isFinite(review.score) && review.score >= 0 && review.score <= 10) {
-    return { score: review.score, issues: review.issues };
+    return { valid: true, score: review.score, issues: review.issues };
   }
   const issues: ReviewIssue[] = [{ id: 'I1', class: 'blocking', description: MALFORMED_REVIEW_ISSUE }];
   recordHarnessDecision(
@@ -202,7 +213,7 @@ async function reviewStep(
     { event: 'synthetic_review', round, score: 0, issues, runStatus: res.status },
     [task.id],
   );
-  return { score: 0, issues };
+  return { valid: false, score: 0, issues };
 }
 
 function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unverified' | 'failed', round: number): Task {
@@ -256,7 +267,8 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
       }
       store.tasks.update(id, { status: 'reviewing', round, step: 'review' });
       const review = await reviewStep(deps, id, round);
-      if (review.score >= passThreshold) return finish(deps, id, 'verified', round);
+      // Only a valid review from a successful reviewer run can pass (even with passThreshold 0).
+      if (review.valid && review.score >= passThreshold) return finish(deps, id, 'verified', round);
       if (round >= maxRounds) return finish(deps, id, 'unverified', round);
       round++;
       step = 'revise';

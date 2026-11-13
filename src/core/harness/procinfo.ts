@@ -10,6 +10,8 @@ export function processStartTime(pid: number): string | undefined {
   try {
     const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
       encoding: 'utf8',
+      // Fixed locale: the recorded and the re-read start time must use the same format.
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2000,
     }).trim();

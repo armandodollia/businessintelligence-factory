@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadPrompt, promptVersion } from '../../src/core/prompts/index.js';
+import { resolveUserRequest } from '../../src/core/harness/tools/handlers.js';
 import { MALFORMED_REVIEW_ISSUE, runTaskWithReview } from '../../src/core/research/reviewLoop.js';
 import type { Store } from '../../src/core/store/db.js';
 import { addTask, researchSetup, review, revise, submitWork, tick } from './helpers/research.js';
@@ -370,5 +371,60 @@ describe('fix round 1', () => {
     const outs = await Promise.all([run(), run(), run()]);
     expect(outs.every((o) => o.status === 'done')).toBe(true);
     expect(peak).toBe(1);
+  });
+});
+
+describe('fix round 2', () => {
+  it('passThreshold 0 + no submit_review -> not verified', async () => {
+    const s = researchSetup(opened, {
+      config: (c) => {
+        c.loop.passThreshold = 0;
+        c.loop.maxRounds = 1;
+      },
+      pick: (r) => (r.kind === 'work' ? submitWork() : async () => {}),
+    });
+    expect((await runTaskWithReview(addTask(s.store), s.deps)).status).toBe('unverified');
+  });
+
+  it('passThreshold 0 + valid review with score 0 passes', async () => {
+    const s = researchSetup(opened, {
+      config: (c) => (c.loop.passThreshold = 0),
+      pick: (r) => (r.kind === 'work' ? submitWork() : review(0)),
+    });
+    expect((await runTaskWithReview(addTask(s.store), s.deps)).status).toBe('verified');
+  });
+
+  it('restart during revision after an approval was answered -> revise prompt contains the answer', async () => {
+    const ac = new AbortController();
+    const s = researchSetup(opened, {
+      pick: (r) => {
+        if (r.kind === 'work') return submitWork();
+        if (r.kind === 'review') return review(4, [{ class: 'blocking', description: 'no pricing page' }]);
+        return async (t) => {
+          await t.call('request_approval', { action: 'request a demo', site: 'rival.io', details: 'pricing hidden' });
+          ac.abort(); // the server dies right after the user answered
+          await new Promise<void>(() => {});
+        };
+      },
+    });
+    s.events.on((e) => {
+      if (e.type === 'user_request') {
+        queueMicrotask(() => resolveUserRequest({ store: s.store, events: s.events }, e.request.id, 'resolved', 'APPROVED: demo booked for Friday'));
+      }
+    });
+    s.deps.signal = ac.signal;
+    const task = addTask(s.store);
+    await expect(runTaskWithReview(task, s.deps)).rejects.toThrow(/cancel/);
+    expect(s.store.tasks.get(task.id)).toMatchObject({ step: 'revise', round: 2 });
+
+    delete s.deps.signal;
+    const before = s.requests.length;
+    s.state.pick = (r) => (r.kind === 'revise' ? revise('fix')(r) : review(9));
+    const out = await runTaskWithReview(s.store.tasks.get(task.id)!, s.deps);
+    const resumed = s.requests.slice(before)[0]!;
+    expect(resumed.kind).toBe('revise');
+    expect(resumed.prompt).toContain('APPROVED: demo booked for Friday');
+    expect(resumed.prompt).toContain('[I1] (blocking) no pricing page');
+    expect(out.status).toBe('verified');
   });
 });
