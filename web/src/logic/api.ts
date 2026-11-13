@@ -88,7 +88,7 @@ const ws = (id: string) => `/api/workspaces/${enc(id)}`;
 /** URL serving an artifact's bytes with its mime type. */
 export const artifactUrl = (id: string): string => `/api/artifacts/${enc(id)}`;
 /** URL downloading decisions + ratings as JSONL. */
-export const exportUrl = (workspaceId: string): string => `${ws(workspaceId)}/export`;
+export const exportUrl = (workspaceId: string, includeUploads = false): string => `${ws(workspaceId)}/export${includeUploads ? '?includeUploads=1' : ''}`;
 /** SSE stream of `BusEvent`s for one workspace. */
 export const eventsUrl = (workspaceId: string): string => `/api/events?workspaceId=${enc(workspaceId)}`;
 
@@ -159,6 +159,8 @@ export const api = {
   listRatings: (id: string) => get<Rating[]>(`${ws(id)}/ratings`),
   getReviewQueue: (id: string) => get<ReviewQueueItem[]>(`${ws(id)}/review-queue`),
   getCalibration: (id: string) => get<CalibrationReport>(`${ws(id)}/calibration`),
+  // Design §12 ruling: what the training export leaves out by default, by cause.
+  exportSummary: (id: string) => get<import('./exportSummary.js').ExportSummary>(`${ws(id)}/export/summary`),
   proposePromptPatch: (id: string, role: PatchRole) =>
     post<PromptPatch>(`${ws(id)}/calibration/prompt-patch`, { role }),
   applyPromptPatch: (id: string, patch: PromptPatch) =>

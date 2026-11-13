@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, artifactUrl, exportUrl } from './api.js';
+import { exportSummaryView } from './exportSummary.js';
 import { subscribe } from './sse.js';
 import {
   COMPETITOR_CRITERIA,
@@ -753,6 +754,15 @@ export function useDecisions(wsId: string | null | undefined, kind?: Decision['k
     reload: res.reload,
   };
 }
+
+// --- knowledge store integration (design §12 ruling): the export's visible cost ---
+/** The export summary (what the default exclusion leaves out, by cause) and the include-uploads link. */
+export function useExportSummary(wsId: string | null | undefined) {
+  const res = useResource(`export-summary:${wsId ?? ''}`, wsId ? () => api.exportSummary(wsId) : null);
+  const view = useMemo(() => exportSummaryView(res.data), [res.data]);
+  return { view, includeUploadsUrl: wsId ? exportUrl(wsId, true) : null, error: res.error, reload: res.reload };
+}
+// --- end export summary ---
 
 export function useCalibration(wsId: string | null | undefined) {
   const res = useResource(`calibration:${wsId ?? ''}`, wsId ? () => api.getCalibration(wsId) : null);

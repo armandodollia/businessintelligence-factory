@@ -148,11 +148,25 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  * neither judgments nor lines: they only feed provenance filtering (via the task's decisions).
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
+  return exportTrainingDataWithSummary(workspaceId, deps, includeUploads).jsonl;
+}
+
+/**
+ * `exportTrainingData` plus its summary (design §12 ruling, "visible cost"): how many judgments (and
+ * other lines) the default exclusion left out, by cause. Computed here, at export time; nothing is
+ * stored.
+ */
+export function exportTrainingDataWithSummary(
+  workspaceId: string,
+  deps: { store: Store },
+  includeUploads = false,
+): { jsonl: string; summary: ExportSummary } {
   const { store } = deps;
   const ratings = store.ratings.list({ workspaceId });
   const decisions = store.decisions.list({ workspaceId });
   // KS-2: + materialized / resolved flags; KS-6: + upload-exposed runs and what they produced.
   const uploads = includeUploads ? undefined : exportExclusion(store);
+  const tally = new ExclusionTally(includeUploads);
 
   const judgments = new Map<string, Decision[]>();
   for (const d of decisions) {
@@ -175,9 +189,12 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   const lines: string[] = [];
   for (const decision of decisions) {
     if (isReuseRecord(decision)) continue;
-    if (uploads?.runExposed(decision.agentRunId)) continue; // KS-6: a judgment of an upload-exposed run
-    if (uploads && expandedRefs(store, decision, taskEvidenceOf).some((id) => uploads.has(id))) continue;
-    if (uploads && citedDecisionsLinkUpload(store, decision, uploads, taskEvidenceOf)) continue; // WP-A
+    // Upload provenance (WP-A, KS-2) and upload exposure (KS-6), with the cause counted (§12 ruling).
+    const cause = uploads ? judgmentCause(store, decision, uploads, taskEvidenceOf) : undefined;
+    if (cause) {
+      tally.judgment(cause);
+      continue;
+    }
     if (isSuperseded(store, primarySubject(decision))) continue;
     // save_hypothesis decisions name their symptom as primary subject; the hypothesis itself decides.
     const hypothesisId = (decision.payload as { hypothesisId?: unknown } | null)?.hypothesisId;
@@ -200,9 +217,9 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
     const status = finalReviewStatus(store, decision);
     lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}) }));
   }
-  lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf));
-  lines.push(...knowledgeLines(store, workspaceId, uploads)); // KS-6
-  return lines.length ? `${lines.join('\n')}\n` : '';
+  lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf, tally));
+  lines.push(...knowledgeLines(store, workspaceId, uploads, tally)); // KS-6
+  return { jsonl: lines.length ? `${lines.join('\n')}\n` : '', summary: tally.summary() };
 }
 
 // ---------------------------------------------------------------------------
@@ -210,17 +227,30 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
 
 const DECISION_ID = /\bdec_[0-9A-Z]{26}\b/g;
 
-/**
- * Whether a Decision cited by id in `d` (e.g. the `sources` of an applied prompt patch, a feedback
- * event's rated decision) rests on an internal upload (`expandedRefs` of the cited decision).
- */
-function citedDecisionsLinkUpload(store: Store, d: Decision, uploads: Set<string>, taskEvidenceOf: (id: string) => string[]): boolean {
+/** Decisions cited by id in `d` (e.g. the `sources` of an applied prompt patch, a feedback event's rated decision). */
+function citedDecisions(store: Store, d: Decision): Decision[] {
+  const out: Decision[] = [];
   for (const m of JSON.stringify([d.refs, d.payload ?? null]).matchAll(DECISION_ID)) {
     const cited = m[0] === d.id ? undefined : store.decisions.get(m[0]);
-    if (cited && expandedRefs(store, cited, taskEvidenceOf).some((id) => uploads.has(id))) return true;
-    if (cited && uploads instanceof ExportExclusion && uploads.runExposed(cited.agentRunId)) return true; // KS-6
+    if (cited) out.push(cited);
   }
-  return false;
+  return out;
+}
+
+/**
+ * Why the export leaves judgment `d` out by default, if it does (first cause in `EXCLUSION_CAUSES`
+ * order): its provenance (`expandedRefs`, and that of decisions it cites, WP-A) reaches an internal
+ * upload or upload-derived item; it was written by an upload-exposed run (or cites a judgment of one);
+ * its provenance reaches the TASK of an exposed run (the task's reviews and deliverable decisions); or
+ * it references an OUTPUT of such a task (directly, or as what a referenced record cites — one level).
+ */
+function judgmentCause(store: Store, d: Decision, ex: ExportExclusion, taskEvidenceOf: (id: string) => string[]): ExclusionCause | undefined {
+  const own = expandedRefs(store, d, taskEvidenceOf);
+  const cited = citedDecisions(store, d);
+  const citedRefs = cited.flatMap((c) => expandedRefs(store, c, taskEvidenceOf));
+  if (own.some((id) => ex.uploadDerived(id)) || citedRefs.some((id) => ex.uploadDerived(id))) return 'cites_upload';
+  if (ex.runExposed(d.agentRunId) || cited.some((c) => ex.runExposed(c.agentRunId))) return 'exposed_run';
+  return firstCause([...own, ...citedRefs].map((id) => ex.exposedCause(id)));
 }
 
 const TERMINAL = new Set(['verified', 'unverified', 'failed', 'superseded']);
@@ -287,38 +317,42 @@ function humanFeedbackLines(
   workspaceId: string,
   uploads: ExportExclusion | undefined,
   taskEvidenceOf: (id: string) => string[],
+  tally: ExclusionTally,
 ): string[] {
-  const linked = (d: Decision) =>
-    !!uploads &&
-    (uploads.runExposed(d.agentRunId) || // KS-6: written by (or about the output of) an upload-exposed run
-      expandedRefs(store, d, taskEvidenceOf).some((id) => uploads.has(id)) ||
-      citedDecisionsLinkUpload(store, d, uploads, taskEvidenceOf));
+  const causeOf = (d: Decision): ExclusionCause | undefined => (uploads ? judgmentCause(store, d, uploads, taskEvidenceOf) : undefined);
   const lines: string[] = [];
 
   for (const request of store.userRequests.list({ workspaceId })) {
     if (request.status === 'pending') continue;
-    const d = pseudoDecision(workspaceId, request.agentRunId, request.taskId ? [request.taskId] : [], requestText(request));
-    if (linked(d)) continue;
+    const cause = causeOf(pseudoDecision(workspaceId, request.agentRunId, request.taskId ? [request.taskId] : [], requestText(request)));
+    if (cause) {
+      tally.other(cause);
+      continue;
+    }
     lines.push(JSON.stringify({ type: 'request_answer', request }));
   }
 
-  const runLinked = new Map<string, boolean>();
-  const runRestsOnUpload = (runId: string) => {
-    let v = runLinked.get(runId);
-    if (v === undefined) {
-      v = store.decisions.list({ agentRunId: runId }).some(linked);
-      runLinked.set(runId, v);
-    }
-    return v;
+  const runCauses = new Map<string, ExclusionCause | undefined>();
+  const runCause = (runId: string) => {
+    if (!runCauses.has(runId)) runCauses.set(runId, firstCause(store.decisions.list({ agentRunId: runId }).map(causeOf)));
+    return runCauses.get(runId);
   };
   const uploadSince = uploads ? firstUploadAt(store, workspaceId, uploads) : undefined;
   for (const turn of store.interview.list({ workspaceId })) {
-    if (uploads && turnRestsOnUpload(turn, uploadSince, runRestsOnUpload, linked, workspaceId)) continue;
+    const cause = uploads ? turnCause(turn, uploadSince, runCause, causeOf, workspaceId) : undefined;
+    if (cause) {
+      tally.other(cause);
+      continue;
+    }
     lines.push(JSON.stringify({ type: 'interview_turn', turn }));
   }
 
   for (const e of listFeedback(store, { workspaceId })) {
-    if (linked(feedbackPseudoDecision(store, e))) continue;
+    const cause = causeOf(feedbackPseudoDecision(store, e));
+    if (cause) {
+      tally.other(cause);
+      continue;
+    }
     const status = outputStatus(store, e.targetId);
     lines.push(JSON.stringify({ type: 'feedback_event', feedbackEvent: e, ...(status ? { finalReviewStatus: status } : {}) }));
   }
@@ -327,18 +361,19 @@ function humanFeedbackLines(
 
 const requestText = (r: UserRequest) => ({ site: r.site ?? null, details: r.details, response: r.response ?? null });
 
-function turnRestsOnUpload(
+function turnCause(
   turn: InterviewTurn,
   uploadSince: string | undefined,
-  runRestsOnUpload: (runId: string) => boolean,
-  linked: (d: Decision) => boolean,
+  runCause: (runId: string) => ExclusionCause | undefined,
+  causeOf: (d: Decision) => ExclusionCause | undefined,
   workspaceId: string,
-): boolean {
-  if (linked(pseudoDecision(workspaceId, undefined, [], { text: turn.text }))) return true;
-  if (turn.role !== 'agent') return false;
-  if (uploadSince !== undefined && turn.createdAt >= uploadSince) return true;
-  if (turn.agentRunId && linked(pseudoDecision(workspaceId, turn.agentRunId, [], null))) return true; // KS-6: exposed run
-  return !!turn.agentRunId && runRestsOnUpload(turn.agentRunId);
+): ExclusionCause | undefined {
+  const text = causeOf(pseudoDecision(workspaceId, undefined, [], { text: turn.text }));
+  if (text) return text;
+  if (turn.role !== 'agent') return undefined;
+  if (uploadSince !== undefined && turn.createdAt >= uploadSince) return 'cites_upload';
+  if (!turn.agentRunId) return undefined;
+  return causeOf(pseudoDecision(workspaceId, turn.agentRunId, [], null)) ?? runCause(turn.agentRunId); // KS-6: exposed run
 }
 
 function feedbackPseudoDecision(store: Store, e: FeedbackEvent): Decision {
@@ -402,24 +437,88 @@ export function uploadExclusionSet(store: Store): Set<string> {
 // --- end knowledge store KS-2 ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Knowledge store KS-6 (design §12 "Upload exposure", §13): a run that was SHOWN upload-derived text —
-// by a read tool or its assembled prompt (`runIsUploadExposed`) — is upload-exposed, even when it cited
-// nothing. By default (unless `includeUploads`) the export leaves out:
+// Knowledge store KS-6 (design §12 "Upload exposure", §13) with the integration ruling on §12: a run
+// that was SHOWN upload-derived text — by a read tool or its assembled prompt (`runIsUploadExposed`) —
+// is upload-exposed, even when it cited nothing. By default (unless `includeUploads`) the export
+// leaves out, and nothing more (the BOUND):
 // - every judgment of an exposed run (decisions, and the feedback events / requests / interview turns
 //   tied to that run);
 // - what such a run's TASK produced: the task itself (so the review and deliverable decisions of the
 //   task, whose text may carry what the exposed run read) and the task's outputs (findings,
-//   recommendations, personas, competitors, hypotheses), so a later decision resting on one of them
-//   is left out like a decision resting on an upload. Records are resolved through what they cite
-//   (`provenance.evidenceOf`: a recommendation's findings, ...).
+//   recommendations, personas, competitors, hypotheses);
+// - later judgments that REFERENCE one of those outputs: by id, or through a record they reference
+//   that cites it directly (a recommendation's findings, an observation's fact) — one level, never a
+//   chain. A later run that is merely SHOWN such an output (search, card, briefing) is not exposed by
+//   that alone, and its other judgments and its reads are exported.
+// Exposure is computed here, at export time, from the retrieval log; no flag is stored, so it cannot
+// spread through cards or briefings. Known limit: text a later run paraphrased from such an output
+// without citing it, and that is carried on two tasks later, is not caught.
+// The summary (`ExportSummary`) counts what was left out, by cause.
 // New lines: `{type: 'retrieval_event', retrievalEvent, uses}` and `{type: 'fact_observation',
 // observation}`, under the same rules (see `knowledgeLines`).
 
+/** Why the export leaves a line out by default, in precedence order (first match counts). */
+export type ExclusionCause = 'cites_upload' | 'exposed_run' | 'exposed_task' | 'exposed_output';
+
+/** The causes in precedence order, with their labels (shown by the API and the web export UI). */
+export const EXCLUSION_CAUSES: ReadonlyArray<{ cause: ExclusionCause; label: string }> = [
+  { cause: 'cites_upload', label: 'cites an upload' },
+  { cause: 'exposed_run', label: 'exposed run' },
+  { cause: 'exposed_task', label: 'task of an exposed run' },
+  { cause: 'exposed_output', label: 'references an output of such a task' },
+];
+
+const CAUSE_RANK = new Map(EXCLUSION_CAUSES.map((c, i) => [c.cause, i]));
+
+/** The highest-precedence cause among `causes`, if any. */
+function firstCause(causes: Iterable<ExclusionCause | undefined>): ExclusionCause | undefined {
+  let best: ExclusionCause | undefined;
+  for (const c of causes) if (c && (best === undefined || CAUSE_RANK.get(c)! < CAUSE_RANK.get(best)!)) best = c;
+  return best;
+}
+
+export type ExclusionCount = { total: number; byCause: Array<{ cause: ExclusionCause; label: string; count: number }> };
+
+/** What the default exclusion cost in one export (design §12 ruling, "visible cost"). */
+export type ExportSummary = {
+  includeUploads: boolean;
+  /** Judgments (decision lines) left out, by cause. */
+  excludedJudgments: ExclusionCount;
+  /** Other lines left out (request answers, interview turns, feedback events, retrieval events, fact observations), by cause. */
+  excludedOtherLines: ExclusionCount;
+  note: string;
+};
+
+class ExclusionTally {
+  private readonly judgments = new Map<ExclusionCause, number>();
+  private readonly others = new Map<ExclusionCause, number>();
+  constructor(private readonly includeUploads: boolean) {}
+  judgment(c: ExclusionCause): void {
+    this.judgments.set(c, (this.judgments.get(c) ?? 0) + 1);
+  }
+  other(c: ExclusionCause): void {
+    this.others.set(c, (this.others.get(c) ?? 0) + 1);
+  }
+  summary(): ExportSummary {
+    const count = (m: Map<ExclusionCause, number>): ExclusionCount => {
+      const byCause = EXCLUSION_CAUSES.map(({ cause, label }) => ({ cause, label, count: m.get(cause) ?? 0 }));
+      return { total: byCause.reduce((a, c) => a + c.count, 0), byCause };
+    };
+    const j = count(this.judgments);
+    const o = count(this.others);
+    const note = this.includeUploads
+      ? 'Exported with includeUploads: nothing was left out for uploads or upload exposure.'
+      : j.total + o.total === 0
+        ? 'Nothing was left out for uploads or upload exposure.'
+        : `Left out by default: ${j.total} judgment(s) and ${o.total} other line(s). Export with includeUploads to include them.`;
+    return { includeUploads: this.includeUploads, excludedJudgments: j, excludedOtherLines: o, note };
+  }
+}
+
 /** `UploadExclusionSet` plus upload exposure: `has` also answers for exposed tasks and their outputs. */
 class ExportExclusion extends UploadExclusionSet {
-  private exposedRuns?: Set<string>;
-  private exposedIds?: Set<string>;
-  private readonly exposedMemo = new Map<string, boolean>();
+  private exposure?: { runs: Set<string>; tasks: Set<string>; outputs: Set<string> };
+  private readonly causeMemo = new Map<string, ExclusionCause | undefined>();
   constructor(
     private readonly exportStore: Store,
     uploads: Set<string>,
@@ -427,12 +526,14 @@ class ExportExclusion extends UploadExclusionSet {
     super(exportStore, uploads);
   }
 
-  private load(): { runs: Set<string>; ids: Set<string> } {
-    if (this.exposedRuns && this.exposedIds) return { runs: this.exposedRuns, ids: this.exposedIds };
-    const { runs, ids } = uploadExposure(this.exportStore);
-    this.exposedRuns = runs;
-    this.exposedIds = ids;
-    return { runs, ids };
+  private load(): { runs: Set<string>; tasks: Set<string>; outputs: Set<string> } {
+    this.exposure ??= uploadExposure(this.exportStore);
+    return this.exposure;
+  }
+
+  /** Internal upload or upload-derived now (KS-2), without exposure. */
+  uploadDerived(id: string): boolean {
+    return super.has(id);
   }
 
   /** The agent run was shown upload-derived text. */
@@ -440,17 +541,23 @@ class ExportExclusion extends UploadExclusionSet {
     return !!agentRunId && this.load().runs.has(agentRunId);
   }
 
-  /** Exposed task, an output of one, or a record citing one (resolved like upload provenance). */
-  exposedItem(id: string, seen: Set<string> = new Set()): boolean {
-    const memo = this.exposedMemo.get(id);
-    if (memo !== undefined) return memo;
-    if (seen.has(id)) return false;
-    seen.add(id);
-    const { ids, runs } = this.load();
-    let v = ids.has(id) || runs.has(id);
-    if (!v) v = (recordEvidenceOf(this.exportStore, id) ?? []).some((e) => this.exposedItem(e, seen));
-    this.exposedMemo.set(id, v);
-    return v;
+  /**
+   * Exposure cause of an id: an exposed run, the task of one, or an output of such a task — the id
+   * itself, or what the record it names cites directly (one level: the bound).
+   */
+  exposedCause(id: string): ExclusionCause | undefined {
+    if (this.causeMemo.has(id)) return this.causeMemo.get(id);
+    const { runs, tasks, outputs } = this.load();
+    const direct = (x: string): ExclusionCause | undefined =>
+      runs.has(x) ? 'exposed_run' : tasks.has(x) ? 'exposed_task' : outputs.has(x) ? 'exposed_output' : undefined;
+    const c = direct(id) ?? firstCause((recordEvidenceOf(this.exportStore, id) ?? []).map((e) => (outputs.has(e) ? 'exposed_output' : undefined)));
+    this.causeMemo.set(id, c);
+    return c;
+  }
+
+  /** Exposed run or task, an output of such a task, or a record citing one directly. */
+  exposedItem(id: string): boolean {
+    return this.exposedCause(id) !== undefined;
   }
 
   override has(id: string): boolean {
@@ -464,10 +571,11 @@ export function exportExclusion(store: Store): ExportExclusion {
 }
 
 /**
- * Upload-exposed agent runs (any tree), their tasks and the outputs of those tasks. Only runs that
- * have a logged read can be exposed (reads and prompt sections are logged before they are served).
+ * Upload-exposed agent runs (any tree), their tasks and the outputs of those tasks (`ids` = tasks and
+ * outputs). Only runs that have a logged read can be exposed (reads and prompt sections are logged
+ * before they are served). Computed from the log on every call; nothing is stored.
  */
-export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<string>; ids: Set<string> } {
+export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<string>; outputs: Set<string>; ids: Set<string> } {
   const candidates = store.db
     .prepare('SELECT DISTINCT agent_run_id AS r FROM retrieval_events WHERE agent_run_id IS NOT NULL')
     .all() as Array<{ r: string }>;
@@ -479,7 +587,7 @@ export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<st
     const logged = store.db.prepare('SELECT DISTINCT task_id AS t FROM retrieval_events WHERE agent_run_id = ? AND task_id IS NOT NULL').all(r) as Array<{ t: string }>;
     for (const { t } of logged) tasks.add(t);
   }
-  const ids = new Set<string>(tasks);
+  const outputs = new Set<string>();
   for (const t of tasks) {
     for (const x of [
       ...store.findings.list({ taskId: t }),
@@ -487,38 +595,59 @@ export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<st
       ...store.personas.list({ taskId: t }),
       ...store.competitors.list({ taskId: t }),
       ...store.symptomHypotheses.list({ taskId: t }),
-    ]) ids.add(x.id);
+    ]) outputs.add(x.id);
   }
-  return { runs, tasks, ids };
+  return { runs, tasks, outputs, ids: new Set([...tasks, ...outputs]) };
 }
 
 /**
  * Knowledge lines of the export (after the human feedback lines), for the workspace's rows:
  * - `{type: 'retrieval_event', retrievalEvent, uses}`: every logged read (query redacted at write
  *   time) with the uses its results got (`retrieval_uses`). Left out by default when the read was
- *   flagged upload-derived, when any returned id is upload-derived or tied to upload exposure now, or
- *   when its run is upload-exposed (its query is that run's text).
+ *   flagged upload-derived or any returned id is upload-derived now, when its run (its query is that
+ *   run's text) or task is upload-exposed, or when a result it USED is an output of an exposed task.
+ *   A result that was only returned (shown) leaves the read in (the bound).
  * - `{type: 'fact_observation', observation}`: every create / confirm / replace / retract
  *   observation. Left out by default when it is upload-derived (its fact or any cited artifact), its
- *   prior version is, or its run or task is upload-exposed.
+ *   prior version is, its run or task is upload-exposed, or its fact / prior is an exposed output.
  */
-function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclusion | undefined): string[] {
+function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclusion | undefined, tally: ExclusionTally): string[] {
   const k = knowledgeRepos(store);
   const lines: string[] = [];
   for (const ev of k.retrievalEvents.list({ workspaceId })) {
-    if (uploads) {
-      if (ev.uploadDerived || uploads.runExposed(ev.agentRunId)) continue;
-      if (ev.taskId && uploads.exposedItem(ev.taskId)) continue;
-      if (ev.resultIds.some((r) => uploads.has(r.id))) continue;
-    }
     const uses = k.retrievalUses.list({ retrievalEventId: ev.id }).map((u) => ({ itemId: u.itemId, usedByKind: u.usedByKind, usedById: u.usedById }));
+    if (uploads) {
+      const cause =
+        ev.uploadDerived || ev.resultIds.some((r) => uploads.uploadDerived(r.id))
+          ? 'cites_upload'
+          : uploads.runExposed(ev.agentRunId)
+            ? 'exposed_run'
+            : firstCause([ev.taskId ? uploads.exposedCause(ev.taskId) : undefined, ...uses.map((u) => uploads.exposedCause(u.itemId))]);
+      if (cause) {
+        tally.other(cause);
+        continue;
+      }
+    }
     lines.push(JSON.stringify({ type: 'retrieval_event', retrievalEvent: ev, uses }));
   }
   for (const o of k.factObservations.list({ workspaceId })) {
     if (uploads) {
-      if (uploads.runExposed(o.agentRunId) || (o.taskId && uploads.exposedItem(o.taskId))) continue;
-      if (uploads.has(o.id) || uploads.has(o.findingId) || (o.priorFindingId && uploads.has(o.priorFindingId))) continue;
-      if (o.evidence.some((e) => uploads.has(e))) continue;
+      const cause =
+        uploads.uploadDerived(o.id) || uploads.uploadDerived(o.findingId) || (o.priorFindingId && uploads.uploadDerived(o.priorFindingId)) ||
+        o.evidence.some((e) => uploads.uploadDerived(e))
+          ? 'cites_upload'
+          : uploads.runExposed(o.agentRunId)
+            ? 'exposed_run'
+            : firstCause([
+                o.taskId ? uploads.exposedCause(o.taskId) : undefined,
+                uploads.exposedCause(o.findingId),
+                o.priorFindingId ? uploads.exposedCause(o.priorFindingId) : undefined,
+                ...o.evidence.map((e) => uploads.exposedCause(e)),
+              ]);
+      if (cause) {
+        tally.other(cause);
+        continue;
+      }
     }
     lines.push(JSON.stringify({ type: 'fact_observation', observation: o }));
   }

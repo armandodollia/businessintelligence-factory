@@ -1,5 +1,5 @@
 import { decisionCriteria, formatValue, shortDate, summarize } from '../logic/format.js';
-import { useCalibration, useDecisions, useForm, usePromptPatch } from '../logic/hooks.js';
+import { useCalibration, useDecisions, useExportSummary, useForm, usePromptPatch } from '../logic/hooks.js';
 import type { Decision, PatchRole } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
 import { FeedbackLog } from './FeedbackLog.js';
@@ -11,6 +11,7 @@ export function DecisionLog({ wsId }: { wsId: string }) {
   const form = useForm({ kind: '' as Decision['kind'] | '' });
   const { decisions, exportUrl, loading, error } = useDecisions(wsId, form.values.kind || undefined);
   const cal = useCalibration(wsId);
+  const exp = useExportSummary(wsId);
 
   return (
     <div>
@@ -31,6 +32,28 @@ export function DecisionLog({ wsId }: { wsId: string }) {
           </a>
         )}
       </div>
+      {exp.view && (
+        <div className="small muted" aria-label="export summary">
+          <div>{exp.view.headline}</div>
+          {exp.view.causes.length > 0 && (
+            <ul>
+              {exp.view.causes.map((c) => (
+                <li key={c.cause}>{c.text}</li>
+              ))}
+            </ul>
+          )}
+          {exp.view.includeHint && (
+            <div>
+              {exp.view.includeHint}{' '}
+              {exp.includeUploadsUrl && (
+                <a href={exp.includeUploadsUrl} download>
+                  Export including uploads (JSONL)
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {error && <div className="error">{error}</div>}
       {loading && <div className="muted">loading…</div>}
       <table>

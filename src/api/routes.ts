@@ -19,7 +19,7 @@ import { ALL_PHASES } from '../core/research/phases.js';
 import { validateCron } from '../core/scheduler/scheduler.js';
 import { calibrationReport, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
 import { RECOMMENDATION_KEYS } from '../core/scoring/criteria.js';
-import { exportTrainingData } from '../core/scoring/export.js';
+import { exportTrainingDataWithSummary } from '../core/scoring/export.js';
 import { scoreRecommendations } from '../core/scoring/priority.js';
 import { RatingError, rateCriterion } from '../core/scoring/ratings.js';
 import { reviewQueue } from '../core/scoring/reviewQueue.js';
@@ -585,11 +585,18 @@ export function createApp(deps: AppDeps): Hono {
   });
   app.get('/api/workspaces/:id/export', (c) => {
     const id = workspace(c.req.param('id')).id;
-    const jsonl = exportTrainingData(id, { store }, c.req.query('includeUploads') === '1');
+    const { jsonl, summary } = exportTrainingDataWithSummary(id, { store }, c.req.query('includeUploads') === '1');
     return c.body(jsonl, 200, {
       'content-type': 'application/x-ndjson; charset=utf-8',
       'content-disposition': `attachment; filename="bif-${id}-export.jsonl"`,
+      // Design §12 ruling: what the default exclusion left out, by cause (URI-encoded JSON).
+      'x-bif-export-summary': encodeURIComponent(JSON.stringify(summary)),
     });
+  });
+  /** The export's summary alone (the web export UI shows it next to the download link). */
+  app.get('/api/workspaces/:id/export/summary', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json(exportTrainingDataWithSummary(id, { store }, c.req.query('includeUploads') === '1').summary);
   });
 
   // --- schedules ------------------------------------------------------------------------------
