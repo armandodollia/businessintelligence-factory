@@ -1,0 +1,100 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import type { RunEvent, SpawnSpec } from '../../../src/core/harness/adapter.js';
+import { CodexAdapter, toToml } from '../../../src/core/harness/adapters/codex.js';
+import { getAdapter } from '../../../src/core/harness/adapters/index.js';
+
+const spec: SpawnSpec = {
+  prompt: 'Walk the signup flow',
+  systemPrompt: 'You are a research worker.',
+  model: 'gpt-6.1-sol',
+  mcpUrl: 'http://127.0.0.1:4317/mcp/tok_abc',
+  extraMcpServers: {
+    playwright: { command: 'npx', args: ['@playwright/mcp@0.0.41', '--user-data-dir', 'data/browser-profile'], env: { A: '1' } },
+    remote: { type: 'http', url: 'http://x.test/mcp' },
+  },
+  cwd: '/tmp/bif-run',
+};
+
+const fixture = (name: string) =>
+  readFileSync(join(import.meta.dirname, '../../fixtures', name), 'utf8').split('\n').filter(Boolean);
+
+const parseAll = (lines: string[]): RunEvent[] => {
+  const a = new CodexAdapter();
+  return lines.flatMap((l) => a.parseLine(l));
+};
+
+describe('CodexAdapter', () => {
+  it('command shape', () => {
+    const { cmd, args, files } = new CodexAdapter().buildCommand(spec);
+    expect(cmd).toBe('codex');
+    expect(args.slice(0, 2)).toEqual(['exec', '--json']);
+    const at = (flag: string) => args[args.indexOf(flag) + 1];
+    expect(at('-m')).toBe('gpt-6.1-sol');
+    expect(at('-s')).toBe('danger-full-access');
+    expect(args).toContain('--skip-git-repo-check');
+    expect(args).toContain('-C');
+    expect(at('-C')).toBe('/tmp/bif-run');
+    const configs = args.flatMap((a, i) => (args[i - 1] === '-c' ? [a] : []));
+    expect(configs).toContain('mcp_servers.bif.url="http://127.0.0.1:4317/mcp/tok_abc"');
+    expect(configs).toContain('mcp_servers.bif.tool_timeout_sec=86400');
+    expect(configs).toContain('mcp_servers.playwright.command="npx"');
+    expect(configs).toContain(
+      'mcp_servers.playwright.args=["@playwright/mcp@0.0.41", "--user-data-dir", "data/browser-profile"]',
+    );
+    expect(configs).toContain('mcp_servers.playwright.env={ A = "1" }');
+    expect(configs).toContain('mcp_servers.remote.url="http://x.test/mcp"');
+    expect(configs.some((c) => c.startsWith('mcp_servers.remote.type'))).toBe(false);
+    const prompt = args.at(-1)!;
+    expect(prompt.startsWith('<system>\nYou are a research worker.\n</system>')).toBe(true);
+    expect(prompt.endsWith('Walk the signup flow')).toBe(true);
+    expect(files).toEqual([]);
+  });
+
+  it('toToml renders inline values', () => {
+    expect(toToml('a"b')).toBe('"a\\"b"');
+    expect(toToml(3)).toBe('3');
+    expect(toToml(true)).toBe('true');
+    expect(toToml({ 'a-b': 1, 'c d': [1, 'x'] })).toBe('{ a-b = 1, "c d" = [1, "x"] }');
+  });
+
+  it('fixture parse → message/tool_call/done', () => {
+    const events = parseAll(fixture('codex-stream.jsonl'));
+    expect(events).toContainEqual({ t: 'message', text: 'done' });
+    expect(events).toContainEqual({
+      t: 'tool_call',
+      name: 'save_finding',
+      input: { claim: 'Acme hides pricing', subject: 'Acme', evidence: ['art_1'] },
+    });
+    expect(events.filter((e) => e.t === 'tool_call')).toHaveLength(1);
+    expect(events).toContainEqual({ t: 'tool_result', name: 'save_finding', ok: true });
+    expect(events).toContainEqual({ t: 'usage', inputTokens: 58852, outputTokens: 93 });
+    expect(events.at(-1)).toEqual({ t: 'done', exitCode: 0 });
+  });
+
+  it('error fixture → error + done(1)', () => {
+    const events = parseAll(fixture('codex-error.jsonl'));
+    expect(events).toContainEqual(expect.objectContaining({ t: 'error', rateLimited: false }));
+    expect(events.at(-1)).toEqual({ t: 'done', exitCode: 1 });
+  });
+
+  it('rate-limit detection', () => {
+    const a = new CodexAdapter();
+    expect(a.parseLine(JSON.stringify({ type: 'error', message: "You've hit your usage limit. Try again later." }))).toEqual([
+      expect.objectContaining({ t: 'error', rateLimited: true }),
+    ]);
+    expect(
+      a.parseLine(JSON.stringify({ type: 'turn.failed', error: { message: 'exceeded retry limit, last status: 429 Too Many Requests' } })),
+    ).toContainEqual(expect.objectContaining({ t: 'error', rateLimited: true }));
+    expect(a.parseLine('garbage')).toEqual([]);
+  });
+
+  it('getAdapter returns fresh adapters per provider', () => {
+    expect(getAdapter('codex').id).toBe('codex');
+    expect(getAdapter('claude').id).toBe('claude');
+    expect(getAdapter('opencode').id).toBe('opencode');
+    expect(getAdapter('codex')).not.toBe(getAdapter('codex'));
+    expect(getAdapter('codex', '/opt/codex').buildCommand(spec).cmd).toBe('/opt/codex');
+  });
+});

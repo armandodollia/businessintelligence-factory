@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a1d2f1-065b-7d03-8027-4f683abc4cd5"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll save the finding now.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"bif","tool":"save_finding","arguments":{"claim":"Acme hides pricing","subject":"Acme","evidence":["art_1"]},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"bif","tool":"save_finding","arguments":{"claim":"Acme hides pricing","subject":"Acme","evidence":["art_1"]},"result":{"content":[{"type":"text","text":"{\"ok\":true,\"findingId\":\"fnd_1\"}"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":58852,"cached_input_tokens":51968,"cache_write_input_tokens":0,"output_tokens":93,"reasoning_output_tokens":0}}
