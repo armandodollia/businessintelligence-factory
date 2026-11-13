@@ -21,6 +21,7 @@ import { knowledgeSettings, type KnowledgeSettings } from './config.js';
 import { entityNameKey } from './entityKeys.js';
 import { normalizeText } from './extract/normalize.js';
 import { KnowledgeNotFoundError, notFound, scopeFor, setItemScopes, type KnowledgeScope } from './scope.js';
+import { sameTree } from '../workspace/tree.js'; // KS-6
 
 const DAY_MS = 86_400_000;
 
@@ -491,12 +492,24 @@ export function applyReplacementByUser(store: Store, findingId: string, opts: Fa
   });
 }
 
-/** The user retracts a current fact: an applied `retract` observation without a task, and a `fact_retract` event. */
-export function retractFactByUser(store: Store, findingId: string, opts: FactActor = {}): Finding {
+/**
+ * The user retracts a current fact: an applied `retract` observation without a task, and a `fact_retract` event.
+ * KS-6: `duplicateOf` (another fact of the same tree, another lineage) retracts it as a duplicate of that
+ * fact — v1's form of merging two facts; recorded in the event (`afterJson.duplicateOf`), which writes a
+ * `duplicate-saved` outcome when the agent had answered a duplicate handshake with `new`.
+ */
+export function retractFactByUser(store: Store, findingId: string, opts: FactActor & { duplicateOf?: string } = {}): Finding {
   return store.transaction(() => {
     const f = getFact(store, findingId);
     const lifecycle = f.lifecycle ?? 'current';
     if (lifecycle !== 'current') throw new FactActionError(`finding '${f.id}' is ${lifecycle}; only a current fact can be retracted`, 409);
+    // --- KS-6: retract as a duplicate of another fact of the same tree ---
+    if (opts.duplicateOf !== undefined) {
+      const other = store.findings.get(opts.duplicateOf);
+      if (!other || !sameTree(store, f.workspaceId, other.workspaceId)) throw notFound('finding', opts.duplicateOf);
+      if ((other.lineageId ?? other.id) === (f.lineageId ?? f.id)) throw new FactActionError('a fact cannot duplicate its own lineage', 400);
+    }
+    // --- end KS-6 ---
     const now = new Date().toISOString();
     const o = addObservation(store, {
       workspaceId: f.workspaceId, finding: f, kind: 'retract', status: 'applied', appliedAt: now,
@@ -510,7 +523,7 @@ export function retractFactByUser(store: Store, findingId: string, opts: FactAct
       targetType: 'finding',
       targetId: f.id,
       beforeJson: { lifecycle },
-      afterJson: { lifecycle: 'retracted', observationId: o.id },
+      afterJson: { lifecycle: 'retracted', observationId: o.id, ...(opts.duplicateOf !== undefined ? { duplicateOf: opts.duplicateOf } : {}) },
       ...(opts.reason ? { reason: opts.reason } : {}),
     });
     return retracted;

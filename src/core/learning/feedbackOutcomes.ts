@@ -7,13 +7,16 @@
  *   `recordOverrideOutcome` (`user-rejected`, `weak-review`, `confirmed`);
  * - `proposal_reject` → `recordUnitProposalRejected` (`user-rejected`);
  * - `fact_retract` / `fact_replacement_accept` → `factOutcomesFromFeedback` (KS-2: `user-rejected` on
- *   the retracted version, `changed` on the version an accepted update replaced).
+ *   the retracted version, `changed` on the version an accepted update replaced);
+ * - `fact_retract` with `duplicateOf` / `entity_merge` → `duplicateSavedFromFeedback` (KS-6:
+ *   `duplicate-saved` on a fact saved as `new` against a duplicate handshake).
  * The core primitives (`setIncludeInSynthesis`, `setOutputInclude`, `rejectUnitProposal`) write no
  * outcome, so an action never writes one twice. Listeners run inside the action's transaction.
  */
 import { onFeedback, type FeedbackEvent } from '../feedback/events.js';
 import type { Store } from '../store/db.js';
 import { factOutcomesFromFeedback } from '../knowledge/facts.js'; // KS-2
+import { duplicateSavedFromFeedback } from '../knowledge/outcomes.js'; // KS-6
 import { recordOverrideOutcome, recordUnitProposalRejected, type OutputKind } from './outcomes.js';
 import type { DecisionOutcome } from './types.js';
 
@@ -34,7 +37,12 @@ export function outcomesFromFeedback(store: Store, event: FeedbackEvent): Decisi
     });
   }
   // Knowledge store KS-2: human fact actions (retract → `user-rejected`; accepted update → `changed`).
-  if (event.kind === 'fact_retract' || event.kind === 'fact_replacement_accept') return factOutcomesFromFeedback(store, event);
+  // KS-6: + `duplicate-saved` for a retraction as a duplicate, or an entity merge, that reveals a
+  // handshake the agent answered `new`.
+  if (event.kind === 'fact_retract' || event.kind === 'fact_replacement_accept') {
+    return [...factOutcomesFromFeedback(store, event), ...duplicateSavedFromFeedback(store, event)];
+  }
+  if (event.kind === 'entity_merge') return duplicateSavedFromFeedback(store, event);
   if (event.kind === 'proposal_reject') {
     const proposal = store.unitProposals.get(event.targetId);
     if (!proposal) return [];

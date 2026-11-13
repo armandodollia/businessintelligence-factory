@@ -5,7 +5,9 @@ import type { Decision, InterviewTurn, Rating, UserRequest } from '../types.js';
 // Learning loop WP-A: human feedback lines (request answers, interview turns, feedback events).
 import { listFeedback, type FeedbackEvent } from '../feedback/events.js';
 import { descendants, rootOf } from '../workspace/tree.js';
-import { itemIsUploadDerived } from '../knowledge/provenance.js'; // KS-2
+import { evidenceOf as recordEvidenceOf, itemIsUploadDerived } from '../knowledge/provenance.js'; // KS-2 (+ KS-6)
+import { runIsUploadExposed } from '../knowledge/retrievalLog.js'; // KS-6
+import { knowledgeRepos } from '../store/repos.js'; // KS-6
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
@@ -149,7 +151,8 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   const { store } = deps;
   const ratings = store.ratings.list({ workspaceId });
   const decisions = store.decisions.list({ workspaceId });
-  const uploads = includeUploads ? undefined : uploadExclusionSet(store); // KS-2: + materialized / resolved flags
+  // KS-2: + materialized / resolved flags; KS-6: + upload-exposed runs and what they produced.
+  const uploads = includeUploads ? undefined : exportExclusion(store);
 
   const judgments = new Map<string, Decision[]>();
   for (const d of decisions) {
@@ -172,6 +175,7 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   const lines: string[] = [];
   for (const decision of decisions) {
     if (isReuseRecord(decision)) continue;
+    if (uploads?.runExposed(decision.agentRunId)) continue; // KS-6: a judgment of an upload-exposed run
     if (uploads && expandedRefs(store, decision, taskEvidenceOf).some((id) => uploads.has(id))) continue;
     if (uploads && citedDecisionsLinkUpload(store, decision, uploads, taskEvidenceOf)) continue; // WP-A
     if (isSuperseded(store, primarySubject(decision))) continue;
@@ -197,6 +201,7 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
     lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}) }));
   }
   lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf));
+  lines.push(...knowledgeLines(store, workspaceId, uploads)); // KS-6
   return lines.length ? `${lines.join('\n')}\n` : '';
 }
 
@@ -213,6 +218,7 @@ function citedDecisionsLinkUpload(store: Store, d: Decision, uploads: Set<string
   for (const m of JSON.stringify([d.refs, d.payload ?? null]).matchAll(DECISION_ID)) {
     const cited = m[0] === d.id ? undefined : store.decisions.get(m[0]);
     if (cited && expandedRefs(store, cited, taskEvidenceOf).some((id) => uploads.has(id))) return true;
+    if (cited && uploads instanceof ExportExclusion && uploads.runExposed(cited.agentRunId)) return true; // KS-6
   }
   return false;
 }
@@ -279,11 +285,14 @@ function firstUploadAt(store: Store, workspaceId: string, uploads: Set<string>):
 function humanFeedbackLines(
   store: Store,
   workspaceId: string,
-  uploads: Set<string> | undefined,
+  uploads: ExportExclusion | undefined,
   taskEvidenceOf: (id: string) => string[],
 ): string[] {
   const linked = (d: Decision) =>
-    !!uploads && (expandedRefs(store, d, taskEvidenceOf).some((id) => uploads.has(id)) || citedDecisionsLinkUpload(store, d, uploads, taskEvidenceOf));
+    !!uploads &&
+    (uploads.runExposed(d.agentRunId) || // KS-6: written by (or about the output of) an upload-exposed run
+      expandedRefs(store, d, taskEvidenceOf).some((id) => uploads.has(id)) ||
+      citedDecisionsLinkUpload(store, d, uploads, taskEvidenceOf));
   const lines: string[] = [];
 
   for (const request of store.userRequests.list({ workspaceId })) {
@@ -328,6 +337,7 @@ function turnRestsOnUpload(
   if (linked(pseudoDecision(workspaceId, undefined, [], { text: turn.text }))) return true;
   if (turn.role !== 'agent') return false;
   if (uploadSince !== undefined && turn.createdAt >= uploadSince) return true;
+  if (turn.agentRunId && linked(pseudoDecision(workspaceId, turn.agentRunId, [], null))) return true; // KS-6: exposed run
   return !!turn.agentRunId && runRestsOnUpload(turn.agentRunId);
 }
 
@@ -390,3 +400,128 @@ export function uploadExclusionSet(store: Store): Set<string> {
   return new UploadExclusionSet(store, uploadIds(store));
 }
 // --- end knowledge store KS-2 ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-6 (design §12 "Upload exposure", §13): a run that was SHOWN upload-derived text —
+// by a read tool or its assembled prompt (`runIsUploadExposed`) — is upload-exposed, even when it cited
+// nothing. By default (unless `includeUploads`) the export leaves out:
+// - every judgment of an exposed run (decisions, and the feedback events / requests / interview turns
+//   tied to that run);
+// - what such a run's TASK produced: the task itself (so the review and deliverable decisions of the
+//   task, whose text may carry what the exposed run read) and the task's outputs (findings,
+//   recommendations, personas, competitors, hypotheses), so a later decision resting on one of them
+//   is left out like a decision resting on an upload. Records are resolved through what they cite
+//   (`provenance.evidenceOf`: a recommendation's findings, ...).
+// New lines: `{type: 'retrieval_event', retrievalEvent, uses}` and `{type: 'fact_observation',
+// observation}`, under the same rules (see `knowledgeLines`).
+
+/** `UploadExclusionSet` plus upload exposure: `has` also answers for exposed tasks and their outputs. */
+class ExportExclusion extends UploadExclusionSet {
+  private exposedRuns?: Set<string>;
+  private exposedIds?: Set<string>;
+  private readonly exposedMemo = new Map<string, boolean>();
+  constructor(
+    private readonly exportStore: Store,
+    uploads: Set<string>,
+  ) {
+    super(exportStore, uploads);
+  }
+
+  private load(): { runs: Set<string>; ids: Set<string> } {
+    if (this.exposedRuns && this.exposedIds) return { runs: this.exposedRuns, ids: this.exposedIds };
+    const { runs, ids } = uploadExposure(this.exportStore);
+    this.exposedRuns = runs;
+    this.exposedIds = ids;
+    return { runs, ids };
+  }
+
+  /** The agent run was shown upload-derived text. */
+  runExposed(agentRunId: string | undefined): boolean {
+    return !!agentRunId && this.load().runs.has(agentRunId);
+  }
+
+  /** Exposed task, an output of one, or a record citing one (resolved like upload provenance). */
+  exposedItem(id: string, seen: Set<string> = new Set()): boolean {
+    const memo = this.exposedMemo.get(id);
+    if (memo !== undefined) return memo;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const { ids, runs } = this.load();
+    let v = ids.has(id) || runs.has(id);
+    if (!v) v = (recordEvidenceOf(this.exportStore, id) ?? []).some((e) => this.exposedItem(e, seen));
+    this.exposedMemo.set(id, v);
+    return v;
+  }
+
+  override has(id: string): boolean {
+    return super.has(id) || this.exposedItem(id);
+  }
+}
+
+/** What the export excludes by (unless `includeUploads`): uploads, upload-derived items, upload exposure. */
+export function exportExclusion(store: Store): ExportExclusion {
+  return new ExportExclusion(store, uploadIds(store));
+}
+
+/**
+ * Upload-exposed agent runs (any tree), their tasks and the outputs of those tasks. Only runs that
+ * have a logged read can be exposed (reads and prompt sections are logged before they are served).
+ */
+export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<string>; ids: Set<string> } {
+  const candidates = store.db
+    .prepare('SELECT DISTINCT agent_run_id AS r FROM retrieval_events WHERE agent_run_id IS NOT NULL')
+    .all() as Array<{ r: string }>;
+  const runs = new Set(candidates.map((c) => c.r).filter((r) => runIsUploadExposed(store, r)));
+  const tasks = new Set<string>();
+  for (const r of runs) {
+    const run = store.agentRuns.get(r);
+    if (run?.taskId) tasks.add(run.taskId);
+    const logged = store.db.prepare('SELECT DISTINCT task_id AS t FROM retrieval_events WHERE agent_run_id = ? AND task_id IS NOT NULL').all(r) as Array<{ t: string }>;
+    for (const { t } of logged) tasks.add(t);
+  }
+  const ids = new Set<string>(tasks);
+  for (const t of tasks) {
+    for (const x of [
+      ...store.findings.list({ taskId: t }),
+      ...store.recommendations.list({ taskId: t }),
+      ...store.personas.list({ taskId: t }),
+      ...store.competitors.list({ taskId: t }),
+      ...store.symptomHypotheses.list({ taskId: t }),
+    ]) ids.add(x.id);
+  }
+  return { runs, tasks, ids };
+}
+
+/**
+ * Knowledge lines of the export (after the human feedback lines), for the workspace's rows:
+ * - `{type: 'retrieval_event', retrievalEvent, uses}`: every logged read (query redacted at write
+ *   time) with the uses its results got (`retrieval_uses`). Left out by default when the read was
+ *   flagged upload-derived, when any returned id is upload-derived or tied to upload exposure now, or
+ *   when its run is upload-exposed (its query is that run's text).
+ * - `{type: 'fact_observation', observation}`: every create / confirm / replace / retract
+ *   observation. Left out by default when it is upload-derived (its fact or any cited artifact), its
+ *   prior version is, or its run or task is upload-exposed.
+ */
+function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclusion | undefined): string[] {
+  const k = knowledgeRepos(store);
+  const lines: string[] = [];
+  for (const ev of k.retrievalEvents.list({ workspaceId })) {
+    if (uploads) {
+      if (ev.uploadDerived || uploads.runExposed(ev.agentRunId)) continue;
+      if (ev.taskId && uploads.exposedItem(ev.taskId)) continue;
+      if (ev.resultIds.some((r) => uploads.has(r.id))) continue;
+    }
+    const uses = k.retrievalUses.list({ retrievalEventId: ev.id }).map((u) => ({ itemId: u.itemId, usedByKind: u.usedByKind, usedById: u.usedById }));
+    lines.push(JSON.stringify({ type: 'retrieval_event', retrievalEvent: ev, uses }));
+  }
+  for (const o of k.factObservations.list({ workspaceId })) {
+    if (uploads) {
+      if (uploads.runExposed(o.agentRunId) || (o.taskId && uploads.exposedItem(o.taskId))) continue;
+      if (uploads.has(o.id) || uploads.has(o.findingId) || (o.priorFindingId && uploads.has(o.priorFindingId))) continue;
+      if (o.evidence.some((e) => uploads.has(e))) continue;
+    }
+    lines.push(JSON.stringify({ type: 'fact_observation', observation: o }));
+  }
+  return lines;
+}
+// --- end knowledge store KS-6 ---------------------------------------------------------------------

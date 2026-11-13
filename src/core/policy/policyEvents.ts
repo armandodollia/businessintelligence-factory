@@ -103,6 +103,8 @@ export type PolicyEventFilter = {
   since?: string;
   /** Newest `limit` events (still returned oldest first). */
   limit?: number;
+  /** KS-6: leave out events with these `site` values. */
+  excludeSites?: readonly string[];
 };
 
 /**
@@ -131,6 +133,10 @@ export function listPolicyEvents(store: Store, filter: PolicyEventFilter): Polic
     where.push('created_at >= ?');
     params.push(filter.since);
   }
+  if (filter.excludeSites?.length) {
+    where.push(`(site IS NULL OR site NOT IN (${filter.excludeSites.map(() => '?').join(', ')}))`);
+    params.push(...filter.excludeSites);
+  }
   let sql = `SELECT * FROM policy_events WHERE ${where.join(' AND ')} ORDER BY created_at DESC, rowid DESC`;
   if (filter.limit !== undefined) {
     sql += ' LIMIT ?';
@@ -142,13 +148,14 @@ export function listPolicyEvents(store: Store, filter: PolicyEventFilter): Polic
 /** The role's most recent denials (denied approvals, blocks) in the workspace's business tree, newest first. */
 export function recentPolicyDenials(
   store: Store,
-  opts: { workspaceId: string; role: Role; limit?: number },
+  opts: { workspaceId: string; role: Role; limit?: number; excludeSites?: readonly string[] },
 ): PolicyEvent[] {
   return listPolicyEvents(store, {
     workspaceId: opts.workspaceId,
     role: opts.role,
     kinds: DENIAL_KINDS,
     limit: opts.limit ?? 5,
+    ...(opts.excludeSites ? { excludeSites: opts.excludeSites } : {}),
   }).reverse();
 }
 
@@ -163,7 +170,8 @@ const clip = (s: string, n: number) => {
  * string when there are none.
  */
 export function policyDenialsSection(store: Store, workspaceId: string, role: Role, limit = 5): string {
-  const denials = recentPolicyDenials(store, { workspaceId, role, limit });
+  // KS-6: out-of-tree knowledge blocks are never shown to agents (see `KNOWLEDGE_BLOCK_SITE`).
+  const denials = recentPolicyDenials(store, { workspaceId, role, limit, excludeSites: [KNOWLEDGE_BLOCK_SITE.out_of_tree] });
   if (!denials.length) return '';
   const lines = denials.map((d) => {
     const what = d.kind === 'blocked' ? 'blocked' : 'approval denied';
@@ -228,6 +236,33 @@ export function recordPolicyEventsFromBus(
     }
   } else if (e.type === 'tool_call' && !e.ok && e.error && ROLE_SCOPE.test(e.error)) {
     out.push(recordPolicyEvent(store, { ...base(e.agentRunId, e.workspaceId), kind: 'blocked', action: e.tool, detail: e.error }));
+  } else if (e.type === 'policy_blocked') {
+    out.push(recordPolicyEvent(store, knowledgeBlockedEvent(e, base))); // knowledge store KS-6
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-6 (design §9, §12, §13): a knowledge read that named an id outside the caller's
+// reach (outside the reviewer's / escalation's review slice, or of another business tree) is a
+// blocked attempt. `site` carries the reason (`knowledge:out_of_slice` | `knowledge:out_of_tree`).
+// The agent was answered "not found" exactly as for an unknown id, so out-of-tree blocks are never
+// shown back to agents (`policyDenialsSection`): the line would confirm that the id exists elsewhere.
+
+export const KNOWLEDGE_BLOCK_SITE = { out_of_slice: 'knowledge:out_of_slice', out_of_tree: 'knowledge:out_of_tree' } as const;
+
+function knowledgeBlockedEvent(
+  e: Extract<BusEvent, { type: 'policy_blocked' }>,
+  base: (agentRunId: string, workspaceId: string, taskId?: string) => NewPolicyEvent,
+): NewPolicyEvent {
+  const ev: NewPolicyEvent = e.agentRunId !== undefined ? base(e.agentRunId, e.workspaceId, e.taskId) : { workspaceId: e.workspaceId, kind: 'blocked' };
+  if (e.agentRunId === undefined && e.taskId !== undefined) ev.taskId = e.taskId;
+  return {
+    ...ev,
+    kind: 'blocked',
+    action: e.tool,
+    site: KNOWLEDGE_BLOCK_SITE[e.reason],
+    detail: e.reason === 'out_of_slice' ? `${e.itemId} is outside the task's review slice` : `${e.itemId} belongs to another business tree`,
+  };
+}
+// --- end knowledge store KS-6 --------------------------------------------------------------------

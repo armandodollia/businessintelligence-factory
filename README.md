@@ -241,6 +241,17 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,
   logged before the run starts — is recorded in `retrieval_events`; a run shown upload-derived text
   counts as upload-exposed.
+- **Knowledge tracking (knowledge store).** When a run saves something citing ids it was shown by a
+  read, those ids are marked used (`retrieval_uses`); hit rate = reads with a used result. Living facts
+  write decision outcomes once each (`confirmed`, `changed`, `retracted`, `stale`, `user-rejected`, and
+  `duplicate-saved` when you merge away a fact the agent saved as `new` after the duplicate check showed it
+  a match); the scheduled "what changed" outcomes now come from fact lineage, with text matching only
+  against facts saved as `new`. Blocked knowledge reads (outside a reviewer's slice, or another business's
+  ids) are policy events. The export leaves out by default every judgment of a run that was shown upload
+  text, even if it cited none, and adds retrieval events and fact observations under the same rules.
+  `GET /api/workspaces/:id/knowledge/metrics` (store size, freshness, hit and zero-result rates, retrieved /
+  used tokens per role, task type, prompt version and model, share of input tokens that was retrieved
+  knowledge) and `GET /api/workspaces/:id/knowledge/signals` (learning signals per role).
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.

@@ -45,6 +45,7 @@ import { KnowledgeNotFoundError, scopeFor } from '../knowledge/scope.js';
 import { knowledgeRepos } from '../store/repos.js';
 import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent } from './events.js';
 import { applyReplacementByUser } from '../knowledge/facts.js'; // KS-2
+import { mergeDuplicateSaves } from '../knowledge/outcomes.js'; // KS-6
 import { targetProvenance } from './provenance.js';
 import { UNIT_PROPOSAL_CRITERION } from './signals.js';
 
@@ -593,6 +594,8 @@ export function mergeEntitiesAsUser(store: Store, survivorId: string, loserId: s
       const repo = knowledgeRepos(store).entities;
       const before = { survivor: repo.get(survivorId), loser: repo.get(loserId) };
       const scope = opts.workspaceId !== undefined ? scopeFor(store, opts.workspaceId) : undefined;
+      // KS-6: handshake answers the merge reveals as duplicate saves (computed before facts are re-pointed).
+      const duplicateSaved = before.survivor && before.loser ? mergeDuplicateSaves(store, survivorId, loserId) : [];
       const result = mergeEntities(store, survivorId, loserId, actor(opts), scope ? { scope } : {});
       recordFeedback(store, {
         workspaceId: result.survivor.workspaceId,
@@ -610,6 +613,7 @@ export function mergeEntitiesAsUser(store: Store, survivorId: string, loserId: s
           mergedIntoId: result.survivor.id,
           aliasUploadOnly: result.aliasUploadOnly,
           swappedNames: result.swappedNames,
+          ...(duplicateSaved.length ? { duplicateSaved } : {}), // KS-6
         },
         ...(opts.reason ? { reason: opts.reason } : {}),
       });
