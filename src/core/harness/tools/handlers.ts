@@ -20,6 +20,9 @@ import { ingestorFor } from '../../knowledge/ingest.js';
 import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
 // knowledge store KS-3
 import { findingEntity, linkFindingRelations, peekFindingEntity, relinkFinding } from '../../knowledge/entityLinks.js';
+// knowledge store KS-4: read tools
+import { knowledgeRead, type KnowledgeReadInput, type KnowledgeReadTool } from '../../knowledge/tools.js';
+import type { ReviewSlice } from '../../knowledge/readCommon.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -77,10 +80,6 @@ export type RunOutputs = {
   responses: ReviewResponse[];
 };
 
-const READ_TEXT_LIMIT = 200_000;
-const READ_IMAGE_LIMIT = 5 * 1024 * 1024;
-const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-ndjson)|.*\+xml$|.*\+json$)/i;
-const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/i;
 
 /** Tools that are judgment calls recorded by the dispatcher when implemented by an extra handler. */
 const EXTRA_DECISION_KIND: Partial<Record<ToolName, Decision['kind']>> = {
@@ -131,6 +130,23 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       await ingestorFor({ store, artifacts, config: deps.config }).ensure(artifactId);
     },
   };
+
+  // Knowledge store KS-4: every read tool goes through `knowledgeRead`; reviewer and escalation runs
+  // are limited to their task's review slice (no task: an empty slice).
+  async function knowledgeReadTool(ctx: RunContext, tool: KnowledgeReadTool, input: KnowledgeReadInput): Promise<ToolResult> {
+    let slice: ReviewSlice | undefined;
+    if (ctx.role === 'reviewer' || ctx.role === 'escalation') {
+      const task = taskOf(ctx);
+      if (task) {
+        // Imported lazily: research/reviewLoop imports this module.
+        const { reviewSlice } = await import('../../research/reviewLoop.js');
+        slice = reviewSlice({ store, config: deps.config }, task);
+      } else slice = { ids: new Set(), artifactIds: new Set() };
+    }
+    const r = knowledgeRead({ store, config: deps.config, events, files: artifacts, ...(slice ? { slice } : {}) }, ctx, tool, input);
+    if (!r.ok) return fail(r.error);
+    return r.images ? { ok: true, data: r.data, images: r.images } : okData(r.data);
+  }
 
   function taskOf(ctx: RunContext): Task | undefined {
     if (!ctx.taskId) return undefined;
@@ -287,22 +303,28 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       return r.ok ? okData(r.value) : fail(r.error);
     },
 
+    // --- Knowledge store KS-4: read tools (knowledge/tools.ts; design §9, §12, §13) ---
+    // Scoped, budgeted, fenced, redacted and logged (one retrieval_events row per call). read_artifact
+    // no longer serves raw unfenced text: its modes are outline / text / image / raw (fenced, paged).
     async read_artifact(ctx, input: ToolInput<'read_artifact'>) {
-      const meta = store.artifacts.get(input.artifact_id);
-      // Artifacts of any workspace in the same business tree are readable; other trees are not.
-      if (!meta || artifacts.exists(ctx.workspaceId, [meta.id]).length) return fail(`artifact '${input.artifact_id}' not found`);
-      const { artifact, bytes } = artifacts.read(meta.id);
-      const base = artifact.mime.split(';')[0]!.trim();
-      if (TEXT_MIME.test(base)) {
-        const text = bytes.toString('utf8');
-        const truncated = text.length > READ_TEXT_LIMIT;
-        return okData({ artifact, text: truncated ? text.slice(0, READ_TEXT_LIMIT) : text, truncated });
-      }
-      if (IMAGE_MIME.test(base) && bytes.byteLength <= READ_IMAGE_LIMIT) {
-        return { ok: true, data: { artifact }, images: [{ data: bytes.toString('base64'), mimeType: base }] };
-      }
-      return okData({ artifact, note: `binary content (${bytes.byteLength} bytes, ${base}) not inlined` });
+      return knowledgeReadTool(ctx, 'read_artifact', input);
     },
+    async read_workspace(ctx, input: ToolInput<'read_workspace'>) {
+      return knowledgeReadTool(ctx, 'read_workspace', input);
+    },
+    async search(ctx, input: ToolInput<'search'>) {
+      return knowledgeReadTool(ctx, 'search', input);
+    },
+    async get_card(ctx, input: ToolInput<'get_card'>) {
+      return knowledgeReadTool(ctx, 'get_card', input);
+    },
+    async expand(ctx, input: ToolInput<'expand'>) {
+      return knowledgeReadTool(ctx, 'expand', input);
+    },
+    async list_changes(ctx, input: ToolInput<'list_changes'>) {
+      return knowledgeReadTool(ctx, 'list_changes', input);
+    },
+    // --- end KS-4 ---
 
     async save_finding(ctx, input: ToolInput<'save_finding'>) {
       const task = taskOf(ctx);

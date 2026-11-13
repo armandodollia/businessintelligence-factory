@@ -17,6 +17,7 @@ import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDispu
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 import { defaultConfig } from '../config/schema.js'; // KS-2
 import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
+import type { ReviewSlice } from '../knowledge/readCommon.js'; // KS-4
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -471,3 +472,23 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
     return finish(deps, id, 'failed', round);
   }
 }
+
+// --- knowledge store KS-4: the reviewer slice (design §9 "reviewer", §12) -------------------------
+/**
+ * What a reviewer (or escalation) run of `task` may read through `expand` / `read_artifact`: the
+ * task's current outputs, the findings its recommendations / hypotheses cite, the facts its outputs
+ * replace, confirm or retract (`ReviewFactContext.factIds`), and the evidence artifacts of all of these
+ * (`reviewContext().evidence`) with their chunks. Everything else answers "not found" and is a
+ * blocked attempt (`policy_blocked`). The dispatcher enforces it (harness/tools/handlers.ts).
+ */
+export function reviewSlice(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): ReviewSlice {
+  const { store } = deps;
+  const context = reviewContext(deps, task);
+  const outputs = taskOutputs(store, task);
+  const current = currentOutputIds(store, task, outputs);
+  const ids = new Set<string>([...current, ...(context.knowledge?.factIds ?? []), ...context.evidence]);
+  for (const r of outputs.recommendations) if (current.has(r.id)) for (const f of r.findingIds) ids.add(f);
+  for (const h of outputs.hypotheses) if (current.has(h.id)) for (const e of h.evidence) ids.add(e);
+  return { ids, artifactIds: new Set(context.evidence) };
+}
+// --- end KS-4 -------------------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import { ArtifactStore } from '../../src/core/evidence/artifacts.js';
 import type { RunContext } from '../../src/core/harness/tokens.js';
 import { createToolHandlers } from '../../src/core/harness/tools/handlers.js';
 import { interviewToolHandlers } from '../../src/core/interview/interview.js';
+import { ingestorFor } from '../../src/core/knowledge/ingest.js';
 import { uploadInternal } from '../../src/core/internal/uploads.js';
 import { proposePromptPatch, proposeWeights } from '../../src/core/scoring/calibration.js';
 import { exportTrainingData } from '../../src/core/scoring/export.js';
@@ -193,9 +194,14 @@ describe('interviewer can read uploads', () => {
   it('read_artifact is in the interviewer role and returns the upload', async () => {
     const t = setup();
     const up = uploadInternal('ws_a', { name: 'kpis.csv', bytes: new TextEncoder().encode('renewals,-12%'), mime: 'text/csv' }, t);
-    const r = await t.handle(ctx('interviewer', t), 'read_artifact', { artifact_id: up.id });
+    await ingestorFor(t).idle(); // KS-1: uploads are extracted in the background
+    const r = await t.handle(ctx('interviewer', t), 'read_artifact', { artifact_id: up.id, mode: 'text' });
     expect(r.ok).toBe(true);
-    expect((r as { data: { text: string } }).data.text).toContain('renewals,-12%');
+    // KS-4: the extracted text, fenced; the read is logged and flags the run as upload-exposed.
+    const data = (r as { data: { items: Array<{ text: string }>; upload?: boolean } }).data;
+    expect(data.items[0]!.text).toContain('renewals,-12%');
+    expect(data.items[0]!.text.startsWith(`<<<EVIDENCE ${up.id}`)).toBe(true);
+    expect(data.upload).toBe(true);
   });
 });
 

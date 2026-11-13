@@ -49,6 +49,21 @@ export type BusEvent =
       retrievalEventId: string;
       agentRunId?: string;
       taskId?: string;
+    }
+  // --- knowledge store KS-4 ---
+  | {
+      /**
+       * A knowledge read named an id outside the caller's reach: outside the reviewer's / escalation's
+       * review slice, or of another business tree (design §9, §12). The caller got the same "not found"
+       * as for an unknown id. KS-6 persists it as a `policy_events` row (blocked attempt).
+       */
+      type: 'policy_blocked';
+      workspaceId: string;
+      agentRunId?: string;
+      taskId?: string;
+      tool: string;
+      itemId: string;
+      reason: 'out_of_slice' | 'out_of_tree';
     };
 
 export class AbortError extends Error {

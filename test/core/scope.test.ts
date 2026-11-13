@@ -97,8 +97,8 @@ describe('business tree', () => {
     });
     expect(r.ok).toBe(true);
     expect(artifacts.exists(t.product.id, [art.id])).toEqual([]);
-    // Reviewers in the grandchild can read it too.
-    const read = await handle(ctx(t.product.id, { role: 'reviewer' }), 'read_artifact', { artifact_id: art.id });
+    // Workers in the grandchild can read it too (KS-4: reviewers read only their task's review slice).
+    const read = await handle(ctx(t.product.id, { role: 'worker' }), 'read_artifact', { artifact_id: art.id });
     expect(read.ok).toBe(true);
   });
 
@@ -134,14 +134,13 @@ describe('business tree', () => {
     });
     const ok = await handle(ctx(t.product.id, { role: 'orchestrator' }), 'read_workspace', { workspace_id: t.company.id });
     if (!ok.ok) throw new Error(ok.error);
-    expect(ok.data).toMatchObject({
-      sourceWorkspaceId: t.company.id,
-      profile: { revenue: '10M' },
-      findings: [{ id: 'fnd_root', claim: 'Churn rose' }],
-      workspace: { scope: { level: 'company', name: 'Acme' } },
-    });
+    // KS-4: the node card plus counts (profile keys, not values; facts through search / get_card).
+    expect(ok.data).toMatchObject({ node: { id: t.company.id, level: 'company', scope: 'Acme' }, content_trust: 'untrusted' });
+    expect((ok.data as { lines: string[] }).lines).toEqual(expect.arrayContaining(['profile keys: revenue', expect.stringMatching(/^counts: facts 1 current/)]));
     const denied = await handle(ctx(t.product.id, { role: 'orchestrator' }), 'read_workspace', { workspace_id: t.other.id });
-    expect(denied).toMatchObject({ ok: false, error: expect.stringMatching(/not in this business tree/) });
+    expect(denied).toEqual({ ok: false, error: `workspace '${t.other.id}' not found` });
+    const unknown = await handle(ctx(t.product.id, { role: 'orchestrator' }), 'read_workspace', { workspace_id: 'ws_nope' });
+    expect(unknown).toEqual({ ok: false, error: `workspace 'ws_nope' not found` });
     const persona = await handle(ctx(t.product.id, { role: 'persona' }), 'read_workspace', { workspace_id: t.company.id });
     expect(persona.ok).toBe(false);
   });

@@ -71,12 +71,20 @@ describe('same-tree synthesis', () => {
     expect(unverified).toMatchObject({ ok: false, error: expect.stringMatching(/not verified.*fnd_unverified/) });
   });
 
-  it('read_workspace returns findings with their evidence ids', async () => {
+  // KS-4: read_workspace returns the node card plus counts, not every finding; facts come through search.
+  it('read_workspace returns the node card and counts; its facts are found with search', async () => {
     const t = setup();
     const r = await t.handle(ctx(t.division.id, { role: 'orchestrator' }), 'read_workspace', { workspace_id: t.company.id });
     if (!r.ok) throw new Error(r.error);
-    expect((r.data as { findings: unknown[] }).findings).toContainEqual(
-      expect.objectContaining({ id: 'fnd_parent', evidence: [t.art.id] }),
+    const card = r.data as { node: { id: string }; lines: string[] };
+    expect(card.node.id).toBe(t.company.id);
+    expect(card.lines.some((l) => /^counts: facts \d+ current/.test(l))).toBe(true);
+    expect(JSON.stringify(card)).not.toContain('fnd_parent');
+    const parentClaim = t.store.findings.get('fnd_parent')!.claim;
+    const s = await t.handle(ctx(t.division.id, { role: 'orchestrator' }), 'search', { query: parentClaim, kinds: ['fact'] });
+    if (!s.ok) throw new Error(s.error);
+    expect((s.data as { hits: Array<{ id: string; source?: string }> }).hits).toContainEqual(
+      expect.objectContaining({ id: 'fnd_parent', source: t.company.id }),
     );
   });
 });

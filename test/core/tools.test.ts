@@ -62,24 +62,29 @@ describe('role scope table', () => {
   it('matches the brief', () => {
     const base = ['log_decision', 'save_artifact', 'request_user_action', 'request_approval'];
     // Reviewers judge only the deliverable and its evidence: no read_workspace (final review A4).
-    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact']));
+    // KS-4: expand joins read_artifact, both limited to the task's review slice by the dispatcher.
+    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'expand']));
     expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback']));
     // KS-1: describe_artifact for worker, orchestrator, interviewer, synthesizer.
     expect(new Set(ROLE_TOOLS.interviewer)).toEqual(
-      new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact', 'describe_artifact']),
+      new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact', 'describe_artifact',
+        'search', 'get_card', 'expand']), // KS-4
     );
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
       new Set([
         ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
         'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis', 'describe_artifact',
         'confirm_finding', 'retract_finding', // knowledge store KS-2
+        'search', 'get_card', 'expand', 'list_changes', // KS-4
       ]),
     );
-    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace', 'read_artifact', 'describe_artifact']));
+    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(
+      new Set([...base, 'propose_tasks', 'read_workspace', 'read_artifact', 'describe_artifact', 'search', 'get_card', 'expand', 'list_changes']),
+    );
     expect(new Set(ROLE_TOOLS.synthesizer)).toEqual(
       new Set([
         ...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace', 'read_artifact',
-        'describe_artifact',
+        'describe_artifact', 'search', 'get_card', 'expand', 'list_changes', // KS-4
       ]),
     );
     for (const tools of Object.values(ROLE_TOOLS)) for (const t of tools) expect(TOOL_NAMES).toContain(t);
@@ -262,13 +267,15 @@ describe('tool handlers', () => {
     expect(png.ok).toBe(true);
     expect((await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain' })).ok).toBe(false);
 
-    const reviewer = ctx('reviewer');
-    const read = await handle(reviewer, 'read_artifact', { artifact_id: id });
-    expect(read).toMatchObject({ ok: true, data: { artifact: { id }, text: 'Pricing: $49/mo' } });
-    const img = await handle(reviewer, 'read_artifact', { artifact_id: (png as { data: { artifactId: string } }).data.artifactId });
-    expect(img).toMatchObject({ ok: true, images: [{ mimeType: 'image/png' }] });
-    const other = await handle(ctx('reviewer', { workspaceId: 'ws_b' }), 'read_artifact', { artifact_id: id });
+    // KS-4: read_artifact serves the extracted text fenced (mode text) — never raw unfenced bytes.
+    const read = await handle(c, 'read_artifact', { artifact_id: id, mode: 'text' });
+    expect(read).toMatchObject({ ok: true, data: { id, mode: 'text', content_trust: 'untrusted', items: [{ type: 'chunk', text: `<<<EVIDENCE ${id}\nPricing: $49/mo\n>>>` }] } });
+    const img = await handle(c, 'read_artifact', { artifact_id: (png as { data: { artifactId: string } }).data.artifactId });
+    expect(img).toMatchObject({ ok: true, images: [{ mimeType: 'image/png' }], data: { mode: 'image', description: expect.stringContaining('Pro plan') } });
+    const other = await handle(ctx('worker', { workspaceId: 'ws_b' }), 'read_artifact', { artifact_id: id });
     expect(other.ok).toBe(false);
+    // A reviewer reads only its task's review slice: without a task, nothing (same "not found").
+    expect(await handle(ctx('reviewer'), 'read_artifact', { artifact_id: id })).toEqual({ ok: false, error: `artifact '${id}' not found` });
     // Every role that reads evidence gets read_artifact, still scoped to the business tree.
     for (const role of ['worker', 'orchestrator', 'synthesizer', 'interviewer'] as const) {
       expect((await handle(ctx(role), 'read_artifact', { artifact_id: id })).ok).toBe(true);
@@ -454,7 +461,7 @@ describe('mcp server', () => {
     return client;
   }
 
-  it('tools/list for reviewer returns exactly its 3 tools', async () => {
+  it('tools/list for reviewer returns exactly its 4 tools', async () => {
     const s = setup();
     const tokens = new TokenRegistry(s.store);
     const app = new Hono();
@@ -462,7 +469,7 @@ describe('mcp server', () => {
     const reviewer = ctx('reviewer');
     const client = await connect(app, tokens.issue(reviewer));
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'submit_review']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['expand', 'log_decision', 'read_artifact', 'submit_review']);
     const review = tools.find((t) => t.name === 'submit_review')!;
     expect(review.inputSchema.type).toBe('object');
     expect(review.inputSchema.properties).toHaveProperty('score');
@@ -510,7 +517,7 @@ describe('mcp server', () => {
         requestInit: { headers: { authorization: `Bearer ${token}` } },
       }),
     );
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'submit_review']);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(['expand', 'log_decision', 'read_artifact', 'submit_review']);
     await client.close();
     for (const authorization of [undefined, 'Bearer tok_unknown', `Basic ${token}`]) {
       const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };

@@ -4,7 +4,7 @@ import { createEmailProvider, type EmailProvider } from '../identity/email.js';
 import { getIdentityHandler } from '../identity/identities.js';
 import { saveHypothesisHandler } from '../interview/hypotheses.js';
 import { saveCompetitorHandler } from '../market/competitors.js';
-import { proposeBusinessUnitHandler, readWorkspaceHandler } from '../workspace/businessMap.js';
+import { proposeBusinessUnitHandler } from '../workspace/businessMap.js';
 import { proposeTasksHandler } from './orchestrator.js';
 
 export type ResearchToolOptions = {
@@ -14,14 +14,13 @@ export type ResearchToolOptions = {
 
 /**
  * Section C tool handlers, to pass as (part of) `createToolHandlers({ extraHandlers })`:
- * `propose_tasks`, `get_identity`, `read_workspace`, `propose_business_unit`, `save_competitor`,
- * `save_hypothesis`.
+ * `propose_tasks`, `get_identity`, `propose_business_unit`, `save_competitor`, `save_hypothesis`.
+ * (`read_workspace` is a knowledge read tool since KS-4: harness/tools/handlers.ts.)
  */
 export function researchToolHandlers(opts: ResearchToolOptions = {}): Partial<Record<ToolName, ExtraToolHandler>> {
   let identity: ExtraToolHandler | undefined = opts.emailProvider ? getIdentityHandler(opts.emailProvider) : undefined;
   return {
     propose_tasks: proposeTasksHandler,
-    read_workspace: readWorkspaceHandler,
     propose_business_unit: proposeBusinessUnitHandler,
     save_competitor: saveCompetitorHandler,
     save_hypothesis: saveHypothesisHandler,

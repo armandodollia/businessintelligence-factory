@@ -19,34 +19,7 @@ import { ancestors, audiencesOf, children, createWorkspace, descendants, sameTre
 // ---------------------------------------------------------------------------
 // reading across the tree
 
-/** Read-only summary of a workspace: profile + findings (with their evidence artifact ids) + symptom titles. */
-export function workspaceSummary(store: Store, ws: Workspace) {
-  return {
-    workspace: {
-      id: ws.id,
-      name: ws.name,
-      sector: ws.sector,
-      scope: scopeOf(ws),
-      audiences: audiencesOf(ws),
-      ...(ws.parentWorkspaceId !== undefined && { parentWorkspaceId: ws.parentWorkspaceId }),
-    },
-    profile: store.profiles.get(ws.id)?.data ?? {},
-    findings: store.findings
-      .list({ workspaceId: ws.id })
-      .map((f) => ({ id: f.id, subject: f.subject, claim: f.claim, status: f.status, evidence: f.evidence })),
-    symptoms: store.symptoms.list({ workspaceId: ws.id }).map((s) => ({ id: s.id, kind: s.kind, title: s.title })),
-  };
-}
-
-/** `read_workspace({ workspace_id })`: any workspace of the caller's business tree; other trees are rejected. */
-export const readWorkspaceHandler: ExtraToolHandler = async (ctx, rawInput, deps) => {
-  const { workspace_id } = rawInput as ToolInput<'read_workspace'>;
-  const target = deps.store.workspaces.get(workspace_id);
-  if (!target || !sameTree(deps.store, ctx.workspaceId, workspace_id)) {
-    return { ok: false, error: `workspace '${workspace_id}' is not in this business tree` };
-  }
-  return { ok: true, data: { ...workspaceSummary(deps.store, target), sourceWorkspaceId: target.id } };
-};
+// `read_workspace` is a knowledge read tool since KS-4 (node card + counts: knowledge/cards.ts).
 
 const trunc = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 

@@ -86,6 +86,8 @@ export function describeEvent(e: BusEvent): string {
       return `task ${e.taskId} ${e.status}`;
     case 'retrieval': // knowledge store (KS-0)
       return `knowledge read ${e.retrievalEventId}`;
+    case 'policy_blocked': // knowledge store (KS-4)
+      return `knowledge read blocked: ${e.tool} ${e.itemId} (${e.reason === 'out_of_slice' ? 'outside the review slice' : 'outside this business'})`;
   }
 }
 

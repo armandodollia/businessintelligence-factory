@@ -1,0 +1,509 @@
+/**
+ * `search` (design §9, build plan KS-4): one function per kind over its FTS table, every query inside
+ * the caller's visibility predicate (tree isolation in SQL, design §12).
+ *
+ * Query handling: the agent's text is never passed to MATCH raw. Quoted phrases are kept, the rest is
+ * split into letter/digit tokens; each is quoted and they are joined with AND. Zero hits over all
+ * requested kinds → one retry with OR, flagged `relaxed`. Empty query with `entity_id` = browse by
+ * recency. Ranking inside a kind: bm25 with column weights, then scope order (own node, descendants,
+ * ancestors, rest), freshness and verified status, then row order — deterministic.
+ *
+ * Kinds: `fact` (findings_fts), `passage` (chunks_fts; the hit is reported under the first visible
+ * artifact holding the chunk — the canonical, else a visible duplicate), `artifact` (artifacts_fts;
+ * hits with the same bytes or the same text collapse), `entity` (entities_fts, trigram; a hit through
+ * a merged row reports the survivor and is flagged with `entityIsUploadOnly` of the row that matched),
+ * `record` (competitors, personas, symptoms, hypotheses, recommendations: v1 uses LIKE on their short
+ * text fields — an accepted v1 simplification, the records are few and short).
+ *
+ * Every hit is a line: id, title or snippet (≤ 200 chars; evidence snippets fenced), entity, source
+ * node (when not the caller's), flags (`unverified`, `stale`, `upload`, `history`), age in days.
+ */
+import type { Store } from '../store/db.js';
+import { knowledgeRepos } from '../store/repos.js';
+import type { Entity, Finding, RetrievalResultRef, TextChunk } from '../types.js';
+import { fenceEvidence, stripFences } from './trust.js';
+import { cursorKey } from './budget.js';
+import { getEntity } from './entities.js';
+import { factFreshness, isFactUsable } from './facts.js';
+import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
+import {
+  ageDays, artifactVisibleSql, factVisibleSql, pageOf, recordVisibleSql, usableOnly, visParams,
+  type ReadEnv, type ReadOutput,
+} from './readCommon.js';
+import { scopeRank, type KnowledgeScope, type ScopeMode } from './scope.js';
+import { chunkSnippet, servedLine, SNIPPET_MAX_CHARS } from './texts.js';
+import { factUsableSql, outputUsableSql } from './usable.js';
+
+export const SEARCH_KINDS = ['fact', 'passage', 'artifact', 'entity', 'record'] as const;
+export type SearchKind = (typeof SEARCH_KINDS)[number];
+
+export type SearchInput = {
+  query?: string;
+  kinds?: SearchKind[];
+  scope?: ScopeMode;
+  /** Narrows to that node's own view (any node of the tree). */
+  narrowed?: string;
+  entityId?: string;
+  includeUnverified?: boolean;
+  includeHistory?: boolean;
+  since?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export type SearchHit = {
+  kind: SearchKind;
+  id: string;
+  /** Record type for `record` hits (competitor, persona, symptom, strength, hypothesis, recommendation). */
+  type?: string;
+  title?: string;
+  /** Evidence text, fenced (`<<<EVIDENCE art_… … >>>`). */
+  snippet?: string;
+  /** Passage hits: the artifact the passage is served for. */
+  artifact_id?: string;
+  entity?: { id: string; name: string };
+  /** The item's home node, when it is not the caller's. */
+  source?: string;
+  flags?: string[];
+  age_days?: number;
+};
+
+/** Internal hit: the line plus what the log and ranking need. */
+type Ranked = { hit: SearchHit; refs: RetrievalResultRef[]; upload: boolean; score: number; rank: number; tie: number[]; key?: string };
+
+export const DEFAULT_LIMIT = 10;
+export const MAX_LIMIT = 50;
+const MAX_TERMS = 32;
+const POOL_FACTOR = 5;
+const TITLE_MAX = SNIPPET_MAX_CHARS;
+
+// ---------------------------------------------------------------------------
+// query building
+
+export type ParsedQuery = { terms: string[] };
+
+/** Quoted phrases kept whole, the rest split into letter/digit tokens (at most 32 terms). */
+export function parseQuery(query: string | undefined): ParsedQuery {
+  const terms: string[] = [];
+  const text = (query ?? '').normalize('NFKC');
+  const rest = text.replace(/"([^"]*)"/g, (_, p: string) => {
+    const words = p.match(/[\p{L}\p{N}]+/gu);
+    if (words?.length) terms.push(words.join(' '));
+    return ' ';
+  });
+  for (const w of rest.match(/[\p{L}\p{N}]+/gu) ?? []) terms.push(w);
+  return { terms: [...new Set(terms)].slice(0, MAX_TERMS) };
+}
+
+/** FTS5 MATCH expression: every term quoted (no operators reach FTS), joined by AND or OR. */
+export function matchExpr(terms: readonly string[], op: 'AND' | 'OR', column?: string): string {
+  const body = terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(` ${op} `);
+  return column ? `${column} : (${body})` : body;
+}
+
+// ---------------------------------------------------------------------------
+// per-kind queries
+
+type Ctx = {
+  env: ReadEnv;
+  view: KnowledgeScope;
+  mode: ScopeMode;
+  input: SearchInput;
+  limit: number;
+  /** Entity group (survivor + merged rows) when `entity_id` is given. */
+  group?: string[];
+  usableOnly: boolean;
+};
+
+function sourceOf(c: Ctx, ws: string): string | undefined {
+  return ws === c.env.scope.workspaceId ? undefined : ws;
+}
+
+function entityGroup(store: Store, survivorId: string): string[] {
+  const rows = store.db
+    .prepare(
+      `WITH RECURSIVE grp(id) AS (SELECT ? UNION SELECT e.id FROM entities e JOIN grp ON e.merged_into_id = grp.id) SELECT id FROM grp`,
+    )
+    .all(survivorId) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
+/** Best scope rank over an item's visible scope rows (facts / artifacts) or its workspace (records). */
+function bestRank(c: Ctx, kind: 'fact' | 'artifact', id: string, home: string): number {
+  const rows = knowledgeRepos(c.env.store).itemScopes.list({ itemKind: kind, itemId: id });
+  const ranks = rows.map((r) => scopeRank(c.view, r.workspaceId));
+  return ranks.length ? Math.min(...ranks) : scopeRank(c.view, home);
+}
+
+/** Entity reference shown on a hit (survivor name), with its refs and upload status. */
+function entityLabel(store: Store, scope: KnowledgeScope, id: string | undefined): { label?: { id: string; name: string }; refs: RetrievalResultRef[]; upload: boolean } {
+  if (!id) return { refs: [], upload: false };
+  try {
+    const e = getEntity(store, scope, id);
+    return {
+      label: { id: e.id, name: servedLine(store, scope.workspaceId, e.name, 120) },
+      refs: [{ id: e.id, kind: 'entity' }],
+      upload: entityIsUploadOnly(store, e.id),
+    };
+  } catch {
+    return { refs: [], upload: false };
+  }
+}
+
+function factFilter(c: Ctx): string {
+  if (c.usableOnly) return factUsableSql('f');
+  const current = c.input.includeUnverified
+    ? `(f.lifecycle = 'current' AND COALESCE(f.status, 'pending') NOT IN ('superseded', 'failed'))`
+    : factUsableSql('f');
+  return c.input.includeHistory ? `(${current} OR f.lifecycle IN ('replaced', 'retracted'))` : current;
+}
+
+function factHit(c: Ctx, f: Finding, score: number): Ranked {
+  const { store } = c.env;
+  const flags: string[] = [];
+  const usable = isFactUsable(f);
+  const history = f.lifecycle === 'replaced' || f.lifecycle === 'retracted';
+  if (history) flags.push('history');
+  else if (!usable) flags.push('unverified');
+  const fresh = factFreshness(store, f, c.env.config, c.env.now);
+  if (!history && fresh.stale) flags.push('stale');
+  const ent = entityLabel(store, c.env.scope, f.entityId);
+  const upload = f.uploadDerived === true || ent.upload;
+  if (upload) flags.push('upload');
+  const hit: SearchHit = {
+    kind: 'fact', id: f.id,
+    title: servedLine(store, c.env.scope.workspaceId, f.claim, TITLE_MAX),
+  };
+  if (ent.label) hit.entity = ent.label;
+  const src = sourceOf(c, f.workspaceId);
+  if (src) hit.source = src;
+  if (flags.length) hit.flags = flags;
+  hit.age_days = fresh.ageDays;
+  return {
+    hit, upload, score,
+    refs: [{ id: f.id, kind: 'fact' }, ...ent.refs],
+    rank: bestRank(c, 'fact', f.id, f.workspaceId),
+    tie: [fresh.stale ? 1 : 0, usable ? 0 : 1],
+  };
+}
+
+function searchFacts(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
+  const { store } = c.env;
+  const where = [factVisibleSql('f'), factFilter(c)];
+  const params: Record<string, string | number> = { ...visParams(c.view, c.mode), lim: c.limit * POOL_FACTOR };
+  if (c.input.since) {
+    where.push('COALESCE(f.last_confirmed_at, f.first_seen_at, f.created_at) >= :since');
+    params.since = c.input.since;
+  }
+  if (c.group) {
+    where.push('f.entity_id IN (SELECT value FROM json_each(:grp))');
+    params.grp = JSON.stringify(c.group);
+  }
+  let rows: Array<{ id: string; score: number }>;
+  if (terms.length) {
+    params.q = matchExpr(terms, op);
+    rows = store.db
+      .prepare(
+        `SELECT f.id AS id, bm25(findings_fts, 2.0, 1.0) AS score FROM findings_fts JOIN findings f ON f.rowid = findings_fts.rowid
+         WHERE findings_fts MATCH :q AND ${where.join(' AND ')} ORDER BY score, f.rowid LIMIT :lim`,
+      )
+      .all(params) as typeof rows;
+  } else {
+    rows = store.db
+      .prepare(
+        `SELECT f.id AS id, 0 AS score FROM findings f WHERE ${where.join(' AND ')}
+         ORDER BY COALESCE(f.last_confirmed_at, f.first_seen_at, f.created_at) DESC, f.rowid DESC LIMIT :lim`,
+      )
+      .all(params) as typeof rows;
+  }
+  return rows.map((r) => factHit(c, store.findings.get(r.id)!, Number(r.score)));
+}
+
+function searchPassages(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
+  if (!terms.length) return [];
+  const { store } = c.env;
+  const params: Record<string, string | number> = { ...visParams(c.view, c.mode), q: matchExpr(terms, op), lim: c.limit * POOL_FACTOR };
+  const extra: string[] = [];
+  if (c.input.since) {
+    extra.push('a.captured_at >= :since');
+    params.since = c.input.since;
+  }
+  if (c.group) {
+    extra.push('EXISTS (SELECT 1 FROM artifact_captures cap WHERE cap.artifact_id = a.id AND cap.entity_id IN (SELECT value FROM json_each(:grp)))');
+    params.grp = JSON.stringify(c.group);
+  }
+  // The artifact a chunk is served under: the canonical if visible, else the oldest visible duplicate.
+  const rows = store.db
+    .prepare(
+      `SELECT * FROM (
+         SELECT c.id AS id, bm25(chunks_fts, 2.0, 1.0) AS score, c.rowid AS rid,
+           (SELECT a.id FROM artifacts a LEFT JOIN artifact_texts t ON t.artifact_id = a.id
+             WHERE (a.id = c.artifact_id OR t.duplicate_of = c.artifact_id) AND ${artifactVisibleSql('a')}
+               ${extra.length ? `AND ${extra.join(' AND ')}` : ''}
+             ORDER BY (a.id = c.artifact_id) DESC, a.rowid LIMIT 1) AS shown
+         FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid
+         WHERE chunks_fts MATCH :q
+       ) WHERE shown IS NOT NULL ORDER BY score, rid LIMIT :lim`,
+    )
+    .all(params) as Array<{ id: string; score: number; shown: string }>;
+  const repo = knowledgeRepos(store).chunks;
+  return rows.map((r) => {
+    const chunk = repo.get(r.id) as TextChunk;
+    const art = store.artifacts.get(r.shown)!;
+    const canonical = store.artifacts.get(chunk.artifactId);
+    const upload = chunk.uploadDerived === true || art.uploadDerived === true || canonical?.uploadDerived === true;
+    const hit: SearchHit = {
+      kind: 'passage', id: chunk.id, artifact_id: art.id,
+      snippet: chunkSnippet(store, c.env.scope.workspaceId, art.id, chunk, terms),
+    };
+    if (chunk.headingPath) hit.title = servedLine(store, c.env.scope.workspaceId, stripFences(chunk.headingPath), 120);
+    const src = sourceOf(c, art.workspaceId);
+    if (src) hit.source = src;
+    if (upload) hit.flags = ['upload'];
+    const age = ageDays(art.capturedAt, c.env.now);
+    if (age !== undefined) hit.age_days = age;
+    const refs: RetrievalResultRef[] = [{ id: chunk.id, kind: 'chunk' }, { id: art.id, kind: 'artifact' }];
+    if (chunk.artifactId !== art.id) refs.push({ id: chunk.artifactId, kind: 'artifact' });
+    return { hit, refs, upload, score: Number(r.score), rank: bestRank(c, 'artifact', art.id, art.workspaceId), tie: [] };
+  });
+}
+
+function searchArtifacts(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
+  const { store } = c.env;
+  const where = [artifactVisibleSql('a')];
+  const params: Record<string, string | number> = { ...visParams(c.view, c.mode), lim: c.limit * POOL_FACTOR };
+  if (c.input.since) {
+    where.push('a.captured_at >= :since');
+    params.since = c.input.since;
+  }
+  if (c.group) {
+    where.push('EXISTS (SELECT 1 FROM artifact_captures cap WHERE cap.artifact_id = a.id AND cap.entity_id IN (SELECT value FROM json_each(:grp)))');
+    params.grp = JSON.stringify(c.group);
+  }
+  let rows: Array<{ id: string; score: number }>;
+  if (terms.length) {
+    params.q = matchExpr(terms, op);
+    rows = store.db
+      .prepare(
+        `SELECT a.id AS id, bm25(artifacts_fts, 3.0, 2.0, 1.0, 1.0, 1.0) AS score FROM artifacts_fts JOIN artifacts a ON a.rowid = artifacts_fts.rowid
+         WHERE artifacts_fts MATCH :q AND ${where.join(' AND ')} ORDER BY score, a.rowid LIMIT :lim`,
+      )
+      .all(params) as typeof rows;
+  } else {
+    rows = store.db
+      .prepare(`SELECT a.id AS id, 0 AS score FROM artifacts a WHERE ${where.join(' AND ')} ORDER BY a.captured_at DESC, a.rowid DESC LIMIT :lim`)
+      .all(params) as typeof rows;
+  }
+  const texts = knowledgeRepos(store).artifactTexts;
+  return rows.map((r) => {
+    const a = store.artifacts.get(r.id)!;
+    const ws = c.env.scope.workspaceId;
+    const upload = a.uploadDerived === true;
+    const label = a.title ?? a.sourceUrl ?? `${a.kind} ${a.mime}`;
+    const hit: SearchHit = { kind: 'artifact', id: a.id, title: servedLine(store, ws, stripFences(label), 120) };
+    if (a.description) hit.snippet = chunkFreeSnippet(store, ws, a.id, a.description);
+    const src = sourceOf(c, a.workspaceId);
+    if (src) hit.source = src;
+    if (upload) hit.flags = ['upload'];
+    const age = ageDays(a.capturedAt, c.env.now);
+    if (age !== undefined) hit.age_days = age;
+    const t = texts.get(a.id);
+    const key = t?.contentSha256 ? `t:${t.contentSha256}` : `b:${a.sha256}`;
+    return { hit, refs: [{ id: a.id, kind: 'artifact' }], upload, score: Number(r.score), rank: bestRank(c, 'artifact', a.id, a.workspaceId), tie: [], key: `${key}|b:${a.sha256}` };
+  });
+}
+
+/** An artifact's description served as evidence (under the artifact's flag): redacted whole, cut, fenced. */
+function chunkFreeSnippet(store: Store, ws: string, artifactId: string, text: string): string {
+  return fenceEvidence(artifactId, servedLine(store, ws, text, SNIPPET_MAX_CHARS));
+}
+
+/** Whether an entity (survivor) is visible in node mode: home in the view, or a visible record references it. */
+function entityVisible(c: Ctx, e: Entity): boolean {
+  if (c.mode === 'tree') return true;
+  const ids = new Set(c.view.nodeIds);
+  if (ids.has(e.workspaceId)) return true;
+  const grp = JSON.stringify(entityGroup(c.env.store, e.id));
+  const p = { ...visParams(c.view, c.mode), grp };
+  const db = c.env.store.db;
+  const hit = (sql: string) => db.prepare(sql).get(p) !== undefined;
+  return (
+    hit(`SELECT 1 FROM findings f WHERE f.entity_id IN (SELECT value FROM json_each(:grp)) AND ${factVisibleSql('f')} LIMIT 1`) ||
+    ['competitors', 'personas', 'symptoms', 'symptom_hypotheses'].some((t) =>
+      hit(`SELECT 1 FROM ${t} r WHERE r.entity_id IN (SELECT value FROM json_each(:grp)) AND ${recordVisibleSql('r')} LIMIT 1`),
+    ) ||
+    hit(`SELECT 1 FROM artifact_captures cap JOIN artifacts a ON a.id = cap.artifact_id
+         WHERE cap.entity_id IN (SELECT value FROM json_each(:grp)) AND ${artifactVisibleSql('a')} LIMIT 1`)
+  );
+}
+
+function searchEntities(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
+  const { store } = c.env;
+  // Trigram tokens need ≥ 3 characters; shorter terms cannot match and are left out.
+  const usable = terms.filter((t) => [...t].length >= 3);
+  if (!usable.length || c.input.since) return [];
+  const rows = store.db
+    .prepare(
+      `SELECT e.id AS id, bm25(entities_fts, 2.0, 1.0) AS score FROM entities_fts JOIN entities e ON e.rowid = entities_fts.rowid
+       WHERE entities_fts MATCH :q AND e.root_workspace_id = :root ORDER BY score, e.rowid LIMIT :lim`,
+    )
+    .all({ q: matchExpr(usable, op), root: c.view.rootId, lim: c.limit * POOL_FACTOR }) as Array<{ id: string; score: number }>;
+  const repo = knowledgeRepos(store).entities;
+  const bySurvivor = new Map<string, Ranked>();
+  for (const r of rows) {
+    const matched = repo.get(r.id)!;
+    let survivor: Entity;
+    try {
+      survivor = getEntity(store, c.env.scope, matched.id);
+    } catch {
+      continue;
+    }
+    if (c.group && !c.group.includes(survivor.id)) continue;
+    if (bySurvivor.has(survivor.id) || !entityVisible(c, survivor)) continue;
+    const ws = c.env.scope.workspaceId;
+    const viaAlias = matched.id !== survivor.id && matched.nameKey !== survivor.nameKey;
+    const upload = entityIsUploadOnly(store, matched.id) || entityIsUploadOnly(store, survivor.id);
+    const hit: SearchHit = {
+      kind: 'entity', id: survivor.id, type: survivor.kind,
+      title: servedLine(store, ws, viaAlias ? `${survivor.name} (alias: ${matched.name})` : survivor.name, 120),
+    };
+    const src = sourceOf(c, survivor.workspaceId);
+    if (src) hit.source = src;
+    if (upload) hit.flags = ['upload'];
+    const refs: RetrievalResultRef[] = [{ id: survivor.id, kind: 'entity' }];
+    if (matched.id !== survivor.id) refs.push({ id: matched.id, kind: 'entity' });
+    bySurvivor.set(survivor.id, { hit, refs, upload, score: Number(r.score), rank: scopeRank(c.view, survivor.workspaceId), tie: [] });
+  }
+  return [...bySurvivor.values()];
+}
+
+/** Record kinds searched with LIKE (v1): table, type label, text columns, usable predicate. */
+const RECORD_TABLES = [
+  { table: 'competitors', type: 'competitor', cols: ['name', 'site'], usable: outputUsableSql('r'), title: 'name' },
+  { table: 'personas', type: 'persona', cols: ['segment', 'slug'], usable: outputUsableSql('r'), title: 'segment' },
+  { table: 'symptoms', type: 'symptom', cols: ['title', 'detail'], usable: '1', title: 'title' },
+  { table: 'symptom_hypotheses', type: 'hypothesis', cols: ['hypothesis'], usable: outputUsableSql('r'), title: 'hypothesis' },
+  { table: 'recommendations', type: 'recommendation', cols: ['title', 'summary'], usable: outputUsableSql('r'), title: 'title' },
+] as const;
+
+function searchRecords(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
+  const { store } = c.env;
+  // Records carry no comparable date: `since` does not filter them.
+  const out: Ranked[] = [];
+  for (const t of RECORD_TABLES) {
+    if (c.group && t.table === 'recommendations') continue; // recommendations have no entity
+    const where = [recordVisibleSql('r')];
+    const params: Record<string, string | number> = { ids: visParams(c.view, c.mode).ids, lim: c.limit * POOL_FACTOR };
+    if (!(c.input.includeUnverified && !c.usableOnly)) where.push(t.usable);
+    else if (t.usable !== '1') where.push(`COALESCE(r.status, 'pending') <> 'superseded'`);
+    if (c.group) {
+      where.push('r.entity_id IN (SELECT value FROM json_each(:grp))');
+      params.grp = JSON.stringify(c.group);
+    }
+    if (terms.length) {
+      const likes = terms.map((term, i) => {
+        params[`t${i}`] = `%${term.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+        return `(${t.cols.map((col) => `COALESCE(r.${col}, '') LIKE :t${i} ESCAPE '\\'`).join(' OR ')})`;
+      });
+      where.push(`(${likes.join(` ${op} `)})`);
+    }
+    const kindCol = t.table === 'symptoms' ? ', r.kind AS skind' : '';
+    const rows = store.db
+      .prepare(`SELECT r.id AS id, r.workspace_id AS ws, r.${t.title} AS title${kindCol} FROM ${t.table} r WHERE ${where.join(' AND ')} ORDER BY r.rowid DESC LIMIT :lim`)
+      .all(params) as Array<{ id: string; ws: string; title: string; skind?: string }>;
+    for (const r of rows) {
+      const upload = itemIsUploadDerived(store, r.id);
+      const hit: SearchHit = { kind: 'record', id: r.id, type: r.skind === 'strength' ? 'strength' : t.type, title: servedLine(store, c.env.scope.workspaceId, r.title ?? '', TITLE_MAX) };
+      const src = sourceOf(c, r.ws);
+      if (src) hit.source = src;
+      if (upload) hit.flags = ['upload'];
+      // More matched terms first (OR retry), then scope order.
+      const matchedTerms = terms.filter((term) => (r.title ?? '').toLowerCase().includes(term.toLowerCase())).length;
+      out.push({ hit, refs: [{ id: r.id, kind: 'record' }], upload, score: -matchedTerms, rank: scopeRank(c.view, r.ws), tie: [] });
+    }
+  }
+  return out;
+}
+
+const RUNNERS: Record<SearchKind, (c: Ctx, terms: string[], op: 'AND' | 'OR') => Ranked[]> = {
+  fact: searchFacts,
+  passage: searchPassages,
+  artifact: searchArtifacts,
+  entity: searchEntities,
+  record: searchRecords,
+};
+
+/** bm25 rounded so float noise never reorders equal scores; then the tie-breakers; the pool order last. */
+function rankKind(items: Ranked[], limit: number): Ranked[] {
+  const indexed = items.map((r, i) => ({ r, i }));
+  indexed.sort((a, b) => {
+    const s = Math.round(a.r.score * 1e6) - Math.round(b.r.score * 1e6);
+    if (s) return s;
+    if (a.r.rank !== b.r.rank) return a.r.rank - b.r.rank;
+    for (let k = 0; k < Math.max(a.r.tie.length, b.r.tie.length); k++) {
+      const d = (a.r.tie[k] ?? 0) - (b.r.tie[k] ?? 0);
+      if (d) return d;
+    }
+    return a.i - b.i;
+  });
+  // Collapse hits with the same bytes or the same text (design §8.4).
+  const seen = new Set<string>();
+  const out: Ranked[] = [];
+  for (const { r } of indexed) {
+    if (r.key) {
+      const keys = r.key.split('|');
+      if (keys.some((k) => seen.has(k))) continue;
+      for (const k of keys) seen.add(k);
+    }
+    out.push(r);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** Runs a search for the caller (see module doc). `budget` in tokens. Throws `KnowledgeNotFoundError` for an `entity_id` outside the tree. */
+export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput, budget: number, cursorParts: unknown): ReadOutput {
+  const mode = input.scope ?? 'node';
+  const limit = Math.max(1, Math.min(MAX_LIMIT, Math.floor(input.limit ?? DEFAULT_LIMIT)));
+  const kinds = input.kinds?.length ? SEARCH_KINDS.filter((k) => input.kinds!.includes(k)) : [...SEARCH_KINDS];
+  const notes: string[] = [];
+  let group: string[] | undefined;
+  if (input.entityId) group = entityGroup(env.store, getEntity(env.store, env.scope, input.entityId).id);
+  const { terms } = parseQuery(input.query);
+  if (!terms.length && !group) throw new SearchInputError('query is empty: give query text, or an entity_id to browse by recency');
+  const c: Ctx = { env, view, mode, input, limit, usableOnly: usableOnly(env.role), ...(group ? { group } : {}) };
+  const run = (op: 'AND' | 'OR') => kinds.flatMap((k) => rankKind(RUNNERS[k](c, terms, op), limit));
+  let hits = run('AND');
+  let relaxed = false;
+  if (!hits.length && terms.length > 1) {
+    hits = run('OR');
+    relaxed = true;
+  }
+  if (!terms.length) notes.push('empty query: newest items of the entity first');
+  const header = { query: input.query ?? '', scope: mode, ...(relaxed ? { relaxed: true } : {}) };
+  const page = pageOf(hits.map((h) => h.hit), header, budget, {
+    key: cursorKey(cursorParts), notes, itemsKey: 'hits', ...(input.cursor ? { cursor: input.cursor } : {}),
+  });
+  const shown = hits.slice(page.offset, page.offset + page.items.length);
+  const out: ReadOutput = {
+    data: { ...header, hits: page.items },
+    results: shown.flatMap((h) => h.refs),
+    uploadDerived: shown.some((h) => h.upload),
+    truncated: page.truncated,
+    more: page.more,
+    relaxed,
+    notes,
+    query: input.query ?? '',
+    scopeLabel: input.narrowed ? `node:${input.narrowed}` : mode,
+  };
+  if (page.cursor) out.cursor = page.cursor;
+  return out;
+}
+
+/** A search request that cannot run (empty query without an entity). */
+export class SearchInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SearchInputError';
+  }
+}

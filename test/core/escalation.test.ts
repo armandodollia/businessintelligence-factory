@@ -84,8 +84,8 @@ function unverifiedPicker(onWork?: (r: AgentRequest) => void): Picker {
 }
 
 describe('escalation role', () => {
-  it('only gets read_artifact, log_decision and submit_escalation', () => {
-    expect(new Set(ROLE_TOOLS.escalation)).toEqual(new Set(['log_decision', 'read_artifact', 'submit_escalation']));
+  it('only gets read_artifact, expand (KS-4: its task\'s review slice), log_decision and submit_escalation', () => {
+    expect(new Set(ROLE_TOOLS.escalation)).toEqual(new Set(['log_decision', 'read_artifact', 'expand', 'submit_escalation']));
     expect(ROLE_TOOLS.worker).not.toContain('submit_escalation');
   });
 });
