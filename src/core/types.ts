@@ -60,7 +60,19 @@ export interface UnitProposal {
   /** The Decision logged when the unit was proposed (ratable). */
   decisionId?: string;
   createdAt: string;
+  // --- learning loop WP-A (migration 14) ---
+  /** When the user accepted or rejected it. */
+  decidedAt?: string;
+  /** Who decided (`config.user.id`). The column defaults to `local-user`. */
+  actor?: string;
+  /** The user's reason for accepting / rejecting. */
+  decisionReason?: string;
+  /** The proposal as the agent made it, kept verbatim when the user accepted it with edits. */
+  originalPayload?: UnitProposalSnapshot;
 }
+
+/** The user-editable part of a unit proposal, as the agent proposed it (WP-A). */
+export type UnitProposalSnapshot = Pick<UnitProposal, 'name' | 'description' | 'level' | 'audiences' | 'evidence' | 'reasoning'>;
 
 /** An item tagged with the workspace it comes from (roll-up / cross-tree reading). */
 export type Sourced<T> = T & { sourceWorkspaceId: string };
@@ -235,6 +247,13 @@ export interface Rating {
   userValue?: number | string;
   reason?: string;
   createdAt: string;
+  // --- learning loop WP-A (migration 14) ---
+  /** Who rated (`config.user.id`). The column defaults to `local-user`. */
+  actor?: string;
+  /** Agent run whose judgment was rated (resolved from the target's Decision at write time). */
+  agentRunId?: string;
+  /** Prompt version of that judgment. */
+  promptVersion?: string;
 }
 
 export interface UserRequest {
@@ -251,6 +270,11 @@ export interface UserRequest {
   createdAt: string;
   /** Task status before it entered `waiting_user`; restored when the task's last pending request resolves (migration 3). */
   taskPriorStatus?: Task['status'];
+  // --- learning loop WP-A (migration 14) ---
+  /** When the user answered (resolved or denied) it. */
+  resolvedAt?: string;
+  /** Who answered (`config.user.id`). The column defaults to `local-user`. */
+  actor?: string;
 }
 
 export interface PersonaFeedback {
@@ -401,6 +425,11 @@ export interface InterviewTurn {
   role: 'user' | 'agent';
   text: string;
   createdAt: string;
+  /**
+   * Interviewer run (WP-A, migration 14): the run that wrote an agent turn, or that answered a user
+   * turn. Absent for turns stored before migration 14 or whose run never started.
+   */
+  agentRunId?: string;
 }
 
 /** Disposable identity used to sign up on a third-party site (one per workspace + site; migration 5). */

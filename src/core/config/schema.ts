@@ -156,6 +156,8 @@ export const bifConfigSchema = z
       port: z.number().int().min(1).max(65535),
     }),
     dataDir: z.string().min(1),
+    /** Learning loop WP-A: the acting user recorded on every human input (default `local-user`). */
+    user: z.strictObject({ id: z.string().trim().min(1) }).optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
