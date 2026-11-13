@@ -277,6 +277,8 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', agentRunId: 'text', taskId: 'text', kind: 'text', site: 'text',
       details: 'text', status: 'text', response: 'text', createdAt: 'text', taskPriorStatus: 'text',
+      // WP-D (migration 17)
+      optionsJson: 'json',
     },
   } satisfies TableSpec<UserRequest>,
   recommendations: {

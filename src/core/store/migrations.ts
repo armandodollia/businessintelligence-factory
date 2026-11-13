@@ -407,5 +407,39 @@ export const MIGRATIONS: readonly string[] = [
       SELECT 1 FROM competitors c
       WHERE c.workspace_id = ratings.workspace_id AND lower(trim(replace(replace(replace(replace(c.name, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' '))) = lower(trim(replace(replace(replace(replace(ratings.target_id, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' ')))
     );
+  `,  // 17: learning loop WP-D — structured escalation options on user_requests (kind 'escalation'),
+  // append-only action-policy history (policy_events, scoped by business-tree root) and persisted
+  // bus events (bus_events; pruned by config.telemetry.busEventRetentionDays).
+  `
+  ALTER TABLE user_requests ADD COLUMN options_json TEXT;
+
+  CREATE TABLE policy_events (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    agent_run_id TEXT,
+    task_id TEXT,
+    role TEXT,
+    kind TEXT NOT NULL,
+    action TEXT,
+    site TEXT,
+    detail TEXT,
+    request_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX policy_events_root_role ON policy_events (root_workspace_id, role, created_at);
+  CREATE INDEX policy_events_ws ON policy_events (workspace_id, created_at);
+
+  CREATE TABLE bus_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    agent_run_id TEXT,
+    task_id TEXT,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX bus_events_ws ON bus_events (workspace_id, seq);
+  CREATE INDEX bus_events_created ON bus_events (created_at);
   `,
 ];

@@ -10,6 +10,8 @@ export const ROLES = [
   'interviewer',
   'persona',
   'synthesizer',
+  // WP-D: writes multiple-choice questions for the user when a task ends unverified / failed.
+  'escalation',
 ] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -98,6 +100,37 @@ export const PLAYWRIGHT_SHARED_BROWSER: z.output<typeof sharedBrowserSchema> = {
   path: '/mcp',
 };
 
+// ---------------------------------------------------------------------------
+// WP-D (learning loop): escalation and telemetry settings. Both blocks are optional; read them
+// through `escalationSettings` / `telemetrySettings`, which apply the defaults.
+
+export const escalationConfigSchema = z.strictObject({
+  /** Run the escalation agent when a task ends unverified / failed. Default true. */
+  enabled: z.boolean().optional(),
+  /** Model of the escalation agent. Default `roles.orchestrator`. */
+  model: modelRefSchema.optional(),
+  /** Questions per escalation (0–3). Default 3. */
+  maxQuestions: z.number().int().min(0).max(3).optional(),
+  /** Escalations per task (each fully answered one re-runs the task). Default 2. */
+  maxPerTask: z.number().int().min(0).optional(),
+});
+
+export const otlpConfigSchema = z.strictObject({
+  enabled: z.boolean(),
+  /** OTLP/HTTP base URL; logs go to `<endpoint>/v1/logs`. Default `http://127.0.0.1:4318`. */
+  endpoint: z.string().url().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  /** Default `bif`. */
+  serviceName: z.string().min(1).optional(),
+});
+
+export const telemetryConfigSchema = z.strictObject({
+  /** Days `bus_events` rows are kept; 0 keeps them forever. Default 30. */
+  busEventRetentionDays: z.number().int().min(0).optional(),
+  /** Optional OTLP/HTTP (JSON) log export of the event bus. Off by default. */
+  otlp: otlpConfigSchema.optional(),
+});
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -156,6 +189,9 @@ export const bifConfigSchema = z
       port: z.number().int().min(1).max(65535),
     }),
     dataDir: z.string().min(1),
+    // WP-D (learning loop): structured escalations, bus-event persistence, optional OTLP export.
+    escalation: escalationConfigSchema.optional(),
+    telemetry: telemetryConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -178,6 +214,7 @@ export const bifConfigSchema = z
     for (const [key, ref] of Object.entries(cfg.roles.workers)) {
       check(ref as ModelRef | undefined, ['roles', 'workers', key]);
     }
+    check(cfg.escalation?.model, ['escalation', 'model']); // WP-D
     if (cfg.identity.emailProvider === 'catchall' && !cfg.identity.catchallDomain) {
       ctx.addIssue({
         code: 'custom',

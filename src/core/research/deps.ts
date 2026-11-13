@@ -9,7 +9,7 @@ import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
 
 /** Which agent step a run is for (used by fake pickers and logs). */
-export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review';
+export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate'; // escalate: WP-D
 
 export type AgentRequest = {
   kind: AgentKind;

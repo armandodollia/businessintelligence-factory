@@ -24,6 +24,8 @@ export const TOOL_NAMES = [
   'propose_business_unit',
   'save_competitor',
   'save_hypothesis',
+  // WP-D
+  'submit_escalation',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -46,6 +48,8 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   synthesizer: [
     ...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace', 'read_artifact',
   ],
+  // WP-D: the escalation agent only reads evidence and asks the user multiple-choice questions.
+  escalation: ['log_decision', 'read_artifact', 'submit_escalation'],
 };
 
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
@@ -225,6 +229,22 @@ export const toolInputSchemas = {
     confidence: z.number().min(0).max(100).describe('0–100 (percent)'),
     evidence: z.array(id).min(1, 'cite at least one finding or artifact id'),
   }),
+  // WP-D: 0–3 multiple-choice questions for the user about a task that ended unverified / failed.
+  submit_escalation: z.object({
+    questions: z
+      .array(
+        z
+          .object({
+            question: z.string().min(1).describe('One concrete question the user can answer by picking an option'),
+            options: z.array(z.string().min(1)).min(2).max(4).describe('2–4 distinct answer options'),
+            recommended: z.number().int().min(0).describe('0-based index of the option you recommend'),
+            why: z.string().min(1).describe('One or two sentences: why you ask and why you recommend that option'),
+          })
+          .refine((q) => q.recommended < q.options.length, { message: 'recommended must index one of the options', path: ['recommended'] }),
+      )
+      .max(3)
+      .describe('0–3 questions; an empty list when the user cannot help'),
+  }),
 } satisfies Record<ToolName, z.ZodType>;
 
 export type ToolInput<N extends ToolName> = z.output<(typeof toolInputSchemas)[N]>;
@@ -257,6 +277,8 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Save or update a rated competitor: threat, directness and per-area comparison (pricing, onboarding, ux, features), each 1–5, with evidence.',
   save_hypothesis:
     'Save a hypothesis about the cause of an interview symptom (confidence 0–100, evidence); the interviewer asks the user about it.',
+  submit_escalation:
+    'Ask the user 0–3 multiple-choice questions (2–4 options each, one recommended) about a task that ended unverified or failed. Call once.',
 };
 
 /** JSON Schema of a tool's input as agents should send it (defaults shown as optional). */
