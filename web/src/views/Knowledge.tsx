@@ -160,7 +160,6 @@ function EntityCard({ k }: { k: View }) {
         {c.entity?.name} <span className="tag">{c.entity?.kind}</span> {c.entity && <span className="muted small">home {c.entity.home}</span>}
       </h3>
       {c.entity?.upload && <Upload mark={{ upload: true }} />}
-      {c.entity?.aliases && <p className="muted small">also known as {c.entity.aliases.join(', ')}</p>}
       <ul className="card-lines">
         {c.lines.map((l, i) => (
           <li key={i}>
@@ -236,6 +235,7 @@ function ItemDetail({ k }: { k: View }) {
             <li key={i}>
               <span className="tag">{p.label}</span>
               {p.text && <span> {p.text}</span>} <Source source={p.source} />
+              {p.detail && <span className="muted small"> {p.detail}</span>}
               {p.outside && <span className="muted small"> (outside this part of the business: switch to whole business)</span>}
               {p.open && (
                 <button className="link" onClick={() => k.openItem(p.open!)}>

@@ -99,7 +99,8 @@ describe('knowledge logic', () => {
     // Paging rework: a fact's claim and a record's fields are items; metadata items read as key: value.
     expect(itemPart({ type: 'claim', text: 'Globex margin is thin' })).toMatchObject({ label: 'claim', text: 'Globex margin is thin' });
     expect(itemPart({ type: 'field', field: 'summary', value: 'Raise prices' })).toEqual({ label: 'summary', text: 'Raise prices' });
-    expect(itemPart({ type: 'field', field: 'profile.goals', value: 'Ship faster', confidence: 0.7 })).toMatchObject({ label: 'profile.goals', text: 'Ship faster' });
+    expect(itemPart({ type: 'field', field: 'profile.goals', value: 'Ship faster', confidence: 0.7, evidence: ['art_1', 'art_2'] }))
+      .toEqual({ label: 'profile.goals', text: 'Ship faster', detail: 'confidence 0.7 · evidence art_1, art_2' });
     expect(itemPart({ type: 'meta', mime: 'text/plain', captured_at: '2026-11-01' }).text).toBe('mime: text/plain · captured_at: 2026-11-01');
   });
 });
@@ -282,6 +283,7 @@ describe('Knowledge view', () => {
       (await screen.findByRole('button', { name: 'it-lead persona' })).click();
     });
     for (const f of FIELDS) expect(await screen.findByText(f), f).toBeTruthy();
+    expect(screen.getAllByText('confidence 0.7 · evidence art_1')).toHaveLength(13);
     expect(calls.some((c) => c.path.includes('/items/per_real') && c.path.includes('cursor=c1.p2'))).toBe(true);
   });
 });

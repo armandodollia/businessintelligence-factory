@@ -49,7 +49,8 @@ export type KnowledgeStats = {
   artifacts: number; chunks: number; entities: number; openMergeSuggestions: number;
 };
 export type CardView = Envelope & {
-  entity?: { id: string; name: string; kind: string; home: string; aliases?: string[]; upload?: boolean };
+  /** Identity only; aliases arrive as card lines (`alias: …`). */
+  entity?: { id: string; name: string; kind: string; home: string; upload?: boolean };
   node?: { id: string; name?: string };
   source?: string;
   /** A line too long for the page comes back shortened as `{ text, cut: true }` (expand its id for the full text). */
@@ -121,7 +122,8 @@ export function itemFields(item: ItemView): Array<{ key: string; value: string; 
 }
 
 /** One listed item of an item response, as display parts. */
-export type ItemPart = { label: string; text?: string; evidence?: EvidenceText[]; open?: string; source?: string; outside?: boolean };
+/** `detail`: secondary facts about the item, shown muted (a persona field's confidence and evidence). */
+export type ItemPart = { label: string; text?: string; detail?: string; evidence?: EvidenceText[]; open?: string; source?: string; outside?: boolean };
 export function itemPart(i: Record<string, unknown>): ItemPart {
   const type = String(i.type ?? 'item');
   const str = (k: string) => (typeof i[k] === 'string' ? (i[k] as string) : undefined);
@@ -146,7 +148,12 @@ export function itemPart(i: Record<string, unknown>): ItemPart {
       // A record field (`profile.<key>` keeps value, confidence and evidence together).
       const v = i.value;
       text = typeof v === 'string' ? (v.startsWith('<<<EVIDENCE') ? undefined : v) : v !== undefined ? JSON.stringify(v) : rest(['field']);
-      return { label: String(i.field ?? 'field'), ...(text ? { text } : {}), ...(evidence.length ? { evidence } : {}) };
+      // A persona profile field also carries its confidence and the evidence it rests on.
+      const extra = [
+        ...(typeof i.confidence === 'number' ? [`confidence ${i.confidence}`] : []),
+        ...(Array.isArray(i.evidence) && i.evidence.length ? [`evidence ${i.evidence.map(String).join(', ')}`] : []),
+      ];
+      return { label: String(i.field ?? 'field'), ...(text ? { text } : {}), ...(extra.length ? { detail: extra.join(' · ') } : {}), ...(evidence.length ? { evidence } : {}) };
     }
     case 'meta':
     case 'state':
