@@ -31,6 +31,14 @@ import { KnowledgeNotFoundError, narrowTo, notFound, type KnowledgeScope, type S
 import { runSearch, SearchInputError, type SearchKind } from './search.js';
 import { CONTENT_TRUST } from './trust.js';
 
+/**
+ * Smallest response budget of a knowledge read tool (tokens). A configured budget below it (a tiny
+ * role / provider budget, or a `hardMaxTokens` under it) is clamped UP to it, and `max_tokens` cannot go
+ * below it (schema floor), so a response can always at least carry the truncation notice
+ * (`truncated`, `more`, `cursor`, a note): an agent never reads "nothing fit" as "nothing exists".
+ */
+export const MIN_RESPONSE_TOKENS = 100;
+
 export const KNOWLEDGE_READ_TOOLS = ['search', 'get_card', 'expand', 'read_artifact', 'list_changes', 'read_workspace'] as const;
 export type KnowledgeReadTool = (typeof KNOWLEDGE_READ_TOOLS)[number];
 
@@ -130,6 +138,7 @@ function cardOutput(card: Card, budget: number, key: string, cursor: string | un
     results: uniqueRefs([...card.headerRefs, ...shown.flatMap((l) => l.refs)]),
     uploadDerived: card.headerUpload || shown.some((l) => l.upload),
     truncated: page.truncated,
+    restart: { cursor: page.startCursor, remaining: page.remaining },
     more: page.more,
     query,
     scopeLabel,
@@ -157,7 +166,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     ...(deps.slice ? { slice: deps.slice } : {}),
     mode: input.scope ?? 'node',
   };
-  const budget = budgetFor(deps.config, caller.role, caller.model?.provider, BUDGET_KIND[tool]!, input.max_tokens);
+  const budget = Math.max(MIN_RESPONSE_TOKENS, budgetFor(deps.config, caller.role, caller.model?.provider, BUDGET_KIND[tool]!, input.max_tokens));
   // A cursor is bound to its request: tool, caller node and role, and every input except paging.
   const { cursor, max_tokens: _maxTokens, ...rest } = input;
   const key = cursorKey({ tool, ws: caller.workspaceId, role: caller.role, ...rest });
@@ -251,13 +260,15 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   data.tokens = estimateTokens(JSON.stringify(data));
   data.tokens = estimateTokens(JSON.stringify(data));
   if ((data.tokens as number) > budget) {
-    // The fixed part alone (e.g. a long claim) does not fit a very small max_tokens: serve no store
-    // text rather than exceed the budget (design §4 anti-goal: no unbounded response).
-    out = { ...out, results: [], uploadDerived: false, truncated: true };
+    // The fixed part alone (e.g. a long claim) does not fit the budget: serve no store text rather than
+    // exceed it (design §4 anti-goal: no unbounded response), and say what was left out: `truncated`,
+    // how many items, and the cursor that repeats this page with a larger max_tokens.
+    const more = Math.max(1, out.restart?.remaining ?? 1);
+    out = { ...out, results: [], uploadDerived: false, truncated: true, more };
     for (const k of Object.keys(data)) delete data[k];
     Object.assign(data, {
-      tokens: 0, truncated: true, content_trust: CONTENT_TRUST,
-      notes: [`the response does not fit max_tokens ${budget}: call again with a larger max_tokens`],
+      tokens: 0, truncated: true, more, ...(out.restart ? { cursor: out.restart.cursor } : {}), content_trust: CONTENT_TRUST,
+      notes: [`nothing of this page fits ${budget} tokens: repeat with this cursor and a larger max_tokens`],
     });
     data.tokens = estimateTokens(JSON.stringify(data));
   }

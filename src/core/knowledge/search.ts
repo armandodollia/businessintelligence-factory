@@ -476,6 +476,7 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
     results: shown.flatMap((h) => h.refs),
     uploadDerived: shown.some((h) => h.upload),
     truncated: page.truncated,
+    restart: { cursor: page.startCursor, remaining: page.remaining },
     more: page.more,
     relaxed,
     notes,

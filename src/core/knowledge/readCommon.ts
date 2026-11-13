@@ -77,6 +77,8 @@ export type ReadOutput = {
   relaxed?: boolean;
   notes?: string[];
   images?: Array<{ data: string; mimeType: string }>;
+  /** Where this page started: a notice that serves nothing of it hands out this cursor and count. */
+  restart?: { cursor: string; remaining: number };
   /** What the log stores as the query (search text, or a compact form of the input). */
   query: string;
   /** `node` | `tree` | `node:<id>`. */
@@ -145,33 +147,49 @@ export function uniqueRefs(refs: readonly RetrievalResultRef[]): RetrievalResult
  */
 export const ENVELOPE_TOKENS = 48;
 
+/** A page of items, plus where it started (to repeat it with a larger budget). */
+export type ItemPage<T> = {
+  items: T[];
+  truncated: boolean;
+  more: number;
+  cursor?: string;
+  offset: number;
+  /** A cursor for this same page (the truncation notice hands it out: repeat with a larger max_tokens). */
+  startCursor: string;
+  /** Items from `offset` on (what a notice says was left out when nothing of the page is served). */
+  remaining: number;
+};
+
 /** One page of `items` for a response whose fixed part is `header`; the whole JSON stays within `budget`. */
 export function pageOf<T>(
   items: readonly T[],
   header: Record<string, unknown>,
   budget: number,
   opts: { key: string; cursor?: string; notes?: readonly string[]; itemsKey?: string },
-): { items: T[]; truncated: boolean; more: number; cursor?: string; offset: number } {
+): ItemPage<T> {
   const offset = opts.cursor ? Math.min(decodeCursor(opts.cursor, opts.key), items.length) : 0;
   const overhead =
     estimateTokens(JSON.stringify({ ...header, [opts.itemsKey ?? 'items']: [] })) +
     ENVELOPE_TOKENS +
     (opts.notes?.length ? estimateTokens(JSON.stringify(opts.notes)) : 0);
   const rest = items.slice(offset);
+  const startCursor = encodeCursor({ key: opts.key, offset });
   const fit = fitToBudget(rest, (x) => JSON.stringify(x), budget, overhead);
   if (!fit.items.length && rest.length) {
     // The next item alone is larger than the budget: a placeholder takes its place, so paging never
-    // stalls (its ids are still logged by the caller — over-listing, never under-listing).
-    const placeholder = { omitted: true, note: 'this item is larger than the response budget: raise max_tokens, or expand its id' } as unknown as T;
-    const out: { items: T[]; truncated: boolean; more: number; cursor?: string; offset: number } = {
-      items: [placeholder], truncated: rest.length > 1, more: rest.length - 1, offset,
+    // stalls, and it carries the cursor that fetches exactly that item with a larger max_tokens. The
+    // item counts as left out (`truncated`, `more`). Its ids are still logged (over-listing only).
+    const placeholder = {
+      omitted: true,
+      note: 'this item is larger than the response budget: repeat with retry_cursor and a larger max_tokens',
+      retry_cursor: startCursor,
+    } as unknown as T;
+    return {
+      items: [placeholder], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length,
+      cursor: rest.length > 1 ? encodeCursor({ key: opts.key, offset: offset + 1 }) : startCursor,
     };
-    if (rest.length > 1) out.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
-    return out;
   }
-  const out: { items: T[]; truncated: boolean; more: number; cursor?: string; offset: number } = {
-    items: fit.items, truncated: fit.truncated, more: fit.more, offset,
-  };
+  const out: ItemPage<T> = { items: fit.items, truncated: fit.truncated, more: fit.more, offset, startCursor, remaining: rest.length };
   if (fit.more > 0 && fit.items.length > 0) out.cursor = encodeCursor({ key: opts.key, offset: offset + fit.items.length });
   return out;
 }
@@ -251,4 +269,48 @@ export function entityVisibleIn(store: Store, view: KnowledgeScope, mode: ScopeM
     hit(`SELECT 1 FROM artifact_captures cap JOIN artifacts a ON a.id = cap.artifact_id
          WHERE cap.entity_id IN (SELECT value FROM json_each(:grp)) AND ${artifactVisibleSql('a')} LIMIT 1`, p)
   );
+}
+
+// ---------------------------------------------------------------------------
+// What a by-id response lists AROUND the named item (re-gate: one helper for every such list)
+
+/** Something listed around a named item: a fact, an artifact, a typed record or capture (by workspace), an entity. */
+export type AroundItem =
+  | { kind: 'fact'; id: string }
+  | { kind: 'artifact'; id: string }
+  | { kind: 'workspace'; workspaceId: string }
+  | { kind: 'entity'; entity: Entity };
+
+/**
+ * Whether an item listed around a named one may be shown: it follows the request's scope (`env.mode`,
+ * node by default) exactly like a query — node scope sees the view's node ids, `tree` the whole tree.
+ * Every around-item list of `expand` / `read_artifact` goes through here (page versions, captures,
+ * fact versions and updates, evidence metadata, relation names); cards use the same mode directly.
+ */
+export function aroundVisible(env: ReadEnv, item: AroundItem): boolean {
+  const mode = env.mode ?? 'node';
+  const { store, scope } = env;
+  switch (item.kind) {
+    case 'fact': {
+      const f = store.findings.get(item.id);
+      if (!f || !scope.treeIds.includes(f.workspaceId)) return false;
+      return mode === 'tree' || factInNodeScope(store, scope, item.id);
+    }
+    case 'artifact':
+      return artifactVisible(store, scope, item.id, mode);
+    case 'workspace':
+      return activeIds(scope, mode).includes(item.workspaceId);
+    case 'entity':
+      return entityVisibleIn(store, scope, mode, item.entity);
+  }
+}
+
+/** `{ source }` label of an item whose home is not the caller's node. */
+export function sourceLabel(env: ReadEnv, workspaceId: string | undefined): { source?: string } {
+  return workspaceId && workspaceId !== env.scope.workspaceId ? { source: workspaceId } : {};
+}
+
+/** Note for a response that left around-items out because of node scope. */
+export function outsideScopeNote(n: number): string {
+  return `${n} related item(s) outside node scope left out: repeat with scope "tree" to include them`;
 }

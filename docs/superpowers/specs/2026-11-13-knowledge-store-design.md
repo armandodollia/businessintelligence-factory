@@ -401,7 +401,12 @@ expand 2 000, prompt briefing 1 500; per-role overrides (reviewer expand 3 000,
 synthesizer briefing 4 000); optional per-provider scale for CLIs with smaller
 tool-output limits; `hardMaxTokens` 8 000 for any single response whatever the
 caller asks. A response over budget drops its tail and returns `truncated`, how
-many more, and a `cursor`. Every response states its token estimate.
+many more, and a `cursor`. Every response states its token estimate. No response is ever
+smaller than `MIN_RESPONSE_TOKENS` (100): a smaller configured budget (or `max_tokens`) is
+clamped up to it, so even a response that can serve nothing of its page still says
+`truncated`, how many items, and the cursor that repeats the page with a larger budget —
+"nothing fit" never reads as "nothing exists". Prompt sections degrade instead (left-out
+ids → counts → one count line → empty only when not even that fits).
 
 ## 10. Cards (computed)
 

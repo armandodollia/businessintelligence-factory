@@ -267,9 +267,11 @@ describe('edge cases', () => {
     const t = ks4(opened);
     const f = t.fact('ws_a', `Long claim ${'word '.repeat(700)}`);
     const c = t.ctx('ws_a');
-    const r = await t.call<{ tokens: number; notes: string[] }>(c, 'expand', { id: f.id, max_tokens: 100 });
+    const r = await t.call<{ tokens: number; notes: string[]; truncated: boolean; more: number; cursor?: string }>(c, 'expand', { id: f.id, max_tokens: 100 });
     expect(r.tokens).toBeLessThanOrEqual(100);
-    expect(r.notes[0]).toMatch(/does not fit max_tokens 100/);
+    expect(r.notes[0]).toMatch(/nothing of this page fits 100 tokens/);
+    expect(r).toMatchObject({ truncated: true, more: 1 });
+    expect(r.cursor).toBeDefined();
     expect(JSON.stringify(r)).not.toContain('Long claim');
     expect(t.rows(c.agentRunId)[0]!.resultIds).toEqual([]);
   });

@@ -160,6 +160,7 @@ export function runListChanges(env: ReadEnv, view: KnowledgeScope, input: Change
     results: shown.flatMap((c) => c.refs),
     uploadDerived: shown.some((c) => c.upload),
     truncated: page.truncated,
+    restart: { cursor: page.startCursor, remaining: page.remaining },
     more: page.more,
     notes,
     query: input.runId ? `run ${input.runId}` : `since ${since}`,

@@ -85,6 +85,34 @@ describe('reads by id vs. what is listed around the item', () => {
     expect(tree.hits.map((h) => h.id)).toContain(w.loans.id);
   });
 
+  it('page versions around a named artifact follow the request scope (Lending captured the same URL)', async () => {
+    const w = world();
+    const mine = await w.t.page('ws_c', 'Fees page as Payments saw it.', { sourceUrl: 'https://globex.test/fees' });
+    const theirs = await w.t.page('ws_d', 'Fees page as Lending saw it later.', { sourceUrl: 'https://globex.test/fees' });
+    w.t.store.db.prepare('UPDATE artifacts SET captured_at = ? WHERE id = ?').run('2026-01-01T00:00:00.000Z', mine.id);
+    const c = w.t.ctx('ws_c');
+    const node = await w.t.call<{ items: Array<Record<string, unknown>>; notes?: string[] }>(c, 'expand', { id: mine.id });
+    expect(JSON.stringify(node)).not.toContain(theirs.id);
+    expect(node.items.filter((i) => i.type === 'page_version')).toEqual([]);
+    expect(node.notes?.join(' ')).toMatch(/outside node scope/);
+    const tree = await w.t.call<{ items: Array<Record<string, unknown>> }>(c, 'expand', { id: mine.id, scope: 'tree' });
+    expect(tree.items.find((i) => i.type === 'page_version')).toMatchObject({ relation: 'next', artifact_id: theirs.id, source: 'ws_d', text_changed: true });
+  });
+
+  it('fact versions and evidence around a named fact follow the request scope too', async () => {
+    const w = world();
+    const page = await w.t.page('ws_d', 'Lending evidence page.');
+    const v1 = w.t.fact('ws_c', 'Globex fee is 2 percent', { lifecycle: 'replaced', evidence: [page.id] });
+    w.t.fact('ws_d', 'Globex fee is 3 percent', { lineageId: v1.id, version: 2, replacesId: v1.id });
+    const c = w.t.ctx('ws_c');
+    const node = await w.t.call<{ items: Array<Record<string, unknown>> }>(c, 'expand', { id: v1.id });
+    expect(JSON.stringify(node)).not.toContain('3 percent');
+    expect(node.items.find((i) => i.type === 'evidence')).toEqual({ type: 'evidence', artifact_id: page.id, outside_scope: true });
+    const tree = await w.t.call<{ items: Array<Record<string, unknown>> }>(c, 'expand', { id: v1.id, scope: 'tree' });
+    expect(tree.items.find((i) => i.type === 'version')).toMatchObject({ claim: 'Globex fee is 3 percent', source: 'ws_d' });
+    expect(tree.items.find((i) => i.type === 'evidence')).toMatchObject({ artifact_id: page.id, source: 'ws_d' });
+  });
+
   it('the sibling rule is one switch: allowByIdSiblingRead (ruling: allowed in node scope too)', () => {
     const w = world();
     expect(allowByIdSiblingRead(scopeFor(w.t.store, 'ws_c'), 'node')).toBe(true);

@@ -1008,3 +1008,19 @@ gate (reads by id, interviewer tools, `get_card` / `read_workspace` inputs).
   then confirmations / retractions), quotes and a footer naming up to 20 left-out fact ids to `expand`
   — fits the reviewer `briefing` budget; `results` lists only facts and artifacts whose text is shown;
   `factIds` (the slice) keeps every fact.
+- **Re-gate: around-item lists follow the request scope.** One helper, `aroundVisible(env, item)`
+  (`readCommon.ts`), decides every list a by-id response shows around the named item: page versions of
+  the same URL, captures, fact versions and unverified updates, evidence metadata (an out-of-scope
+  citation is shown as `{ artifact_id, outside_scope: true }` — the id is the fact's own field), relation
+  names. Node scope by default; `scope: "tree"` includes the rest, each entry labelled `source`
+  (`sourceLabel`); a note counts what node scope left out. Cards use the same mode directly.
+- **Re-gate: budgets are never exceeded, and dropping is always said.** Tool calls: the effective
+  budget is `max(MIN_RESPONSE_TOKENS = 100, budgetFor(…))` (this floor wins over a smaller configured
+  budget or `hardMaxTokens`; `max_tokens` has the same schema floor), so the truncation notice always
+  fits: when nothing of a page fits, the response is `{ tokens, truncated: true, more, cursor, notes }`,
+  the cursor repeating that page (cursors ignore `max_tokens`). An item larger than the page is a
+  placeholder `{ omitted, note, retry_cursor }`; the page counts it as left out (`truncated`, `more`).
+  The reviewer context degrades: footer naming left-out ids → footer with counts → one line
+  `(knowledge: N item(s) left out)` → `''` (budget too small to say anything); `factIds` (the slice)
+  and evidence ids are never cut, and only shown text is logged. **KS-5:** briefings follow the same
+  ladder.

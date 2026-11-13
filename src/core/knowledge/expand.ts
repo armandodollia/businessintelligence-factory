@@ -29,7 +29,8 @@ import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
 import { itemIsUploadDerived } from './provenance.js';
 import {
-  artifactInNodeScope, ENVELOPE_TOKENS, entityVisibleIn, factInNodeScope, inSlice, pageOf, readableById, uniqueRefs, usableOnly,
+  aroundVisible, artifactInNodeScope, ENVELOPE_TOKENS, entityVisibleIn, factInNodeScope, inSlice, outsideScopeNote, pageOf, readableById,
+  sourceLabel, uniqueRefs, usableOnly,
   type ReadEnv, type ReadOutput,
 } from './readCommon.js';
 import { notFound, type ScopeMode } from './scope.js';
@@ -48,10 +49,10 @@ export const expandNotFound = (id: string) => notFound('item', id);
 export const artifactNotFound = (id: string) => notFound('artifact', id);
 
 type Item = Record<string, unknown> & { type: string };
-type Built = { header: Record<string, unknown>; items: Item[]; refs: Map<Item, RetrievalResultRef[]>; headerRefs: RetrievalResultRef[]; upload: boolean; itemUpload: Map<Item, boolean>; notes: string[] };
+type Built = { header: Record<string, unknown>; items: Item[]; refs: Map<Item, RetrievalResultRef[]>; headerRefs: RetrievalResultRef[]; upload: boolean; itemUpload: Map<Item, boolean>; notes: string[]; outside: number };
 
 function built(header: Record<string, unknown>, headerRefs: RetrievalResultRef[], upload: boolean): Built {
-  return { header, items: [], refs: new Map(), headerRefs, upload, itemUpload: new Map(), notes: [] };
+  return { header, items: [], refs: new Map(), headerRefs, upload, itemUpload: new Map(), notes: [], outside: 0 };
 }
 
 function push(b: Built, item: Item, refs: RetrievalResultRef[] = [], upload = false): void {
@@ -73,6 +74,7 @@ function inTree(env: ReadEnv, ws: string | undefined): boolean {
 
 /** Pages `b.items` within `budget` and assembles the output. */
 function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
+  if (b.outside) b.notes.push(outsideScopeNote(b.outside));
   const page = pageOf(b.items, b.header, budget, { key, notes: b.notes, ...(cursor ? { cursor } : {}) });
   const results = uniqueRefs([...b.headerRefs, ...page.items.flatMap((i) => b.refs.get(i) ?? [])]);
   const out: ReadOutput = {
@@ -80,6 +82,7 @@ function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: str
     results,
     uploadDerived: b.upload || page.items.some((i) => b.itemUpload.get(i) === true),
     truncated: page.truncated,
+    restart: { cursor: page.startCursor, remaining: page.remaining },
     more: page.more,
     notes: b.notes,
     query,
@@ -107,7 +110,12 @@ function evidenceItems(env: ReadEnv, b: Built, f: Finding): void {
   for (const aid of ids) {
     const a = store.artifacts.get(aid);
     if (!a || !inTree(env, a.workspaceId) || !inSlice(env, aid)) continue;
-    const item: Item = { type: 'evidence', artifact_id: aid, artifact_kind: a.kind };
+    if (!aroundVisible(env, { kind: 'artifact', id: aid })) {
+      // The id is the fact's own citation; the artifact's metadata follows the request scope.
+      push(b, { type: 'evidence', artifact_id: aid, outside_scope: true });
+      continue;
+    }
+    const item: Item = { type: 'evidence', artifact_id: aid, artifact_kind: a.kind, ...sourceLabel(env, a.workspaceId) };
     if (a.title || a.sourceUrl) item.title = servedLine(store, ws, stripFences(a.title ?? a.sourceUrl ?? ''), 160);
     if (a.description) item.description = fenceEvidence(aid, servedLine(store, ws, a.description, 300));
     const quotes = refsRows.filter((r) => r.artifactId === aid && r.quote).map((r) => fenceEvidence(aid, servedLine(store, ws, r.quote!, 600)));
@@ -151,18 +159,20 @@ function expandFact(env: ReadEnv, id: string): Built {
   const b = built(header, headerRefs, upload);
   evidenceItems(env, b, f);
   const lineage = f.lineageId ?? f.id;
-  const versions = lineageVersions(store, lineage).filter((v) => v.id !== f.id && inTree(env, v.workspaceId));
+  const all = lineageVersions(store, lineage).filter((v) => v.id !== f.id && inTree(env, v.workspaceId));
+  const versions = all.filter((v) => aroundVisible(env, { kind: 'fact', id: v.id }));
+  b.outside += all.length - versions.length;
   if (usableOnly(env.role)) {
     if (versions.length) b.notes.push('version history is not shown to this role (usable facts only)');
   } else {
     for (const v of versions) {
       if (v.lifecycle === 'candidate' && v.replacesId === f.id) {
-        const item: Item = { type: 'unverified_update', id: v.id, version: v.version ?? 1, status: v.status };
+        const item: Item = { type: 'unverified_update', id: v.id, version: v.version ?? 1, status: v.status, ...sourceLabel(env, v.workspaceId) };
         if (inSlice(env, v.id)) item.claim = servedLine(store, ws, v.claim, LINE);
         push(b, item, item.claim ? [{ id: v.id, kind: 'fact' }] : [], item.claim ? v.uploadDerived === true : false);
         continue;
       }
-      const item: Item = { type: 'version', id: v.id, version: v.version ?? 1, lifecycle: v.lifecycle ?? 'current', status: v.status, created_at: v.createdAt };
+      const item: Item = { type: 'version', id: v.id, version: v.version ?? 1, lifecycle: v.lifecycle ?? 'current', status: v.status, created_at: v.createdAt, ...sourceLabel(env, v.workspaceId) };
       if (inSlice(env, v.id)) item.claim = servedLine(store, ws, v.claim, LINE);
       push(b, item, item.claim ? [{ id: v.id, kind: 'fact' }] : [], item.claim ? v.uploadDerived === true : false);
     }
@@ -174,12 +184,15 @@ function expandFact(env: ReadEnv, id: string): Built {
       for (const eid of [e.fromEntityId, e.toEntityId]) {
         try {
           const ent = getEntity(store, env.scope, eid);
-          names.push({ id: ent.id, name: servedLine(store, ws, ent.name, 120) });
+          if (aroundVisible(env, { kind: 'entity', entity: ent })) names.push({ id: ent.id, name: servedLine(store, ws, ent.name, 120) });
         } catch {
           // skip
         }
       }
-      if (names.length < 2) continue;
+      if (names.length < 2) {
+        b.outside++;
+        continue;
+      }
       push(b, { type: 'relation', relation: e.type, from: names[0]!, to: names[1]! }, names.map((n) => ({ id: n.id, kind: 'entity' })),
         names.some((n) => itemIsUploadDerived(store, n.id)));
     }
@@ -250,8 +263,11 @@ function expandArtifact(env: ReadEnv, id: string): Built {
   // Captures: their text is served under the artifact's flag (a capture has no flag of its own).
   const caps = knowledgeRepos(store).artifactCaptures.list({ artifactId: a.id }).sort((x, y) => x.capturedAt.localeCompare(y.capturedAt));
   for (const cap of caps) {
-    const item: Item = { type: 'capture', id: cap.id, captured_at: cap.capturedAt };
-    if (cap.workspaceId !== ws) item.node = cap.workspaceId;
+    if (!aroundVisible(env, { kind: 'workspace', workspaceId: cap.workspaceId })) {
+      b.outside++;
+      continue;
+    }
+    const item: Item = { type: 'capture', id: cap.id, captured_at: cap.capturedAt, ...sourceLabel(env, cap.workspaceId) };
     if (cap.sourceUrl) item.source_url = servedLine(store, ws, cap.sourceUrl, 300);
     if (cap.title) item.title = servedLine(store, ws, stripFences(cap.title), 160);
     if (cap.flow) item.flow = servedLine(store, ws, stripFences(cap.flow), 80);
@@ -269,12 +285,20 @@ function expandArtifact(env: ReadEnv, id: string): Built {
          WHERE a.url_key = ? AND a.id <> ? AND a.workspace_id IN (SELECT value FROM json_each(?)) ORDER BY a.captured_at, a.rowid`,
       )
       .all(a.urlKey, a.id, JSON.stringify(env.scope.treeIds)) as Array<{ id: string; at: string; h: string | null }>;
+    // Other captures of the page follow the request scope (re-gate): node scope by default.
+    const seen = rows.filter((r) => aroundVisible(env, { kind: 'artifact', id: r.id }));
+    const hiddenNear = rows.filter((r) => !seen.includes(r));
     const own = knowledgeRepos(store).artifactTexts.get(canonicalArtifactId(store, a.id))?.contentSha256;
-    const prev = rows.filter((r) => r.at <= a.capturedAt).at(-1);
-    const next = rows.find((r) => r.at > a.capturedAt);
+    const prev = seen.filter((r) => r.at <= a.capturedAt).at(-1);
+    const next = seen.find((r) => r.at > a.capturedAt);
+    // Count a hidden version only where it would have been shown (nearer than the visible one).
+    const hPrev = hiddenNear.filter((r) => r.at <= a.capturedAt).at(-1);
+    const hNext = hiddenNear.find((r) => r.at > a.capturedAt);
+    if (hPrev && (!prev || hPrev.at > prev.at)) b.outside++;
+    if (hNext && (!next || hNext.at < next.at)) b.outside++;
     for (const [rel, r] of [['previous', prev], ['next', next]] as const) {
       if (!r) continue;
-      const item: Item = { type: 'page_version', relation: rel, artifact_id: r.id, captured_at: r.at };
+      const item: Item = { type: 'page_version', relation: rel, artifact_id: r.id, captured_at: r.at, ...sourceLabel(env, store.artifacts.get(r.id)?.workspaceId) };
       if (own && r.h) item.text_changed = own !== r.h;
       push(b, item);
     }
@@ -538,6 +562,7 @@ function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budg
     results: uniqueRefs(b.headerRefs),
     uploadDerived: b.upload,
     truncated: end < text.length,
+    restart: { cursor: encodeCursor({ key, offset }), remaining: Math.max(1, text.length - offset) },
     more: end < text.length ? text.length - end : 0,
     notes: b.notes,
     query,

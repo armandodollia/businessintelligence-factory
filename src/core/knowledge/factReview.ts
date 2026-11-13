@@ -123,15 +123,33 @@ export function reviewFactContext(
   let shownQuotes = quoteLines;
   let section = assemble(lines, quoteLines, '');
   if (estimateTokens(section) > budget) {
-    // Reserve the longest footer this section could need, then fit lines, then quotes, in what is left.
-    const reserve = estimateTokens(`\n${footerOf(lines, quoteLines.length)}`);
-    let room = budget - estimateTokens(HEADER) - reserve;
-    const fitLines = fitToBudget(lines, (l) => l.text, Math.max(0, room));
-    room -= fitLines.tokens;
-    const fitQuotes = fitToBudget(quoteLines, (q) => q.text, Math.max(0, room - (quoteLines.length ? estimateTokens(`${QUOTES_HEAD}\n`) : 0)));
-    shownLines = fitLines.items;
-    shownQuotes = fitQuotes.items;
-    section = assemble(shownLines, shownQuotes, footerOf(lines.slice(shownLines.length), quoteLines.length - shownQuotes.length));
+    // Re-gate: the section NEVER exceeds its budget, and when it drops content it says how much.
+    // Degrade in order: footer naming the left-out ids → footer with counts only → one count line
+    // (no header) → an empty section (a budget too small to say anything).
+    const total = lines.length + quoteLines.length;
+    const countFooter = (leftLines: number, leftQuotes: number) =>
+      `(left out for length: ${leftLines} fact line(s), ${leftQuotes} quote(s))`;
+    const attempt = (footerFor: (l: Line[], q: number) => string): string | undefined => {
+      const reserve = estimateTokens(`\n${footerFor(lines, quoteLines.length)}`);
+      let room = budget - estimateTokens(HEADER) - reserve;
+      if (room < 0) return undefined;
+      const fitLines = fitToBudget(lines, (l) => l.text, room);
+      room -= fitLines.tokens;
+      const fitQuotes = fitToBudget(quoteLines, (q) => q.text, Math.max(0, room - (quoteLines.length ? estimateTokens(`${QUOTES_HEAD}\n`) : 0)));
+      shownLines = fitLines.items;
+      shownQuotes = fitQuotes.items;
+      const text = assemble(shownLines, shownQuotes, footerFor(lines.slice(shownLines.length), quoteLines.length - shownQuotes.length));
+      return estimateTokens(text) <= budget ? text : undefined;
+    };
+    const minimal = `(knowledge: ${total} item(s) left out)`; // ~9 tokens
+    section =
+      attempt(footerOf) ??
+      attempt((l, q) => countFooter(l.length, q)) ??
+      (estimateTokens(minimal) <= budget ? minimal : '');
+    if (section === minimal || section === '') {
+      shownLines = [];
+      shownQuotes = [];
+    }
   }
   const truncated = shownLines.length < lines.length || shownQuotes.length < quoteLines.length;
   const results = new Map<string, RetrievalResultRef>();
