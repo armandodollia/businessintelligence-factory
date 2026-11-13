@@ -34,7 +34,7 @@ describe('GET /api/workspaces/:id/metrics (WP-G)', () => {
     expect(tree.status).toBe(200);
     expect(tree.body).toMatchObject({ rootWorkspaceId: t.root.id, scope: 'tree', groupBy: 'role', bucket: 'day', totals: { runs: 2, failedRuns: 1 } });
     expect(tree.body.experiments).toEqual({ included: false, excludedRuns: 0 });
-    expect(tree.body.lessons).toBeNull();
+    expect(tree.body.lessons).toEqual([]); // WP-E slot: no rules yet
     const node = await t.get(`/api/workspaces/${t.root.id}/metrics?scope=node`);
     expect(node.body.totals.runs).toBe(1);
   });

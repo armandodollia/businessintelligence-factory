@@ -1,6 +1,6 @@
 import { shortDate } from '../logic/format.js';
 import {
-  CHARTED_METRICS, GROUP_BY_OPTIONS, chartGeometry, formatMetric, outcomeColumns, seriesOf, useExportSummaryOnDemand, useMetrics,
+  CHARTED_METRICS, GROUP_BY_OPTIONS, chartGeometry, formatMetric, lessonsEffectRows, outcomeColumns, seriesOf, useExportSummaryOnDemand, useMetrics,
   type ChartedMetric, type MetricsFilter, type MetricsGroupBy, type MetricsPoint, type MetricsReport,
 } from '../logic/metrics.js';
 import { formatRate, formatTokens, formatUsd } from '../logic/usage.js';
@@ -38,7 +38,7 @@ export function Metrics({ wsId }: { wsId: string }) {
           <GroupTable r={r} />
           <Failures r={r} />
           <OutcomeLabels r={r} />
-          {/* --- WP-E slot: lessons effect per prompt version (integration fills this) --- */}
+          {/* --- WP-E slot: lessons effect per rule and prompt version --- */}
           <LessonsSlot lessons={r.lessons} />
           {/* --- end WP-E slot --- */}
           <KnowledgeSection r={r} />
@@ -324,13 +324,52 @@ function OutcomeLabels({ r }: { r: MetricsReport }) {
   );
 }
 
-// --- WP-E slot: lessons effect per prompt version -------------------------------------------------
-/** Placeholder until the lessons engine (WP-E) is merged; integration renders `lessons` here. */
-function LessonsSlot({ lessons }: { lessons: unknown }) {
+// --- WP-E slot: lessons effect per rule and prompt version ----------------------------------------
+function LessonsSlot({ lessons }: { lessons: MetricsReport['lessons'] }) {
+  const rows = lessonsEffectRows(lessons);
   return (
     <section data-testid="lessons-slot">
-      <h3>Lessons effect per prompt version</h3>
-      {lessons === null || lessons === undefined ? <p className="muted">Available once the lessons engine is in place.</p> : null}
+      <h3>Lessons effect per rule and prompt version</h3>
+      {rows.length === 0 && <p className="muted">No lesson rules in this business yet.</p>}
+      {rows.map((r) => (
+        <div key={r.key} className="card">
+          <div>
+            <span className="tag">{r.role}</span>
+            <span className="tag">{r.tag}</span>
+            <span className="tag">{r.label}</span>
+            {r.text}
+          </div>
+          <div className="small muted">{r.verdict}</div>
+          {r.versions.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>Prompt version</th>
+                  <th>Rule</th>
+                  <th>Tasks</th>
+                  <th>With this category</th>
+                  <th>Pass rate</th>
+                  <th>Rating agreement</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {r.versions.map((v) => (
+                  <tr key={v.promptVersion}>
+                    <td className="small">{v.promptVersion}</td>
+                    <td>{v.rule}</td>
+                    <td>{v.tasks}</td>
+                    <td>{v.hits}</td>
+                    <td>{v.passRate}</td>
+                    <td>{v.agreeRate}</td>
+                    <td>{v.cost}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      ))}
     </section>
   );
 }

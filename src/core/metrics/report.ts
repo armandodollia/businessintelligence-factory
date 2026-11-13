@@ -32,6 +32,9 @@ import { treeWorkspaceIds } from '../evidence/synthesis.js';
 import { ratingsWithSignals } from '../feedback/signals.js';
 import { knowledgeMetrics, type KnowledgeMetrics, type RetrievalGroup } from '../knowledge/metrics.js';
 import { listOutcomes } from '../learning/outcomes.js';
+import { rulesWithEffect, type RuleEffect } from '../learning/lessons/engine.js'; // WP-E slot
+import { categoryLabel } from '../learning/lessons/templates.js'; // WP-E slot
+import type { LessonRule } from '../learning/lessons/types.js'; // WP-E slot
 import { learningRepos } from '../learning/store.js';
 import { OUTCOME_LABELS, type OutcomeLabel } from '../learning/types.js';
 import { ratingDelta } from '../scoring/calibration.js';
@@ -115,12 +118,33 @@ export type MetricsKnowledgeGroup = {
   retrievedTokensPerRun: number | null;
 };
 
-// --- WP-E slot: lessons effect per prompt version (integration fills this) -------------------------
+// --- WP-E slot: lessons effect per prompt version (filled at the wave-2 integration) ---------------
 /**
- * Lessons effect per prompt version (WP-E lessons engine). `null` until integration wires WP-E's
- * per-version lesson figures in (`metricsReport` sets `lessons`); the web view has the matching slot.
+ * Lessons effect (WP-E `rulesWithEffect`) of the business tree: every rule (active and past) with the
+ * category's rate before the rule and under its current version, and per prompt version of the role
+ * (tasks, hits, rate, pass rate, rating agreement, cost). Rules are per tree, so a node scope shows its
+ * tree's rules; the effect is not windowed (it compares prompt versions, not days). Rule text is
+ * template text, never stored text.
  */
-export type MetricsLessonsSlot = null;
+export type MetricsLessonsRule = {
+  ruleId: string;
+  marker: string;
+  version: number;
+  role: LessonRule['role'];
+  category: string;
+  label: string;
+  status: LessonRule['status'];
+  text: string;
+  effect: RuleEffect;
+};
+export type MetricsLessonsSlot = MetricsLessonsRule[];
+
+function lessonsOfTree(store: Store, rootWorkspaceId: string): MetricsLessonsSlot {
+  return rulesWithEffect(store, rootWorkspaceId).map(({ rule, effect }) => ({
+    ruleId: rule.id, marker: rule.marker, version: rule.version, role: rule.role, category: rule.category,
+    label: categoryLabel(rule.category), status: rule.status, text: rule.text, effect,
+  }));
+}
 // --- end WP-E slot ---------------------------------------------------------------------------------
 
 export type MetricsReport = {
@@ -482,7 +506,7 @@ export function metricsReport(store: Store, opts: MetricsReportOptions): Metrics
       byGroup: knowledgeGroups(byGroup, groupBy),
     },
     // --- WP-E slot: lessons effect per prompt version ---
-    lessons: null,
+    lessons: store.workspaces.get(root) ? lessonsOfTree(store, root) : [],
     // --- end WP-E slot ---
   };
 }

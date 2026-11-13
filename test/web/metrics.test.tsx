@@ -33,7 +33,20 @@ const report = (groupBy = 'role') => ({
     retrievedShare: 0.1,
     byGroup: [],
   },
-  lessons: null,
+  lessons: [
+    {
+      ruleId: 'lrule_1', marker: 'L-7F3A2C', version: 2, role: 'worker', category: 'review:substantive:news_scan',
+      label: 'review issues: substantive (news_scan)', status: 'active', text: 'Check that each claim is supported.',
+      effect: {
+        ruleId: 'lrule_1', marker: 'L-7F3A2C', version: 2, withRule: 6, withRuleHits: 1, rateWithRule: 0.167, anyVersion: 8,
+        beforeRule: 5, beforeRuleHits: 4, rateBeforeRule: 0.8, cleanStreak: 4,
+        versions: [
+          { promptVersion: 'pv_before', firstSeen: '2026-11-01T00:00:00Z', tasks: 5, hits: 4, rate: 0.8, passRate: 0.4, agreeRate: null, costUsd: 1 },
+          { promptVersion: 'pv_rule_v2', ruleVersion: 2, firstSeen: '2026-11-05T00:00:00Z', tasks: 6, hits: 1, rate: 0.167, passRate: 0.83, agreeRate: 1, costUsd: 2.5 },
+        ],
+      },
+    },
+  ],
 });
 
 async function fakeFetch(input: string | URL | Request): Promise<Response> {
@@ -129,7 +142,12 @@ describe('Metrics page', () => {
     expect(screen.getByText('idle timeout')).toBeTruthy();
     expect(screen.getByText(/2 experiment \/ audit runs left out/)).toBeTruthy();
     expect(screen.getByText(/Human reads \(not agent context\): 7/)).toBeTruthy();
-    expect(screen.getByTestId('lessons-slot')).toBeTruthy();
+    // WP-E: effect per rule and per prompt version.
+    const lessons = screen.getByTestId('lessons-slot');
+    expect(lessons.textContent).toMatch(/L-7F3A2C\.v2/);
+    expect(lessons.textContent).toMatch(/working: 80% → 17%/);
+    expect(lessons.textContent).toMatch(/pv_rule_v2/);
+    expect(lessons.textContent).toMatch(/pv_before/);
     // Opening the page never runs the export.
     expect(calls.filter((c) => c.includes('/export/summary'))).toEqual([]);
     fireEvent.click(screen.getByRole('button', { name: 'Compute export exclusions' }));

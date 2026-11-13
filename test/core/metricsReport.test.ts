@@ -125,7 +125,7 @@ describe('metricsReport (WP-G)', () => {
     expect(r.failuresByReason).toEqual([{ reason: 'idle timeout', runs: 1 }]);
     expect(r.reviewIssuesByClass).toEqual([{ class: 'substantive', issues: 1, tasks: 1 }]);
     expect(r.experiments).toEqual({ included: false, excludedRuns: 1 });
-    expect(r.lessons).toBeNull(); // WP-E slot
+    expect(r.lessons).toEqual([]); // WP-E slot: no rules in this tree
   });
 
   it('agrees with the source APIs when nothing is filtered (prompt version, cost, calibration, outcomes)', () => {

@@ -8,6 +8,7 @@ import { api, metricsApi } from './api.js';
 import { exportSummaryView, type ExportSummaryView } from './exportSummary.js';
 import { useBusEvents, useResource } from './hooks.js';
 import { formatRate, formatTokens, formatUsd } from './usage.js';
+import { effectVerdict, pctText, type RuleEffect } from './lessons.js'; // WP-E slot
 
 // ---------------------------------------------------------------------------
 // report types
@@ -97,10 +98,48 @@ export type MetricsReport = {
     retrievedShare: number | null;
     byGroup: MetricsKnowledgeGroup[];
   };
-  // --- WP-E slot: lessons effect per prompt version (integration types this) ---
-  lessons: unknown;
+  // --- WP-E slot: lessons effect per rule and prompt version (`rulesWithEffect`) ---
+  lessons: MetricsLessonsRule[] | null;
   // --- end WP-E slot ---
 };
+
+// --- WP-E slot: lessons effect per rule and prompt version ------------------------------------------
+export type MetricsLessonsRule = {
+  ruleId: string;
+  marker: string;
+  version: number;
+  role: string;
+  category: string;
+  label: string;
+  status: string;
+  text: string;
+  effect: RuleEffect;
+};
+
+/** One table row per rule: its tag, the verdict so far and its per-prompt-version rows (newest first). */
+export function lessonsEffectRows(lessons: MetricsLessonsRule[] | null | undefined, minTasks?: number) {
+  return (lessons ?? []).map((l) => ({
+    key: l.ruleId,
+    tag: `${l.marker}.v${l.version}`,
+    role: l.role,
+    label: l.label,
+    status: l.status,
+    text: l.text,
+    verdict: l.status === 'active' ? effectVerdict(l.effect, minTasks) : l.status,
+    versions: [...l.effect.versions]
+      .sort((a, b) => b.firstSeen.localeCompare(a.firstSeen))
+      .map((v) => ({
+        promptVersion: v.promptVersion,
+        rule: v.ruleVersion ? `v${v.ruleVersion}` : '—',
+        tasks: v.tasks,
+        hits: `${v.hits} (${pctText(v.rate)})`,
+        passRate: pctText(v.passRate),
+        agreeRate: pctText(v.agreeRate),
+        cost: formatUsd(v.costUsd),
+      })),
+  }));
+}
+// --- end WP-E slot ----------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // filter
