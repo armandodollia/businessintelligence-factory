@@ -8,6 +8,8 @@ import { rootOf } from '../workspace/tree.js';
 import { RECOMMENDATION_KEYS, criterionDef, normalizedDelta, toNumber, type TargetType } from './criteria.js';
 import { normalizeCriterion, personaScore } from './priority.js';
 import { resolveTarget } from './ratings.js';
+// Learning loop WP-A: feedback signals (include overrides, unit proposal decisions) count in calibration.
+import { ratingsWithSignals, signalDelta } from '../feedback/signals.js';
 
 export type CalibrationRow = { targetType: TargetType; criterion: string; n: number; agreeRate: number; meanDelta: number };
 /**
@@ -29,7 +31,13 @@ export type PromptPatchExample = {
   userValue: Rating['userValue'];
   reason: string | undefined;
 };
-export type PromptPatch = { role: Role; examples: PromptPatchExample[]; patchText: string };
+export type PromptPatch = {
+  role: Role;
+  examples: PromptPatchExample[];
+  patchText: string;
+  /** WP-A: the rated items behind `examples` (privacy: export filtering of the applied patch). */
+  sources?: Array<{ targetType: TargetType; targetId: string }>;
+};
 
 /** Minimum number of user priority overrides before weights are refit. */
 export const MIN_WEIGHT_SAMPLES = 5;
@@ -43,7 +51,7 @@ const round = (v: number, d = 3) => Math.round(v * 10 ** d) / 10 ** d;
  */
 export function calibrationReport(workspaceId: string, deps: { store: Store }): CalibrationReport {
   const { store } = deps;
-  const ratings = store.ratings.list({ workspaceId });
+  const ratings = ratingsWithSignals(store, workspaceId);
   const byCriterion = groupRows(ratings, (r) => `${r.targetType}\u0000${r.criterion}`).map(({ first, rows }) =>
     summarize(first.targetType, first.criterion, rows),
   );
@@ -97,8 +105,7 @@ function summarize(targetType: TargetType, criterion: string, ratings: Rating[])
   const def = criterionDef(targetType, criterion);
   const deltas: number[] = [];
   for (const r of ratings) {
-    if (!def) continue;
-    const d = normalizedDelta(def, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue);
+    const d = def ? normalizedDelta(def, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue) : signalDelta(r);
     if (d !== undefined) deltas.push(d);
   }
   return {
@@ -315,7 +322,7 @@ export function proposePromptPatch(workspaceId: string, role: Role, deps: { stor
   // the earlier disagreement no longer stands. `priority` is computed by the harness from weights,
   // not judged by the agent, so it is never a prompt example (it feeds proposeWeights instead).
   const latest = new Map<string, Rating>();
-  for (const r of store.ratings.list({ workspaceId })) {
+  for (const r of ratingsWithSignals(store, workspaceId)) {
     if (r.targetType === 'recommendation' && r.criterion === 'priority') continue;
     const key = `${r.targetType}\u0000${r.targetId}\u0000${r.criterion}`;
     latest.delete(key);
@@ -327,7 +334,7 @@ export function proposePromptPatch(workspaceId: string, role: Role, deps: { stor
       const target = resolveTarget(store, workspaceId, r.targetType, r.targetId, r.criterion);
       if (!target || target.role !== role) return [];
       const def = criterionDef(r.targetType, r.criterion);
-      const d = def ? normalizedDelta(def, r.agentValue, r.userValue) : undefined;
+      const d = def ? normalizedDelta(def, r.agentValue, r.userValue) : signalDelta(r);
       return [{ r, title: target.title, mag: d === undefined ? 0 : Math.abs(d) }];
     })
     .sort((a, b) => b.mag - a.mag)
@@ -354,7 +361,7 @@ export function proposePromptPatch(workspaceId: string, role: Role, deps: { stor
         '',
       ].join('\n')
     : '';
-  return { role, examples, patchText };
+  return { role, examples, patchText, sources: items.map(({ r }) => ({ targetType: r.targetType, targetId: r.targetId })) };
 }
 
 const EXAMPLE_LINE = /^\s*\d+\.\s+(.*\S)\s*$/;

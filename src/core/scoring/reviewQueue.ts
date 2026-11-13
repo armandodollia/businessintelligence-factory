@@ -3,6 +3,7 @@ import { isOutputUsable } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
 import type { Criteria, Rating } from '../types.js';
 import { criterionDef, type TargetType } from './criteria.js';
+import { currentRatedKeys } from '../feedback/provenance.js';
 
 export type ReviewQueueItem = {
   targetType: TargetType;
@@ -24,7 +25,8 @@ export type ReviewQueueItem = {
  */
 export function reviewQueue(workspaceId: string, deps: { store: Store }): ReviewQueueItem[] {
   const { store } = deps;
-  const rated = new Set(store.ratings.list({ workspaceId }).map((r) => `${r.targetType}|${r.targetId}|${r.criterion}`));
+  // WP-A: a rating made before the agent revised the item no longer counts (the item is re-queued).
+  const rated = currentRatedKeys(store, workspaceId);
   const out: ReviewQueueItem[] = [];
   const push = (targetType: Rating['targetType'], targetId: string, title: string, values: Record<string, unknown>) => {
     const criteria: Criteria = {};
