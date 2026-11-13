@@ -468,3 +468,54 @@ style; gc refusal cases.
 After KS-0, after KS-4 and after KS-8, an independent review (different provider
 than the builder where available) against the design's §12 privacy rules and §18
 suites. Blocking findings are fixed before the next wave starts.
+
+## KS-1a builder notes
+
+Smaller decisions taken while building KS-1a (none changes §3, §9 or §12).
+
+- **Dependencies** (exact pins, pure JS, no install scripts): `parse5` 8.1.1 (MIT,
+  HTML), `saxes` 6.0.0 (ISC, strict XML, no DTD/entity resolution), `fflate` 0.8.3
+  (MIT, zip), `unpdf` 2.1.0 (MIT; bundles pdf.js 6, Apache-2.0, which contains no
+  `eval`/`new Function`). `parse5` and `saxes` were already in the tree via `jsdom`.
+- **Extra files:** `extract/types.ts` (contract types, defaults, `ExtractTooLargeError`)
+  and `extract/sections.ts` (heading-path builder shared by html/docx).
+- **`ExtractOptions`** = `maxTextChars`, `xlsxMaxRows`, plus optional `csvMaxRows`
+  (default `xlsxMaxRows`; §16 has no csv key), `maxInputBytes` (default 50 MB, the
+  artifact store limit), `maxUnzippedBytes` (default 200 MB, declared size of the
+  zip parts read; zip-bomb guard), `filename` (type fallback when the mime is
+  generic, e.g. uploads with `application/octet-stream`; bytes are sniffed first).
+- **`too_large`:** input over `maxInputBytes` or zip parts over `maxUnzippedBytes` →
+  no blocks. Text over `maxTextChars` → `too_large` **with the blocks cut at the cap**
+  and a message in `error`, so KS-1 can still index the start of a huge document.
+- **Chunk offsets** index `blocksText(blocks)` (block texts joined by `\n\n`). Chunks
+  never span blocks, have trimmed edges, and only whitespace lies between them.
+- **`contentHash`** = sha256 over the normalized heading path and text of each
+  non-empty block; locators are ignored.
+- **`normalizeText`** also strips C0/C1 controls, soft hyphen and Unicode tag
+  characters (U+E0000–E007F), applies NFC, and keeps single newlines and at most one
+  blank line (paragraph structure is needed for chunking).
+- **`estimateTokens`** counts UTF-16 units.
+- **`urlKey`:** only http(s) URLs get a key (others and unparseable → `undefined`);
+  credentials and default ports dropped; scheme, path case and the order of
+  remaining query parameters kept; tracking names matched case-insensitively.
+- **Locators:** `page N`, `slide N`, `sheet N` (the sheet name is the heading path),
+  `#id` for an HTML heading with an id. Heading path separator: ` > `.
+- **HTML:** `header` dropped at page level but kept inside `article`/`main`/`section`
+  (article titles live there); `footer`, `nav`, `aside`, roles `navigation`/
+  `banner`/`contentinfo`/`complementary`, closed `<dialog>`, form fields and
+  `<title>` dropped; button text kept. Hiding through stylesheet classes is not
+  detected (no CSS engine). Pathological nesting (≈10 000 levels) → `failed`.
+- **docx:** headings from style ids or `styles.xml` names (`Title` above `heading 1`,
+  `outlineLvl`); hidden (`w:vanish`) runs, tracked deletions and field codes skipped;
+  headers, footers, footnotes and comments not extracted.
+- **pptx:** slide title is the heading path and also the first line of the slide
+  text, so title-only slides stay searchable; speaker notes not extracted.
+- **xlsx:** cached cell values (formulas not evaluated; dates stay serial numbers),
+  rows as `| a | b |`, empty rows skipped, columns past 1 024 ignored, hidden sheets
+  included. csv and xlsx cuts end with `[truncated: first N of M rows]`.
+- **PDF:** no CMap files are loaded, so some CJK PDFs extract poorly; pdf.js runs on
+  the main thread with no timeout, so KS-1 should keep large PDFs on the queue.
+- **For KS-1/KS-0:** extraction does not redact identity secrets or remove fence
+  sequences (that is `trust.ts` / ingest); `error` is one line ≤ 300 chars but may
+  quote a fragment of the input, so treat it like the artifact's text (same tree,
+  upload-derived for uploads).
