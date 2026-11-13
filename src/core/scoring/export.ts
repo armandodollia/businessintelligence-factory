@@ -338,3 +338,18 @@ function feedbackPseudoDecision(store: Store, e: FeedbackEvent): Decision {
   }
   return pseudoDecision(e.workspaceId, e.agentRunId, refs, { before: e.beforeJson ?? null, after: e.afterJson ?? null, reason: e.reason ?? null });
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-0: the export's upload expansion is the authority for the materialized
+// `upload_derived` flags (design §12). The backfill and tests use these so flag and expansion agree.
+
+/** Ids of internal uploads, across all workspaces (same set the export excludes by). */
+export function internalUploadIds(store: Store): Set<string> {
+  return uploadIds(store);
+}
+
+/** Whether the evidence of item `id`, as the export expands it (`evidenceOf`), includes an internal upload. */
+export function evidenceIncludesUpload(store: Store, id: string, uploads: Set<string> = uploadIds(store)): boolean {
+  return evidenceOf(store, id).some((e) => uploads.has(e));
+}
+// --- end knowledge store KS-0 ---------------------------------------------------------------------

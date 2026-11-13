@@ -25,6 +25,8 @@ import { createApp } from './routes.js';
 import { escalationToolHandlers, startEscalations, type EscalationService } from '../core/escalation/escalation.js';
 import { attachEventRecorders, type EventRecorders } from '../core/telemetry/recorders.js';
 import { registerFeedbackOutcomes } from '../core/learning/feedbackOutcomes.js';
+// Knowledge store KS-0: idempotent backfill after migrations.
+import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.js';
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -73,6 +75,10 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
   const port = config.server.port;
 
   const store = openStore(join(dataDir, 'bif.db'));
+  // Knowledge store KS-0: complete rows the knowledge store needs (entities, url keys, upload flags,
+  // invariant rows). Idempotent; a no-op when nothing is missing.
+  const knowledgeBackfill = backfillKnowledge(store);
+  if (backfillChanged(knowledgeBackfill)) console.log(`[bif] knowledge store backfill: ${JSON.stringify(knowledgeBackfill)}`);
   // Learning loop: human actions (feedback events) become decision outcomes through one listener.
   registerFeedbackOutcomes();
   const artifacts = new ArtifactStore(store, dataDir);
