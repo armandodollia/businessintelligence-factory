@@ -287,6 +287,20 @@ export const KNOWLEDGE_DEFAULTS = {
 } as const;
 // --- end knowledge store KS-0 config ---------------------------------------------------------
 
+// --- learning loop WP-F: reviewer audits --------------------------------------------------------
+/** `config.audit` (optional): who audits verified tasks, and how many per audit by default. */
+export const auditConfigSchema = z.strictObject({
+  /**
+   * Auditor model. Used when it differs from the original reviewer's model; otherwise (and when
+   * unset) the auditor is the first model of another enabled provider (cross-provider), else another
+   * model of the same provider (`auditModelFor`, learning/reviewerAudit.ts).
+   */
+  model: modelRefSchema.optional(),
+  /** Tasks re-reviewed per audit when the caller gives no N. Default 5. */
+  n: z.number().int().min(1).max(50).optional(),
+});
+// --- end WP-F config ---------------------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -361,6 +375,8 @@ export const bifConfigSchema = z
     knowledge: knowledgeConfigSchema.optional(),
     /** Learning loop WP-E: lessons engine and weekly retro (all defaulted). */
     lessons: lessonsConfigSchema.optional(),
+    /** Learning loop WP-F: reviewer audit model and default size. */
+    audit: auditConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -385,6 +401,7 @@ export const bifConfigSchema = z
     }
     check(cfg.escalation?.model, ['escalation', 'model']); // WP-D
     check(cfg.lessons?.retro?.model, ['lessons', 'retro', 'model']); // learning loop WP-E
+    check(cfg.audit?.model, ['audit', 'model']); // WP-F
     // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).
     const ex = cfg.knowledge?.extraction;
     if (ex && (ex.chunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.chunkTokens) > (ex.maxChunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.maxChunkTokens)) {

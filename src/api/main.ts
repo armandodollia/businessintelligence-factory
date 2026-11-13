@@ -32,6 +32,7 @@ import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.j
 import { ingestorFor } from '../core/knowledge/ingest.js';
 import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
 import { retroJobs, retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
+import { recoverExperiments } from '../core/learning/experiments.js'; // learning loop WP-F
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -189,7 +190,10 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
         `${report.continuedPipelines.length} pipelines continued`,
     );
   }
-  // Learning loop WP-E: the weekly retro of every business tree runs as a scheduler system job.
+  // Learning loop WP-F: experiments the last process left running are interrupted (resume failed their arm tasks).
+  const interrupted = recoverExperiments(runtime.store);
+  if (interrupted.length) console.log(`[bif] ${interrupted.length} experiments were interrupted by the restart`);
+  // Pipeline schedules, (WP-F) audit schedules and (WP-E) the weekly retro of every business tree.
   const scheduler = startScheduler({ ...runtime.research, systemJobs: () => retroJobs(runtime.research) });
   // KS-1: artifacts whose text is still `pending` (saved before a restart, or by older code paths)
   // are extracted in the background.

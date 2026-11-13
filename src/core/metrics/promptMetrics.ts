@@ -11,6 +11,7 @@
 import type { Store } from '../store/db.js';
 import type { AgentRun, Rating, Role } from '../types.js';
 import { criterionDef, normalizedDelta } from '../scoring/criteria.js';
+import { experimentTaskIds, NORMAL_RUN_SQL, taggedRunIds } from '../learning/runTags.js'; // learning loop WP-F
 
 export type PromptVersionMetrics = {
   role: Role;
@@ -100,7 +101,10 @@ type Acc = {
 /** Metrics per (role, prompt version) of one workspace; see `PromptVersionMetrics`. */
 export function promptVersionMetrics(store: Store, workspaceId: string, opts: { role?: Role } = {}): PromptVersionMetrics[] {
   const groups = new Map<string, Acc>();
-  const runs = store.agentRuns.list({ workspaceId }).filter((r) => r.promptVersion && (!opts.role || r.role === opts.role));
+  // Learning loop WP-F: experiment and audit runs (and experiment tasks) are not counted here.
+  const tagged = taggedRunIds(store, workspaceId);
+  const experimentTasks = experimentTaskIds(store, workspaceId);
+  const runs = store.agentRuns.list({ workspaceId }).filter((r) => r.promptVersion && (!opts.role || r.role === opts.role) && !tagged.has(r.id));
   const accOf = (run: AgentRun): Acc => {
     const key = `${run.role}\u0000${run.promptVersion}`;
     let a = groups.get(key);
@@ -126,7 +130,7 @@ export function promptVersionMetrics(store: Store, workspaceId: string, opts: { 
   for (const r of store.ratings.list({ workspaceId })) {
     if (r.targetType === 'recommendation' && r.criterion === 'priority') continue; // computed from weights, not judged
     const run = originRunOfRating(store, workspaceId, r, index);
-    if (!run?.promptVersion || (opts.role && run.role !== opts.role)) continue;
+    if (!run?.promptVersion || (opts.role && run.role !== opts.role) || tagged.has(run.id)) continue;
     const a = accOf(run);
     a.ratings++;
     if (r.verdict === 'agree') a.agrees++;
@@ -138,11 +142,11 @@ export function promptVersionMetrics(store: Store, workspaceId: string, opts: { 
   // Review outcomes by the version of the task's first worker run.
   const firstWorker = new Map<string, AgentRun>();
   for (const run of store.agentRuns.list({ workspaceId })) {
-    if (!run.taskId || run.role === 'reviewer' || !run.promptVersion || firstWorker.has(run.taskId)) continue;
+    if (!run.taskId || run.role === 'reviewer' || !run.promptVersion || firstWorker.has(run.taskId) || tagged.has(run.id)) continue;
     firstWorker.set(run.taskId, run);
   }
   for (const t of store.tasks.list({ workspaceId })) {
-    if (!FINAL.has(t.status)) continue;
+    if (!FINAL.has(t.status) || experimentTasks.has(t.id)) continue;
     const run = firstWorker.get(t.id);
     if (!run || (opts.role && run.role !== opts.role)) continue;
     const a = accOf(run);
@@ -160,7 +164,8 @@ export function promptVersionMetrics(store: Store, workspaceId: string, opts: { 
       .prepare(
         `SELECT COALESCE(SUM(COALESCE(cost_usd, cli_reported_cost_usd, 0)), 0) AS c,
                 COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS t
-         FROM agent_usage WHERE workspace_id = ? AND role = ? AND prompt_version = ?`,
+         FROM agent_usage WHERE workspace_id = ? AND role = ? AND prompt_version = ?
+           AND run_id NOT IN (SELECT r.id FROM agent_runs r WHERE NOT ${NORMAL_RUN_SQL('r')})`,
       )
       .get(workspaceId, a.role, a.version) as { c: number; t: number };
     const mean = (xs: number[]) => (xs.length ? round3(xs.reduce((s, x) => s + x, 0) / xs.length) : null);

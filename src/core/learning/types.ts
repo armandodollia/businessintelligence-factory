@@ -44,7 +44,10 @@ export type OutcomeLabel = (typeof OUTCOME_LABELS)[number];
  * What wrote the outcome. `user_*` sources are human actions (actor = the configured user id).
  * `fact_lineage`: knowledge-store lineage events (fact observations, TTL), keyed by `sourceKey`.
  */
-export const OUTCOME_SOURCES = ['review_loop', 'supersede', 'what_changed', 'dispute', 'user_override', 'user_reject', 'fact_lineage'] as const;
+export const OUTCOME_SOURCES = [
+  'review_loop', 'supersede', 'what_changed', 'dispute', 'user_override', 'user_reject', 'fact_lineage',
+  'reviewer_audit', // learning loop WP-F: an auditor on another model failed a review that passed
+] as const;
 export type OutcomeSource = (typeof OUTCOME_SOURCES)[number];
 
 /** Kinds of output an outcome can concern (besides the task itself). */

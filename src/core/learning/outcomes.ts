@@ -3,6 +3,7 @@ import { newId } from '../store/repos.js';
 import type { Role } from '../config/schema.js';
 import type { Decision, Task } from '../types.js';
 import { learningRepos } from './store.js';
+import { experimentTaskIds, isAuditRun, isTaggedDecision } from './runTags.js'; // learning loop WP-F
 import {
   OUTCOME_LABELS,
   type DecisionOutcome,
@@ -179,6 +180,7 @@ function taskRunDecisions(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, 
   return store.agentRuns
     .list({ taskId: task.id })
     .filter((r) => r.workspaceId === task.workspaceId && roles.includes(r.role))
+    .filter((r) => !isAuditRun(store, r.id)) // learning loop WP-F: reviewer audits are not the task's reviews
     .flatMap((r) => store.decisions.list({ agentRunId: r.id }))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
@@ -367,6 +369,11 @@ export type OutcomeFilter = {
   promptVersion?: string;
   /** ISO time; only outcomes created at or after it. */
   since?: string;
+  /**
+   * Learning loop WP-F: outcomes of experiment arm tasks and of decisions made by experiment / audit runs
+   * are left out unless true (they must not count twice in normal reports and lessons).
+   */
+  includeExperiments?: boolean;
 };
 
 /** Outcomes in insertion order, filtered (workspaces: e.g. one business tree, never across trees). */
@@ -380,7 +387,9 @@ export function listOutcomes(store: Store, filter: OutcomeFilter = {}): Decision
     ...(filter.promptVersion ? { promptVersion: filter.promptVersion } : {}),
   };
   const rows = filter.workspaceIds ? filter.workspaceIds.flatMap((workspaceId) => repo.list({ ...base, workspaceId })) : repo.list(base);
+  const experimentTasks = filter.includeExperiments ? undefined : experimentTaskIds(store); // WP-F
   return rows
+    .filter((o) => !experimentTasks || !((o.taskId && experimentTasks.has(o.taskId)) || (o.decisionId && isTaggedDecision(store, o.decisionId))))
     .filter((o) => (filter.role ? o.role === filter.role : true))
     .filter((o) => (filter.since ? o.createdAt >= filter.since : true))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));

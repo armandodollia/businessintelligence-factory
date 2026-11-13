@@ -49,6 +49,7 @@ import { mountOversightRoutes } from './oversightRoutes.js'; // WP-D
 import { mountKnowledgeMetricsRoutes } from './knowledgeMetricsRoutes.js'; // knowledge store KS-6
 import { mountKnowledgeRoutes } from './knowledgeRoutes.js'; // knowledge store KS-7
 import { mountLessonsRoutes } from './lessonsRoutes.js'; // learning loop WP-E
+import { mountWpfRoutes } from './experimentRoutes.js'; // learning loop WP-F
 
 export type AppDeps = {
   store: Store;
@@ -684,6 +685,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- learning loop WP-E: lessons page (proposals, rules and their effect, retros) ---------------
   mountLessonsRoutes(app, { store, config, events, research });
   // --- end WP-E --------------------------------------------------------------------------------
+  // --- learning loop WP-F: reviewer audits and experiments ---------------------------------------
+  mountWpfRoutes(app, { store, config, research }, workspace);
+  // --- end WP-F --------------------------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

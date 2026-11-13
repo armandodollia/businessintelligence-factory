@@ -284,3 +284,20 @@ export const lessonsApi = {
   startRetro: (wsId: string) => post<{ started: boolean }>(ls(wsId, '/retro')),
 };
 // --- end WP-E ------------------------------------------------------------------------------------
+// --- learning loop WP-F: reviewer audits and experiments --------------------------------------
+export const wpfApi = {
+  /** Audits of the workspace's business tree, their summary and the tree's audit schedules. */
+  getAudits: (wsId: string) => get<import('./types.js').AuditsView>(`${ws(wsId)}/audits`),
+  /** Starts an audit of the N most recently verified tasks of the tree (runs in the background). */
+  startAudit: (wsId: string, body: { n?: number; taskIds?: string[] }) =>
+    post<{ batchId: string; audits: import('./types.js').ReviewerAudit[] }>(`${ws(wsId)}/audits`, body),
+  createAuditSchedule: (wsId: string, cron: string, n: number) =>
+    post<import('./types.js').AuditSchedule>(`${ws(wsId)}/audit-schedules`, { cron, n }),
+  updateAuditSchedule: (id: string, patch: { enabled?: boolean; cron?: string; n?: number }) =>
+    post<import('./types.js').AuditSchedule>(`/api/audit-schedules/${enc(id)}`, patch),
+  listExperiments: (wsId: string) => get<import('./types.js').Experiment[]>(`${ws(wsId)}/experiments`),
+  startExperiment: (wsId: string, body: import('./types.js').NewExperiment) =>
+    post<import('./types.js').Experiment>(`${ws(wsId)}/experiments`, body),
+  getExperiment: (id: string) => get<import('./types.js').ExperimentComparison>(`/api/experiments/${enc(id)}`),
+};
+// --- end WP-F ---------------------------------------------------------------------------------

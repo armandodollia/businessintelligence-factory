@@ -1135,4 +1135,111 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX retros_root ON retros (root_workspace_id, created_at);
   `,
+  // 20: learning loop WP-F — reviewer audits and A/B experiments. Tags on agent runs, decisions and
+  // tasks (`experiment_id`, `arm`, `audit_id`; `lessons_off` on runs) so metrics can leave experiment
+  // and audit runs out; runs of an experiment task and decisions of a tagged run inherit the tags by
+  // trigger from their insert. `reviewer_audits`: one re-review of a verified task by another model
+  // (verdict agree | miss | invalid | skipped), per business-tree root. `experiments`: one source task
+  // re-run as arms A / B (model and / or worker prompt version). `audit_schedules`: cron schedules of
+  // audits, run by the existing scheduler. Self-contained: depends on no other learning-loop migration.
+  `
+  ALTER TABLE agent_runs ADD COLUMN experiment_id TEXT;
+  ALTER TABLE agent_runs ADD COLUMN arm TEXT;
+  ALTER TABLE agent_runs ADD COLUMN audit_id TEXT;
+  ALTER TABLE agent_runs ADD COLUMN lessons_off INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE decisions ADD COLUMN experiment_id TEXT;
+  ALTER TABLE decisions ADD COLUMN arm TEXT;
+  ALTER TABLE decisions ADD COLUMN audit_id TEXT;
+  ALTER TABLE tasks ADD COLUMN experiment_id TEXT;
+  ALTER TABLE tasks ADD COLUMN arm TEXT;
+  CREATE INDEX agent_runs_experiment ON agent_runs (experiment_id) WHERE experiment_id IS NOT NULL;
+  CREATE INDEX agent_runs_audit ON agent_runs (audit_id) WHERE audit_id IS NOT NULL;
+  CREATE INDEX decisions_experiment ON decisions (experiment_id) WHERE experiment_id IS NOT NULL;
+  CREATE INDEX decisions_audit ON decisions (audit_id) WHERE audit_id IS NOT NULL;
+  CREATE INDEX tasks_experiment ON tasks (experiment_id) WHERE experiment_id IS NOT NULL;
+
+  -- Every run of an experiment task (worker, reviewer, ...) carries its experiment and arm, lessons off.
+  CREATE TRIGGER agent_runs_experiment_tag AFTER INSERT ON agent_runs
+    WHEN new.task_id IS NOT NULL AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = new.task_id AND t.experiment_id IS NOT NULL)
+  BEGIN
+    UPDATE agent_runs SET
+      experiment_id = (SELECT t.experiment_id FROM tasks t WHERE t.id = new.task_id),
+      arm = (SELECT t.arm FROM tasks t WHERE t.id = new.task_id),
+      lessons_off = 1
+    WHERE id = new.id;
+  END;
+  -- Every decision of a tagged run carries the run's tags.
+  CREATE TRIGGER decisions_run_tag AFTER INSERT ON decisions
+    WHEN EXISTS (SELECT 1 FROM agent_runs r WHERE r.id = new.agent_run_id AND (r.experiment_id IS NOT NULL OR r.audit_id IS NOT NULL))
+  BEGIN
+    UPDATE decisions SET
+      experiment_id = (SELECT r.experiment_id FROM agent_runs r WHERE r.id = new.agent_run_id),
+      arm = (SELECT r.arm FROM agent_runs r WHERE r.id = new.agent_run_id),
+      audit_id = (SELECT r.audit_id FROM agent_runs r WHERE r.id = new.agent_run_id)
+    WHERE id = new.id;
+  END;
+
+  CREATE TABLE reviewer_audits (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    started_by TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    schedule_id TEXT,
+    status TEXT NOT NULL,
+    verdict TEXT,
+    reason TEXT,
+    pass_threshold REAL NOT NULL,
+    original_decision_id TEXT NOT NULL,
+    original_run_id TEXT,
+    original_model TEXT NOT NULL,
+    original_prompt_version TEXT,
+    original_score REAL NOT NULL,
+    audit_model TEXT,
+    audit_run_id TEXT,
+    audit_decision_id TEXT,
+    audit_prompt_version TEXT,
+    audit_score REAL,
+    audit_issues TEXT NOT NULL DEFAULT '[]',
+    outcome_id TEXT,
+    created_at TEXT NOT NULL,
+    ended_at TEXT
+  );
+  CREATE INDEX reviewer_audits_root ON reviewer_audits (root_workspace_id, created_at);
+  CREATE INDEX reviewer_audits_task ON reviewer_audits (task_id);
+
+  CREATE TABLE experiments (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    source_task_id TEXT NOT NULL,
+    research_run_id TEXT NOT NULL,
+    name TEXT,
+    arms TEXT NOT NULL,
+    repeats INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    failure_reason TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    created_at TEXT NOT NULL,
+    ended_at TEXT
+  );
+  CREATE INDEX experiments_ws ON experiments (workspace_id, created_at);
+
+  CREATE TABLE audit_schedules (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    activated_at TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX audit_schedules_root ON audit_schedules (root_workspace_id);
+  `,
 ];

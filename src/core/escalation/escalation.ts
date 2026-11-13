@@ -28,6 +28,7 @@ import {
   escalationRequests,
   type EscalationRerunPayload,
 } from './context.js';
+import { isAuditRun, isExperimentTask } from '../learning/runTags.js'; // learning loop WP-F
 
 /**
  * Structured escalations (WP-D). When a task ends `unverified` or `failed`, the `escalation` agent
@@ -128,7 +129,9 @@ export function escalationToolHandlers(): Partial<Record<ToolName, ExtraToolHand
 
 /** The latest valid review of a task (last reviewer run that submitted one). */
 function lastReviewOf(store: Store, task: Task): { score: number; issues: ReviewIssue[] } | undefined {
-  const runs = store.agentRuns.list({ taskId: task.id, role: 'reviewer' }).filter((r) => r.workspaceId === task.workspaceId);
+  const runs = store.agentRuns
+    .list({ taskId: task.id, role: 'reviewer' })
+    .filter((r) => r.workspaceId === task.workspaceId && !isAuditRun(store, r.id)); // learning loop WP-F
   for (const run of runs.reverse()) {
     const review = getRunOutputs(store, run.id).review;
     if (review) return { score: review.score, issues: review.issues };
@@ -210,6 +213,7 @@ export async function runEscalation(deps: ResearchDeps, taskId: string): Promise
   if (!settings.enabled || settings.maxQuestions === 0) return [];
   const task = store.tasks.get(taskId);
   if (!task || !ESCALATABLE.has(task.status)) return [];
+  if (isExperimentTask(store, task.id)) return []; // learning loop WP-F: experiments never ask the user
   if (escalationRequests(store, task).some((r) => r.status === 'pending')) return [];
   const runs = store.agentRuns.list({ taskId, role: 'escalation' }).filter((r) => r.workspaceId === task.workspaceId);
   if (runs.length >= settings.maxPerTask) return [];

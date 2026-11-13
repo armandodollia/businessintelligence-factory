@@ -1,6 +1,7 @@
 import type { Store } from '../store/db.js';
 import type { Criteria, Decision } from '../types.js';
 import { CRITERIA } from './criteria.js';
+import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 import type { ReviewQueueItem } from './reviewQueue.js';
 
 const DECISION_KEYS = CRITERIA.decision.map((c) => c.key);
@@ -41,7 +42,11 @@ export function decisionReviewQueue(workspaceId: string, deps: { store: Store })
   for (const d of store.decisions.list({ workspaceId })) {
     const criteria = decisionCriteria(d);
     const unrated = Object.keys(criteria).filter((k) => !rated.has(`${d.id}|${k}`));
-    if (unrated.length) out.push({ targetType: 'decision', targetId: d.id, title: decisionTitle(d), criteria, unrated });
+    if (!unrated.length) continue;
+    // Learning loop WP-F: experiment / audit judgments stay ratable (arm comparison) but say what they are.
+    const tags = decisionTags(store, d.id);
+    const prefix = tags.auditId ? '[audit] ' : tags.experimentId ? `[experiment arm ${tags.arm ?? '?'}] ` : '';
+    out.push({ targetType: 'decision', targetId: d.id, title: `${prefix}${decisionTitle(d)}`, criteria, unrated });
   }
   return out;
 }

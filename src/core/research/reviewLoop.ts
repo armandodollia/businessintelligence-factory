@@ -20,6 +20,8 @@ import type { ReviewSlice } from '../knowledge/readCommon.js'; // KS-4
 import { briefingBudget, fitBriefing, promptReadsOf, synthesisBriefing, taskRecheckFactIds, workerBriefing, type BriefLine, type Briefing } from '../knowledge/briefing.js'; // KS-5
 import type { PromptRead } from '../knowledge/promptReads.js'; // KS-5
 import { servedLine } from '../knowledge/texts.js'; // KS-5
+import { experimentWorkerPrompt, isExperimentTask } from '../learning/runTags.js'; // learning loop WP-F
+import { retireExperimentOutputs } from './outputs.js'; // learning loop WP-F
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -371,7 +373,9 @@ async function workerStep(
   const { store, config } = deps;
   const initial = store.tasks.get(taskId)!;
   const role = roleForTask(initial);
-  const system = workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config.dataDir, initial.workspaceId));
+  const system =
+    experimentWorkerPrompt(store, taskId) ?? // learning loop WP-F: an experiment arm's worker prompt version
+    workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config.dataDir, initial.workspaceId));
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
@@ -419,6 +423,40 @@ async function workerStep(
   return { ok: false, reason };
 }
 
+/**
+ * Everything a reviewer run of `task` in `round` is started with besides its model: the reviewer system
+ * prompt (with the business's calibration) and its version, the minimal review prompt (`reviewPrompt`,
+ * with the open disputes of earlier rounds) and the prompt reads to log before the run starts.
+ * Learning loop WP-F: reviewer audits use exactly this, so an auditor sees what the reviewer saw.
+ */
+export function reviewerRunInput(
+  deps: Pick<ResearchDeps, 'store' | 'config'>,
+  task: Task,
+  round: number,
+): { systemPrompt: string; promptVersion: string; prompt: string; promptReads: PromptRead[] } {
+  const { store, config } = deps;
+  const system = reviewerSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId));
+  const context = reviewContext(deps, task);
+  // Knowledge store KS-2/KS-4: the prior claims and quotes in the reviewer's prompt are a read (design
+  // §12), logged on the reviewer run before it starts (a crash mid-run cannot lose the row).
+  const k = context.knowledge;
+  const promptReads: PromptRead[] = [
+    ...(k
+      ? [{
+          query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: k.results,
+          tokensReturned: k.tokens, truncated: k.truncated, uploadDerived: k.uploadDerived,
+        }]
+      : []),
+    ...(context.outputsRead ? [context.outputsRead] : []), // KS-5: the outputs briefing
+  ];
+  return {
+    systemPrompt: system,
+    promptVersion: promptVersion(system),
+    prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))),
+    promptReads,
+  };
+}
+
 /** One reviewer run (always a NEW run). Malformed or failed reviews become score 0 + a blocking issue. */
 async function reviewStep(
   deps: ResearchDeps,
@@ -427,31 +465,15 @@ async function reviewStep(
 ): Promise<{ valid: boolean; score: number; issues: ReviewIssue[] }> {
   const { store, config } = deps;
   const task = store.tasks.get(taskId)!;
-  const system = reviewerSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId));
-  const version = promptVersion(system);
   const model = reviewerFor(task.model, config);
-  const context = reviewContext(deps, task);
-  // Knowledge store KS-2/KS-4: the prior claims and quotes in the reviewer's prompt are a read (design
-  // §12), logged on the reviewer run before it starts (a crash mid-run cannot lose the row).
-  const k = context.knowledge;
+  const input = reviewerRunInput(deps, task, round); // learning loop WP-F: shared with reviewer audits
   const res = await runAgent(deps, {
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
-    prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))), systemPrompt: system,
-    model, needsBrowser: false, promptVersion: version,
-    ...(k || context.outputsRead
-      ? {
-          promptReads: [
-            ...(k
-              ? [{
-                  query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: k.results,
-                  tokensReturned: k.tokens, truncated: k.truncated, uploadDerived: k.uploadDerived,
-                }]
-              : []),
-            ...(context.outputsRead ? [context.outputsRead] : []), // KS-5: the outputs briefing
-          ],
-        }
-      : {}),
+    prompt: input.prompt, systemPrompt: input.systemPrompt,
+    model, needsBrowser: false, promptVersion: input.promptVersion,
+    ...(input.promptReads.length ? { promptReads: input.promptReads } : {}),
   });
+  const version = input.promptVersion;
   throwIfAborted(deps.signal);
   const review = getRunOutputs(store, res.agentRunId).review;
   // A review counts only if the reviewer run itself finished successfully.
@@ -471,16 +493,20 @@ async function reviewStep(
 
 function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unverified' | 'failed', round: number): Task {
   const { store } = deps;
+  // Learning loop WP-F: an experiment arm task leaves no results behind (its outputs are retired and it
+  // writes no outcomes); its status, rounds and reviews are what the experiment compares.
+  const experiment = isExperimentTask(store, taskId);
   const done = store.transaction(() => {
     const task = store.tasks.update(taskId, { status, round });
     // Findings, recommendations and personas of the task take its status; outputs of earlier rounds
     // that were not re-submitted become `superseded`.
-    applyTaskStatus(store, task, status);
+    if (experiment) retireExperimentOutputs(store, task); // WP-F
+    else applyTaskStatus(store, task, status);
     return task;
   });
   // Live refresh: output lists in the web app reload when a task's outputs got their final status.
   deps.events.emit({ type: 'task_status', workspaceId: done.workspaceId, taskId: done.id, status: done.status });
-  recordTaskEndOutcomes(store, done); // learning loop WP-C: task-end + superseded outcomes
+  if (!experiment) recordTaskEndOutcomes(store, done); // learning loop WP-C: task-end + superseded outcomes
   return done;
 }
 
