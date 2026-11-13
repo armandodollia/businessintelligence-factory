@@ -39,6 +39,8 @@ export type Card = {
   header: Record<string, unknown>;
   headerRefs: RetrievalResultRef[];
   headerUpload: boolean;
+  /** What the card is of (its entity, or its node as a `workspace` ref): listed with every line served (`cardPageLines`). */
+  subject: RetrievalResultRef;
   /**
    * What the header leaves out, served as the card's first lines (paging rework): a name too long for the
    * header, aliases (entity); scope, description and audiences (node). Not part of briefings.
@@ -51,9 +53,13 @@ export type Card = {
 /** JSON characters of a name in a card or response header (`boundedText`). */
 export const HEADER_NAME_JSON = 200;
 
-/** The lines a card is paged by: its detail lines, then its lines. */
-export function cardPageLines(card: Pick<Card, 'detail' | 'lines'>): CardLine[] {
-  return [...card.detail, ...card.lines];
+/**
+ * The lines a card is paged by: its detail lines, then its lines, each listing the card's subject too, so
+ * a page that serves only lines with no item of their own (a profile key, a count, an ids-only change)
+ * still logs whose card it served (§12, §13).
+ */
+export function cardPageLines(card: Pick<Card, 'detail' | 'lines' | 'subject'>): CardLine[] {
+  return [...card.detail, ...card.lines].map((l) => ({ ...l, refs: l.refs.some((r) => r.id === card.subject.id) ? l.refs : [...l.refs, card.subject] }));
 }
 
 /** A name for a header, bounded (`boundedText`); a name cut there is served whole as a detail line too. */
@@ -294,7 +300,7 @@ export function entityCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, 
       : 'nothing left out of this card for your scope. Unverified and history facts: search with include_unverified / include_history.',
     refs: [], upload: false,
   });
-  return { header, headerRefs, headerUpload: names.uploadOnly || names.aliases.some((a) => a.uploadOnly), detail, lines };
+  return { header, headerRefs, headerUpload: names.uploadOnly || names.aliases.some((a) => a.uploadOnly), subject: { id: e.id, kind: 'entity' }, detail, lines };
 }
 
 /** The card of node `view.workspaceId` within its own view (`mode` node) or the tree. */
@@ -380,7 +386,7 @@ export function nodeCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode): C
     }));
   }
   lines.push({ text: 'more: search (scope "tree" for the rest of the business), get_card with an entity_id, list_changes', refs: [], upload: false });
-  return { header, headerRefs: [], headerUpload: false, detail, lines };
+  return { header, headerRefs: [], headerUpload: false, subject: { id: node.id, kind: 'workspace' }, detail, lines };
 }
 
 /** A node card line too big for a page: `read_workspace <node>` at that line, with the measured budget that holds it. */

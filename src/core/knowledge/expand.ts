@@ -211,11 +211,12 @@ function expandFact(env: ReadEnv, id: string): Built {
   push(b, { type: 'claim', text: servedLine(store, ws, f.claim, CLAIM_MAX) }, factRef, f.uploadDerived === true);
   const criteria = redactServed(store, ws, f.criteria);
   if (criteria && typeof criteria === 'object' && Object.keys(criteria).length) push(b, { type: 'criteria', criteria }, factRef, f.uploadDerived === true);
+  // Every item of the fact lists the fact, so a page that serves only its state still logs it (§12).
   push(b, {
     type: 'state', lineage_id: f.lineageId ?? f.id, confirm_count: f.confirmCount ?? 0,
     freshness: { since: fresh.since, age_days: fresh.ageDays, ttl_days: fresh.ttlDays, stale: fresh.stale },
     ...(f.lineageConflict ? { lineage_conflict: true } : {}),
-  });
+  }, factRef, f.uploadDerived === true);
   evidenceItems(env, b, f);
   const lineage = f.lineageId ?? f.id;
   const all = lineageVersions(store, lineage).filter((v) => v.id !== f.id && inTree(env, v.workspaceId));
@@ -654,7 +655,9 @@ function rawItem(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built): voi
   }
   b.items.push({
     value: { type: 'raw', offset: 0, text: fenceEvidence(a.id, text) },
-    refs: [], upload: b.upload,
+    // The artifact (and its canonical) on every page that serves a piece: a later page's retrieval row
+    // must list what it served (§12 exposure resolves these ids), not rely on page 1's header refs.
+    refs: b.headerRefs, upload: b.upload,
     text: { body: text, fence: a.id, meta: (pos) => ({ type: 'raw', offset: pos }) },
   });
 }

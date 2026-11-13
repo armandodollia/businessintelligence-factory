@@ -93,7 +93,10 @@ async function run(t: Ks4, c: RunContext, cs: SweepCase, budget: number, stats: 
     const rows = knowledgeRepos(t.store).retrievalEvents.list({ agentRunId: c.agentRunId });
     expect(rows.length, `${label}: one retrieval row per page`).toBe(before + 1);
     const listed = new Set(rows.at(-1)!.resultIds.map((x) => x.id));
-    for (const it of (p[cs.key] as unknown[]) ?? []) for (const id of servedIds(it)) expect(listed.has(id), `${label}: ${id} served but not logged`).toBe(true);
+    const served = (p[cs.key] as unknown[]) ?? [];
+    // A page that served content has a retrieval row that lists it (§12: exposure resolves these ids).
+    if (served.length) expect(listed.size, `${label}: the retrieval row lists nothing though the page served ${served.length} item(s)`).toBeGreaterThan(0);
+    for (const it of served) for (const id of servedIds(it, cs)) expect(listed.has(id), `${label}: ${id} served but not logged`).toBe(true);
     if (!p.cursor) break;
     expect(p.cursor, `${label}: the cursor moves`).not.toBe(cursor);
     cursor = p.cursor;
@@ -102,10 +105,13 @@ async function run(t: Ks4, c: RunContext, cs: SweepCase, budget: number, stats: 
 }
 
 /** Ids whose text an item carries (checked against the retrieval row). */
-function servedIds(it: unknown): string[] {
+function servedIds(it: unknown, cs: SweepCase): string[] {
   if (!it || typeof it !== 'object') return [];
   const o = it as Record<string, unknown>;
   const ids: string[] = [];
+  // Raw text is the named artifact's; a fact's claim, criteria and state are the named fact's.
+  if (o.type === 'raw' && typeof cs.input.artifact_id === 'string') ids.push(cs.input.artifact_id);
+  if (['claim', 'criteria', 'state'].includes(String(o.type)) && typeof cs.input.id === 'string') ids.push(cs.input.id);
   if ((o.type === 'quote' || (o.type === 'evidence' && !o.outside_scope)) && typeof o.artifact_id === 'string') ids.push(o.artifact_id);
   if ((o.type === 'chunk' || o.type === 'section') && typeof o.chunk_id === 'string') ids.push(o.chunk_id);
   if ((o.type === 'version' || o.type === 'unverified_update') && typeof o.claim === 'string') ids.push(o.id as string);

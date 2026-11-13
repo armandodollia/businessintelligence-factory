@@ -156,4 +156,47 @@ describe('upload exposure through every read path (design §12)', () => {
     expect(card.lines.filter((l) => l.startsWith('alias: '))).toEqual(['alias: Project Falcon [upload]']);
     expect(t.rows(c3.agentRunId)[0]!.resultIds.map((r) => r.id)).toContain(falcon.id);
   });
+
+  describe('a later page alone exposes a run (§12: exposure resolves the ids of the run\'s own rows)', () => {
+    /** The cursor of page 2 of `input`, read by another run (so the run under test reads only page 2). */
+    async function page2(t: ReturnType<typeof ks4>, tool: 'read_artifact' | 'expand', input: Record<string, unknown>) {
+      const first = await t.call<{ cursor?: string }>(t.ctx('ws_a'), tool, input);
+      expect(first.cursor).toBeDefined();
+      const c = t.ctx('ws_a');
+      const p = await t.call<{ items: Array<{ type: string }> }>(c, tool, { ...input, cursor: first.cursor });
+      return { c, items: p.items, row: t.rows(c.agentRunId) };
+    }
+
+    it('raw mode: a run that reads an upload\'s text only on a later page is exposed by that page\'s row', async () => {
+      const t = ks4(opened);
+      const up = uploadInternal('ws_a', { name: 'kpis.csv', bytes: new TextEncoder().encode(`renewals,-12%\n${'row,1\n'.repeat(600)}`), mime: 'text/csv' }, t);
+      await ingestorFor(t).idle();
+      const { c, items, row } = await page2(t, 'read_artifact', { artifact_id: up.id, mode: 'raw', max_tokens: 400 });
+      expect(items.map((i) => i.type)).toEqual(['raw']);
+      expect(row).toHaveLength(1);
+      expect(row[0]!.resultIds.map((r) => r.id)).toContain(up.id);
+      expect(runIsUploadExposed(t.store, c.agentRunId)).toBe(true);
+    });
+
+    it('raw mode: an artifact that becomes upload-derived after the read still exposes the run (by the row\'s ids)', async () => {
+      const t = ks4(opened);
+      const a = await t.page('ws_a', `public body ${'line of text\n'.repeat(600)}`);
+      const { c, items } = await page2(t, 'read_artifact', { artifact_id: a.id, mode: 'raw', max_tokens: 400 });
+      expect(items.map((i) => i.type)).toEqual(['raw']);
+      expect(runIsUploadExposed(t.store, c.agentRunId)).toBe(false);
+      t.store.artifacts.update(a.id, { uploadDerived: true });
+      expect(runIsUploadExposed(t.store, c.agentRunId)).toBe(true);
+    });
+
+    it('a fact\'s state item: a run served only that item of an upload-derived fact is exposed', async () => {
+      const t = ks4(opened);
+      const f = t.fact('ws_a', `Upload claim ${'detail '.repeat(400)}`);
+      const { c, items, row } = await page2(t, 'expand', { id: f.id, max_tokens: 300 });
+      expect(items.map((i) => i.type)).toEqual(['state']);
+      expect(row[0]!.resultIds.map((r) => r.id)).toContain(f.id);
+      expect(runIsUploadExposed(t.store, c.agentRunId)).toBe(false);
+      t.store.findings.update(f.id, { uploadDerived: true }); // e.g. a later confirmation citing an upload
+      expect(runIsUploadExposed(t.store, c.agentRunId)).toBe(true);
+    });
+  });
 });

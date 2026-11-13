@@ -497,7 +497,11 @@ sections degrade instead (left-out ids → counts → one count line → empty o
 - **Kept:** redaction before every cut; no cut inside a fence marker; cursors are compact strings
   (`c1.<key>.<offset>[.<pos>].<check>`) bound to the request (`{tool, caller node, role, every input
   except cursor / max_tokens}`) with a check value; one retrieval row per page listing everything
-  the page served (header refs on the first page, every item served whole, as a piece or cut).
+  the page served (header refs on the first page, every item served whole, as a piece or cut). Every
+  item lists its own source, so a later page's row never depends on page 1: a raw piece lists its
+  artifact, a fact's claim / criteria / state the fact, a card line the card's entity or node (as a
+  `workspace` ref) besides the items it names. A page that served content never logs an empty row (the
+  §12 exposure check resolves these ids).
 - **Acceptance test:** the paging sweep (`test/core/knowledge/pagingSweep[A-D].test.ts`) sweeps
   every read tool over budgets from 1 upward — scope, `around`, later-page cursors, keys full of
   escape characters, long records, quotes across chunk boundaries, nodes with many keys — from the

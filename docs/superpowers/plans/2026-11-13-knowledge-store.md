@@ -1321,7 +1321,11 @@ target serves. Design §7.3 and §9 ("Paging") state the binding rules; the choi
 - **Elsewhere note (gate follow-up ruling).** Always on page 1 of a node-scoped search with matches
   elsewhere: page 1 is measured with it (room reserved, even at the cost of a hit, which opens page 2).
   The sweep requires it on page 1 at every budget (`firstNote` of a `SweepCase`).
-- **Retrieval rows** are deduplicated per page (`uniqueRefs`), search included.
+- **Retrieval rows** are deduplicated per page (`uniqueRefs`), search included. Gate follow-up: every item
+  carries its source's ref (raw pieces: the artifact; a fact's `state`: the fact; card lines: `Card.subject`,
+  the entity or the node as `{ kind: 'workspace' }`), so no page that served content logs an empty row —
+  the sweep checks it, and `readSlice` checks that a run served only a later raw page or a fact's `state`
+  is upload-exposed from that row alone (also when the item becomes upload-derived after the read).
 - **Tests.** Acceptance: `pagingSweep[A-D].test.ts` (shapes in `sweepHelpers.ts` `SWEEP_SPECS`, four
   shards so they run in parallel): 28 request shapes, about 105 budgets each from 1 to 2 400 plus restarts
   from three later cursors at four budgets; about 21 000 pages and 1 500 pointers followed per run
