@@ -24,9 +24,10 @@ export function ineligibleFindingIds(store: Store, workspaceId: string, ids: str
 }
 
 /** User override (API): include or exclude a finding from synthesis. Throws if unknown. */
-export function setIncludeInSynthesis(store: Store, findingId: string, include: boolean): Finding {
+export function setIncludeInSynthesis(store: Store, findingId: string, include: boolean | null): Finding {
   if (!store.findings.get(findingId)) throw new Error(`finding '${findingId}' not found`);
-  return store.findings.update(findingId, { includeInSynthesis: include });
+  // null resets to the default (verified findings only); `undefined` clears the column.
+  return store.findings.update(findingId, { includeInSynthesis: include ?? undefined });
 }
 
 /** Prompt section listing the findings usable for synthesis (and how many were left out). */

@@ -127,6 +127,30 @@ describe('scheduler', () => {
     expect(t.calls).toEqual([]);
   });
 
+  it('schedules sharing a workspace do not starve each other (oldest due first)', async () => {
+    const t = setup();
+    const MIN = 60_000;
+    let now = new Date(2026, 10, 12, 8, 0, 0).getTime();
+    const base = new Date(now).toISOString();
+    const a = addSchedule(t.store, t.ws.id, { cron: '* * * * *', activatedAt: base });
+    const b = addSchedule(t.store, t.ws.id, { cron: '* * * * *', activatedAt: base });
+    const sched = startScheduler(t.deps, () => now);
+    await sched.idle();
+    const ran: string[] = [];
+    const runsOf = () => [a.id, b.id].filter((id) => t.store.schedules.get(id)!.lastRunAt === new Date(now).toISOString());
+    for (let i = 0; i < 4; i++) {
+      now += MIN;
+      await sched.tick();
+      await sched.idle();
+      ran.push(...runsOf());
+    }
+    sched.stop();
+    // One job per check (same workspace), alternating, so both run.
+    expect(ran).toHaveLength(4);
+    expect(ran.filter((id) => id === a.id)).toHaveLength(2);
+    expect(ran.filter((id) => id === b.id)).toHaveLength(2);
+  });
+
   it('skips a workspace that already has a running research run', async () => {
     const t = setup();
     const now = Date.now();

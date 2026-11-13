@@ -10,6 +10,7 @@ import {
   WEIGHT_KEYS,
   type AppliedPromptPatch,
   type ChangeEntry,
+  type FindingView,
   type PatchRole,
   type PromptPatch,
   type WeightKey,
@@ -475,8 +476,9 @@ export function useFindings(wsId: string | null | undefined) {
   const findings = useResource(`findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId) : null);
   const symptoms = useResource(`symptoms:${wsId ?? ''}`, wsId ? () => api.listSymptoms(wsId) : null);
   const action = useAction();
+  /** `null` resets the override to the default (verified findings only). */
   const setIncludeInSynthesis = useCallback(
-    async (findingId: string, include: boolean) => {
+    async (findingId: string, include: boolean | null) => {
       await action.run(() => api.setFindingInclude(findingId, include));
       await findings.reload();
     },
@@ -497,6 +499,29 @@ export function useFindings(wsId: string | null | undefined) {
       await Promise.all([findings.reload(), symptoms.reload()]);
     },
   };
+}
+
+/**
+ * Findings of a workspace by id, for recommendation → findings → artifacts traversal (spec §7.3).
+ * `resolve(ids)` returns the findings in citation order plus ids that could not be found.
+ */
+export function useFindingIndex(wsId: string | null | undefined) {
+  const res = useResource(`findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId) : null);
+  const byId = useMemo(() => new Map((res.data ?? []).map((f) => [f.id, f])), [res.data]);
+  const resolve = useCallback(
+    (ids: string[]) => {
+      const found: FindingView[] = [];
+      const missing: string[] = [];
+      for (const id of ids) {
+        const f = byId.get(id);
+        if (f) found.push(f);
+        else missing.push(id);
+      }
+      return { found, missing };
+    },
+    [byId],
+  );
+  return { resolve, loading: res.loading, error: res.error };
 }
 
 /** Screenshots grouped per flow ordered by step; everything else as links. */
@@ -691,17 +716,18 @@ export function useScoringWeights(wsId: string | null | undefined) {
     });
   }, [current, fromServer]);
 
-  const save = useCallback(async () => {
-    if (!wsId || invalid.length > 0) return;
+  /** Resolves `true` only when the server saved (and rescored) the weights. */
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!wsId || invalid.length > 0) return false;
     const weights: Record<string, number> = {};
     for (const k of WEIGHT_KEYS) weights[k] = parseWeight(values[k] ?? '') as number;
     const personaWeight = parseWeight(values.personaWeight ?? '') as number;
     const saved = await action.run(() => api.putScoringWeights(wsId, { weights, personaWeight }));
-    if (saved) {
-      res.mutate((prev) => ({ ...saved, proposedWeights: prev?.proposedWeights }));
-      setSavedDecisionId(saved.decisionId ?? null);
-      setDraft(null);
-    }
+    if (!saved) return false;
+    res.mutate((prev) => ({ ...saved, proposedWeights: prev?.proposedWeights }));
+    setSavedDecisionId(saved.decisionId ?? null);
+    setDraft(null);
+    return true;
   }, [wsId, invalid.length, values, action.run, res.mutate]);
 
   const proposed = current?.proposedWeights;
@@ -769,13 +795,79 @@ export function useChanges(wsId: string | null | undefined) {
 export const ratingKey = (targetType: RatingTargetType, targetId: string, criterion: string) =>
   `${targetType}:${targetId}:${criterion}`;
 
+// Shared per-workspace index of the user's current ratings (latest per target + criterion), so
+// every CriterionRating shows existing state without one request per control.
+type RatingIndex = { ratings: Map<string, Rating>; loaded: boolean; listeners: Set<() => void>; loading?: Promise<void> | undefined };
+const ratingIndexes = new Map<string, RatingIndex>();
+
+function ratingIndex(wsId: string): RatingIndex {
+  let idx = ratingIndexes.get(wsId);
+  if (!idx) {
+    idx = { ratings: new Map(), loaded: false, listeners: new Set() };
+    ratingIndexes.set(wsId, idx);
+  }
+  return idx;
+}
+
+function notifyRatings(idx: RatingIndex) {
+  for (const fn of idx.listeners) fn();
+}
+
+/** Records a rating the user just made in the shared index. */
+export function rememberRating(r: Rating): void {
+  const idx = ratingIndex(r.workspaceId);
+  idx.ratings.set(ratingKey(r.targetType, r.targetId, r.criterion), r);
+  notifyRatings(idx);
+}
+
+/** Drops cached rating indexes (tests). */
+export function resetRatingIndexes(): void {
+  ratingIndexes.clear();
+}
+
+/** The user's current rating of one criterion, loaded once per workspace. */
+export function useExistingRating(wsId: string, targetType: RatingTargetType, targetId: string, criterion: string) {
+  const idx = ratingIndex(wsId);
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const fn = () => bump((n) => n + 1);
+    idx.listeners.add(fn);
+    if (!idx.loaded && !idx.loading) {
+      idx.loading = api
+        .listRatings(wsId)
+        .then((list) => {
+          for (const r of list) {
+            const k = ratingKey(r.targetType, r.targetId, r.criterion);
+            const prev = idx.ratings.get(k);
+            if (!prev || prev.createdAt <= r.createdAt) idx.ratings.set(k, r);
+          }
+          idx.loaded = true;
+        })
+        .catch(() => {
+          // Without the index the controls simply start unrated.
+        })
+        .finally(() => {
+          idx.loading = undefined;
+          notifyRatings(idx);
+        });
+    }
+    return () => {
+      idx.listeners.delete(fn);
+    };
+  }, [idx, wsId]);
+  return idx.ratings.get(ratingKey(targetType, targetId, criterion));
+}
+
 export function useRatings() {
   const [rated, setRated] = useState<Record<string, Rating>>({});
   const action = useAction();
   const rate = useCallback(
     async (input: RatingInput): Promise<Rating | undefined> => {
       const rating = await action.run(() => api.rate(input));
-      if (rating) setRated((r) => ({ ...r, [ratingKey(input.targetType, input.targetId, input.criterion)]: rating }));
+      if (rating) {
+        setRated((r) => ({ ...r, [ratingKey(input.targetType, input.targetId, input.criterion)]: rating }));
+        rememberRating(rating);
+      }
       return rating;
     },
     [action.run],
@@ -791,13 +883,30 @@ export interface CriterionTarget {
   agentValue: number | string | null | undefined;
 }
 
-/** State machine behind `CriterionRating`: agree, or disagree → own value + optional reason. */
+/** Same verdict and value as the existing rating, so submitting again would only add a duplicate row. */
+function sameRating(existing: Rating | undefined, input: RatingInput): boolean {
+  if (!existing || existing.verdict !== input.verdict) return false;
+  if (input.verdict === 'agree') return true;
+  return String(existing.userValue) === String(input.userValue) && (existing.reason ?? '') === (input.reason ?? '');
+}
+
+/**
+ * State machine behind `CriterionRating`: agree, or disagree → own value + optional reason.
+ * Starts from the user's existing rating (shown as done). Ratings are append-only history: a
+ * changed rating adds a row and the latest wins; re-submitting the same rating sends nothing.
+ */
 export function useCriterionRating(target: CriterionTarget, onRated?: (r: Rating) => void) {
   const { rate, saving, error } = useRatings();
-  const [mode, setMode] = useState<'idle' | 'disagreeing' | 'done'>('idle');
+  const existing = useExistingRating(target.workspaceId, target.targetType, target.targetId, target.criterion);
+  const [mode, setMode] = useState<'idle' | 'disagreeing' | 'done' | null>(null);
   const [verdict, setVerdict] = useState<Rating['verdict'] | null>(null);
   const [value, setValue] = useState('');
   const [reason, setReason] = useState('');
+
+  // Until the user acts, the state mirrors the existing rating.
+  const shownMode = mode ?? (existing ? 'done' : 'idle');
+  const shownVerdict = verdict ?? existing?.verdict ?? null;
+  const shownValue = mode === null && existing?.verdict === 'disagree' ? String(existing.userValue ?? '') : value;
 
   const submit = async (v: Rating['verdict']) => {
     const input: RatingInput = {
@@ -813,6 +922,11 @@ export function useCriterionRating(target: CriterionTarget, onRated?: (r: Rating
       input.userValue = typeof target.agentValue === 'number' && raw !== '' && Number.isFinite(asNum) ? asNum : raw;
       if (reason.trim()) input.reason = reason.trim();
     }
+    if (sameRating(existing, input)) {
+      setVerdict(v);
+      setMode('done');
+      return;
+    }
     const rating = await rate(input);
     if (rating) {
       setVerdict(v);
@@ -822,10 +936,11 @@ export function useCriterionRating(target: CriterionTarget, onRated?: (r: Rating
   };
 
   return {
-    mode,
-    verdict,
-    value,
+    mode: shownMode,
+    verdict: shownVerdict,
+    value: shownValue,
     reason,
+    existing: existing ?? null,
     setValue,
     setReason,
     saving,
@@ -833,12 +948,18 @@ export function useCriterionRating(target: CriterionTarget, onRated?: (r: Rating
     canSubmitDisagree: value.trim() !== '',
     agree: () => submit('agree'),
     startDisagree: () => {
-      setValue(target.agentValue == null ? '' : String(target.agentValue));
+      const from = existing?.verdict === 'disagree' ? existing.userValue : target.agentValue;
+      setValue(from == null ? '' : String(from));
+      setReason(existing?.verdict === 'disagree' ? (existing.reason ?? '') : '');
       setMode('disagreeing');
     },
-    cancel: () => setMode(verdict ? 'done' : 'idle'),
+    cancel: () => setMode(shownVerdict ? 'done' : 'idle'),
     submitDisagree: () => submit('disagree'),
-    change: () => setMode('idle'),
+    change: () => {
+      if (mode === null) setValue(shownValue);
+      setVerdict(shownVerdict);
+      setMode('idle');
+    },
   };
 }
 

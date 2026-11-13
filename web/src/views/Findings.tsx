@@ -1,6 +1,6 @@
 import { shortDate } from '../logic/format.js';
 import { useFindings } from '../logic/hooks.js';
-import type { Symptom } from '../logic/types.js';
+import type { LastReview, Symptom } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
 
@@ -35,7 +35,13 @@ export function Findings({ wsId }: { wsId: string }) {
               onChange={(e) => void f.setIncludeInSynthesis(x.id, e.currentTarget.checked)}
             />{' '}
             Use in recommendations{x.includeInSynthesis !== undefined ? ' (your override)' : x.status === 'verified' ? '' : ' (excluded: not verified)'}
-          </label>
+          </label>{' '}
+          {x.includeInSynthesis !== undefined && (
+            <button className="link" disabled={f.saving} onClick={() => void f.setIncludeInSynthesis(x.id, null)}>
+              reset to default
+            </button>
+          )}
+          {x.status !== 'verified' && x.lastReview && <LastReviewNote review={x.lastReview} />}
           <CriteriaRatings workspaceId={wsId} targetType="finding" targetId={x.id} criteria={x.criteria} />
           <EvidenceList ids={x.evidence} />
         </div>
@@ -58,5 +64,25 @@ function SymptomList({ wsId, title, items }: { wsId: string; title: string; item
         </div>
       ))}
     </section>
+  );
+}
+
+/** Last reviewer verdict on an unverified finding's task (spec §7.2). */
+function LastReviewNote({ review }: { review: LastReview }) {
+  return (
+    <div className="review-note">
+      <span className="muted">Last review score</span> <b>{review.score}/10</b>
+      {review.issues.length > 0 ? (
+        <ul className="small">
+          {review.issues.map((i, n) => (
+            <li key={i.id ?? n}>
+              {i.class && <span className="tag">{i.class}</span>} {i.description}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span className="muted"> (no issues listed)</span>
+      )}
+    </div>
   );
 }

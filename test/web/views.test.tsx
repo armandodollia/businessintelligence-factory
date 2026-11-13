@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetRatingIndexes } from '../../web/src/logic/hooks.js';
 import { App } from '../../web/src/views/App.js';
 
 const rec = {
@@ -87,6 +88,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetRatingIndexes();
   vi.unstubAllGlobals();
   window.location.hash = '';
 });
@@ -106,7 +108,8 @@ describe('web views', () => {
     render(<App />);
     expect(await screen.findByText('Simplify onboarding')).toBeTruthy();
     expect(screen.getByRole('columnheader', { name: 'Simulated' })).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Agree' }).length).toBe(6);
+    // 2 recommendation criteria + priority + 4 simulated persona scores.
+    expect(screen.getAllByRole('button', { name: 'Agree' }).length).toBe(7);
     await act(async () => {
       screen.getAllByRole('button', { name: 'Disagree' })[0]!.click();
     });

@@ -97,17 +97,20 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
   const check = async (): Promise<void> => {
     if (stopped) return;
     const t = now();
+    // Oldest-due first: a schedule that stayed due because its workspace was busy runs before one
+    // that became due later, so schedules sharing a workspace cannot starve each other.
+    const due: Array<{ s: Schedule; at: number }> = [];
     for (const s of deps.store.schedules.list({ enabled: true })) {
-      if (busy.has(s.workspaceId)) continue;
-      const base = scheduleBaseline(s, startedAt);
-      let due: number;
       try {
-        due = nextDue(s.cron, new Date(base)).getTime();
+        const at = nextDue(s.cron, new Date(scheduleBaseline(s, startedAt))).getTime();
+        if (at <= t) due.push({ s, at });
       } catch (e) {
         console.warn(`[bif] schedule ${s.id}: ${(e as Error).message}`);
-        continue;
       }
-      if (due > t) continue;
+    }
+    due.sort((a, b) => a.at - b.at || (a.s.lastRunAt ?? '').localeCompare(b.s.lastRunAt ?? '') || a.s.id.localeCompare(b.s.id));
+    for (const { s } of due) {
+      if (busy.has(s.workspaceId)) continue;
       if (!deps.store.workspaces.get(s.workspaceId)) continue;
       if (currentResearchRun(deps.store, s.workspaceId)) continue;
       busy.add(s.workspaceId);

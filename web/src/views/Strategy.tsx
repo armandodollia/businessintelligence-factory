@@ -1,10 +1,12 @@
 import { formatValue } from '../logic/format.js';
-import { useRecommendations, useScoringWeights } from '../logic/hooks.js';
-import type { PersonaFeedback } from '../logic/types.js';
-import { CriteriaRatings } from './CriterionRating.js';
+import { useFindingIndex, useRecommendations, useScoringWeights } from '../logic/hooks.js';
+import type { FindingView, PersonaFeedback } from '../logic/types.js';
+import { CriteriaRatings, CriterionRating } from './CriterionRating.js';
+import { EvidenceList } from './EvidenceList.js';
 
 export function Strategy({ wsId }: { wsId: string }) {
   const { recommendations, loading, error, reload } = useRecommendations(wsId);
+  const index = useFindingIndex(wsId);
   return (
     <div>
       <h2>Strategy</h2>
@@ -31,9 +33,17 @@ export function Strategy({ wsId }: { wsId: string }) {
               <td>
                 <b>{r.title}</b>
                 <p>{r.summary}</p>
-                <span className="muted">{r.findingIds.length} findings</span>
+                <LinkedFindings ids={r.findingIds} resolve={index.resolve} />
               </td>
-              <td>{formatValue(r.priority)}</td>
+              <td>
+                <CriterionRating
+                  workspaceId={wsId}
+                  targetType="recommendation"
+                  targetId={r.id}
+                  criterion="priority"
+                  agentValue={r.priority}
+                />
+              </td>
               <td>
                 <CriteriaRatings workspaceId={wsId} targetType="recommendation" targetId={r.id} criteria={r.criteria} />
               </td>
@@ -110,7 +120,7 @@ function WeightsEditor({ wsId, onSaved }: { wsId: string; onSaved: () => void })
         <button
           className="primary"
           disabled={!w.dirty || w.invalid.length > 0 || w.saving}
-          onClick={() => void w.save().then(onSaved)}
+          onClick={() => void w.save().then((ok) => ok && onSaved())}
         >
           {w.saving ? 'Saving…' : 'Save weights'}
         </button>
@@ -151,5 +161,41 @@ function PersonaFeedbackCell({ wsId, recId, feedback }: { wsId: string; recId: s
         <p className="small muted">Would change mind: {feedback.wouldChangeMind}</p>
       </details>
     </div>
+  );
+}
+
+/** Recommendation → findings → artifacts (spec §7.3): each cited finding expands to its evidence. */
+function LinkedFindings({
+  ids,
+  resolve,
+}: {
+  ids: string[];
+  resolve: (ids: string[]) => { found: FindingView[]; missing: string[] };
+}) {
+  const { found, missing } = resolve(ids);
+  if (ids.length === 0) return <div className="muted">no findings cited</div>;
+  return (
+    <details className="linked-findings">
+      <summary>
+        {ids.length} finding{ids.length === 1 ? '' : 's'}
+      </summary>
+      <ul className="plain small">
+        {found.map((f) => (
+          <li key={f.id}>
+            <details>
+              <summary>
+                <b>{f.subject}</b>: {f.claim} <span className={`status ${f.status}`}>{f.status}</span>
+              </summary>
+              <EvidenceList ids={f.evidence} />
+            </details>
+          </li>
+        ))}
+        {missing.map((id) => (
+          <li key={id} className="muted">
+            {id} (not found)
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }

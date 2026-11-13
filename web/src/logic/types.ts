@@ -230,3 +230,16 @@ export interface ChangeEntry {
   /** True when the diff found nothing. */
   empty: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// findings with review state, current ratings
+
+/** Latest reviewer verdict on a finding's task (`GET .../findings` → `lastReview`). */
+export interface LastReview {
+  score: number;
+  issues: Array<{ id?: string; class?: string; description?: string; evidence?: string[] }>;
+  decisionId: string;
+  at: string;
+}
+
+export type FindingView = Finding & { lastReview?: LastReview };

@@ -114,7 +114,9 @@ work on start and runs scheduled jobs (missed runs execute once on the next star
   prompts, and every recommendation is put to each persona. Their feedback is labelled *simulated*,
   shown in its own column, and has weight 0 in priority unless you change `scoring.personaWeight`.
 - **Ratings and calibration.** Every criterion value on every item can be rated: agree, or disagree
-  with your own value and reason (inline or in the Review queue). Priority is a weighted combination
+  with your own value and reason (inline or in the Review queue). Ratings are kept as history:
+  changing a rating adds a new row and the latest one is what the UI shows as your current rating
+  (re-submitting an unchanged rating sends nothing). Priority is a weighted combination
   of recommendation criteria; the Strategy page edits the weights and offers weights refit from your
   priority overrides (never auto-applied). The Decision log page proposes prompt patches per role from
   your disagreements; you edit and approve them before they are written. Weight changes and patches

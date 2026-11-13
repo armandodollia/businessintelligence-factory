@@ -25,7 +25,7 @@ import { decisionReviewQueue } from '../core/scoring/decisionQueue.js';
 import type { Store } from '../core/store/db.js';
 import { newId } from '../core/store/repos.js';
 import { recordSystemDecision } from '../core/systemDecision.js';
-import type { Decision, Phase, Schedule, UserRequest, Workspace } from '../core/types.js';
+import type { Decision, Phase, Rating, Schedule, UserRequest, Workspace } from '../core/types.js';
 import { acceptUnitProposal, crossCuttingSymptoms, rejectUnitProposal, rollup } from '../core/workspace/businessMap.js';
 import { createWorkspace, workspaceTree } from '../core/workspace/tree.js';
 import { mountMcp, type McpDeps } from './mcp.js';
@@ -124,7 +124,8 @@ const schemas = {
     patchText: z.string(),
     examples: z.array(z.unknown()).optional(),
   }),
-  includeFinding: z.object({ include: z.boolean() }),
+  /** `null` clears the override (back to the default: verified only). */
+  includeFinding: z.object({ include: z.boolean().nullable() }),
   scoringWeights: z.object({
     weights: z.partialRecord(z.enum(RECOMMENDATION_KEYS), z.number().min(0)).optional(),
     personaWeight: z.number().min(0).optional(),
@@ -294,7 +295,30 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // --- results --------------------------------------------------------------------------------
-  app.get('/api/workspaces/:id/findings', (c) => c.json(store.findings.list({ workspaceId: workspace(c.req.param('id')).id })));
+  /**
+   * Findings plus `lastReview` (spec §7.2): the latest reviewer verdict on the finding's task
+   * (`score`, `issues`, `decisionId`, `at`), so unverified findings can show the objections.
+   */
+  app.get('/api/workspaces/:id/findings', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const lastReview = new Map<string, { score: number; issues: unknown[]; decisionId: string; at: string }>();
+    for (const d of store.decisions.list({ workspaceId: id, kind: 'review' })) {
+      const p = (d.payload ?? {}) as { tool?: string; score?: unknown; issues?: unknown };
+      if (p.tool !== 'submit_review' || typeof p.score !== 'number') continue;
+      for (const taskId of d.refs) {
+        const prev = lastReview.get(taskId);
+        if (!prev || prev.at <= d.createdAt) {
+          lastReview.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt });
+        }
+      }
+    }
+    return c.json(
+      store.findings.list({ workspaceId: id }).map((f) => {
+        const review = lastReview.get(f.taskId);
+        return review ? { ...f, lastReview: review } : f;
+      }),
+    );
+  });
   // User override (spec §7.2): include an unverified finding in synthesis, or exclude a verified one.
   app.post('/api/findings/:id/include', async (c) => {
     const id = c.req.param('id');
@@ -360,6 +384,20 @@ export function createApp(deps: AppDeps): Hono {
     const input = await body(c, schemas.rating);
     workspace(input.workspaceId);
     return c.json(rateCriterion(input as Parameters<typeof rateCriterion>[0], { store }), 201);
+  });
+  /**
+   * The user's current rating per (targetType, targetId, criterion): ratings are append-only
+   * history (every change is a new row, all kept for calibration/export); the latest one wins here.
+   */
+  app.get('/api/workspaces/:id/ratings', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const latest = new Map<string, Rating>();
+    for (const r of store.ratings.list({ workspaceId: id })) {
+      const key = `${r.targetType}\u0000${r.targetId}\u0000${r.criterion}`;
+      const prev = latest.get(key);
+      if (!prev || prev.createdAt <= r.createdAt) latest.set(key, r);
+    }
+    return c.json([...latest.values()]);
   });
   app.get('/api/workspaces/:id/review-queue', (c) => {
     const id = workspace(c.req.param('id')).id;

@@ -13,6 +13,7 @@ import type {
   CreateWorkspaceInput,
   Decision,
   Finding,
+  FindingView,
   InterviewState,
   InterviewTurn,
   NewSchedule,
@@ -117,8 +118,8 @@ export const api = {
     get<Task[]>(`${ws(id)}/tasks${runId ? `?runId=${enc(runId)}` : ''}`),
 
   // results
-  listFindings: (id: string) => get<Finding[]>(`${ws(id)}/findings`),
-  setFindingInclude: (id: string, include: boolean) => post<Finding>(`/api/findings/${enc(id)}/include`, { include }),
+  listFindings: (id: string) => get<FindingView[]>(`${ws(id)}/findings`),
+  setFindingInclude: (id: string, include: boolean | null) => post<Finding>(`/api/findings/${enc(id)}/include`, { include }),
   listSymptoms: (id: string) => get<Symptom[]>(`${ws(id)}/symptoms`),
   listPersonas: (id: string) => get<PersonaNode[]>(`${ws(id)}/personas`),
   listRecommendations: (id: string) => get<Recommendation[]>(`${ws(id)}/recommendations`),
@@ -140,6 +141,8 @@ export const api = {
 
   // ratings
   rate: (input: RatingInput) => post<Rating>('/api/ratings', input),
+  /** The user's current (latest) rating per target + criterion. */
+  listRatings: (id: string) => get<Rating[]>(`${ws(id)}/ratings`),
   getReviewQueue: (id: string) => get<ReviewQueueItem[]>(`${ws(id)}/review-queue`),
   getCalibration: (id: string) => get<CalibrationReport>(`${ws(id)}/calibration`),
   proposePromptPatch: (id: string, role: PatchRole) =>

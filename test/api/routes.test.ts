@@ -136,6 +136,51 @@ describe('findings synthesis override', () => {
     expect(off.body.includeInSynthesis).toBe(false);
     expect((await t.json('POST', '/api/findings/fnd_u/include', { include: 'yes' })).status).toBe(400);
     expect((await t.json('POST', '/api/findings/fnd_nope/include', { include: true })).status).toBe(404);
+    const reset = await t.json('POST', '/api/findings/fnd_u/include', { include: null });
+    expect(reset.status).toBe(200);
+    expect(reset.body.includeInSynthesis).toBeUndefined();
+    expect(t.store.findings.get('fnd_u')!.includeInSynthesis).toBeUndefined();
+  });
+
+  it('GET findings carries the last review (score + issues) of the finding task', async () => {
+    const t = setup();
+    t.store.findings.insert({
+      id: 'fnd_u', workspaceId: t.ws.id, runId: 'r', taskId: 'tsk_1', subject: 's', claim: 'c', criteria: {}, evidence: [],
+      status: 'unverified', createdAt: '',
+    });
+    t.store.findings.insert({
+      id: 'fnd_v', workspaceId: t.ws.id, runId: 'r', taskId: 'tsk_2', subject: 's', claim: 'c2', criteria: {}, evidence: [],
+      status: 'verified', createdAt: '',
+    });
+    const review = (score: number, at: string, issues: unknown[]) =>
+      t.store.decisions.insert({
+        id: newId('dec'), workspaceId: t.ws.id, agentRunId: newId('arun'), role: 'reviewer', model: { provider: 'codex', model: 'x' },
+        promptVersion: 'v1', kind: 'review', payload: { tool: 'submit_review', score, issues }, refs: ['tsk_1'], createdAt: at,
+      });
+    review(4, '2026-11-12T00:00:00.000Z', [{ id: 'I1', class: 'blocking', description: 'no source' }]);
+    const last = review(6, '2026-11-12T01:00:00.000Z', [{ id: 'I1', class: 'substantive', description: 'pricing outdated' }]);
+    const r = await t.json('GET', `/api/workspaces/${t.ws.id}/findings`);
+    const u = r.body.find((f: { id: string }) => f.id === 'fnd_u');
+    expect(u.lastReview).toMatchObject({ score: 6, decisionId: last.id, issues: [{ class: 'substantive', description: 'pricing outdated' }] });
+    expect(r.body.find((f: { id: string }) => f.id === 'fnd_v').lastReview).toBeUndefined();
+  });
+});
+
+describe('current ratings', () => {
+  it('GET ratings returns the latest rating per target + criterion (history kept)', async () => {
+    const t = setup();
+    const rec = addRec(t.store, t.ws.id);
+    const rate = (b: Record<string, unknown>) =>
+      t.json('POST', '/api/ratings', { workspaceId: t.ws.id, targetType: 'recommendation', targetId: rec.id, ...b });
+    await rate({ criterion: 'upside', verdict: 'agree' });
+    await new Promise((r) => setTimeout(r, 5));
+    await rate({ criterion: 'upside', verdict: 'disagree', userValue: 1 });
+    await rate({ criterion: 'difficulty', verdict: 'agree' });
+    const r = await t.json('GET', `/api/workspaces/${t.ws.id}/ratings`);
+    expect(r.status).toBe(200);
+    expect(r.body).toHaveLength(2);
+    expect(r.body.find((x: { criterion: string }) => x.criterion === 'upside')).toMatchObject({ verdict: 'disagree', userValue: 1 });
+    expect(t.store.ratings.list({ workspaceId: t.ws.id })).toHaveLength(3);
   });
 });
 
