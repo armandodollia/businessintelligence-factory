@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "vitest run",
+    "start": "tsx src/api/main.ts",
     "dev": "tsx watch src/api/main.ts",
     "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit",
     "web": "vite web"
