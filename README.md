@@ -172,12 +172,15 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
 - **Living facts.** A finding is a fact with a stable identity across runs (a lineage of versions).
   A later run *confirms* it, *replaces* it with a new version (price $10 → $12) or *retracts* it,
   instead of saving a duplicate; nothing is deleted. `save_finding` checks the store first: an
-  identical current claim about the same subject is confirmed automatically (citing an artifact
-  saved in the task), and similar current facts of the business tree are returned without saving
-  until the agent says `relation: "new"`, `{confirms}` or `{replaces}`; `confirm_finding` /
-  `retract_finding` do the same explicitly. These observations apply only when the task is verified
-  (an unverified replacement stays an "unverified update" until you include it). Quotes in
-  `evidence_refs` are checked against the artifact's text. Only the current version of a fact feeds
+  identical current claim about the same entity (see Entities below) is confirmed automatically
+  (citing an artifact saved in the task), and similar current facts of the business tree about that
+  entity are returned without saving until the agent says `relation: "new"`, `{confirms}` or
+  `{replaces}`; `confirm_finding` / `retract_finding` do the same explicitly. A confirmation or
+  retraction must cite an artifact the task itself saved with `save_artifact` (every save is
+  recorded, even of bytes already stored). These observations apply only when the task is verified
+  (an unverified replacement stays an "unverified update" until you include it); a new version keeps
+  the entity of the one it replaces. Quotes in `evidence_refs` are checked against the artifact's
+  text — extracted on the spot if it was still waiting in the extraction queue. Only the current version of a fact feeds
   synthesis; the review queue lists a fact's live version, so a new version is rated again. The
   reviewer sees the prior claim, the facts a task confirms or retracts, and the verified quotes.
 - **Review history and disputes.** Every review round's issues are kept (`review_issues`), with
@@ -203,7 +206,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   symptom hypothesis is filed under a named *entity* of its business tree (company, competitor,
   product, persona, topic, cause, …), matched by name or alias; separate trees never share one. A
   finding without an explicit `entity` is filed under the competitor / persona / company entity its
-  subject names, else a unit's company name, else a topic. A near-duplicate name is saved anyway and
+  subject names, else a unit's company name, else a topic. `save_artifact` can name an `entity` too
+  (an artifact with a `flow` then links the entity to that flow). An entity is only created when a
+  record is saved under it — never by a duplicate check or a confirmation. A near-duplicate name is saved anyway and
   shows up as a *merge suggestion*; merging or renaming an entity is your action (feedback events
   `entity_merge` / `entity_rename`) and keeps old names resolvable as aliases. Typed edges
   (`competes_with`, `offers`, `has_flow`, `causes`, …) each name the record that asserts them and

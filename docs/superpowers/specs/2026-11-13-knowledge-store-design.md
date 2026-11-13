@@ -208,6 +208,15 @@ orchestrator see usable facts by default and may ask for `include_unverified`.
 History (`replaced`, `retracted`) is returned only with `include_history` or
 through `expand` on a fact.
 
+As built (KS-2 with KS-3): "same entity" in the handshake is the entity the save
+resolves to (`entity`, else the subject rule of §7.4); a fact without an entity
+falls back to its subject's name key. The handshake only *looks the entity up*:
+the entity is created, and `relations` linked, in the transaction that inserts a
+fact row, so a handshake or a confirmation never leaves an entity no record
+references (such a name would read as publicly attested, §12). A `replaces`
+keeps the prior version's entity (its merge survivor) unless `entity` is given.
+Responses of saves that insert a fact carry `entityId`.
+
 ### 7.3 Evidence and citations
 
 - `findings.evidence` (array of artifact ids) stays the source of truth for
@@ -218,7 +227,9 @@ through `expand` on a fact.
   `finding_evidence` with the quote text itself, so a citation survives
   re-extraction (`chunk_id` is a locator hint and is re-resolved by substring
   search).
-- Confirmations and retractions must cite ≥ 1 artifact captured by the same task.
+- Confirmations and retractions must cite ≥ 1 artifact captured by the same task
+  (a `save_artifact` capture row with the task or one of its agent runs; saving
+  bytes identical to an earlier artifact still records this task's capture).
 - The reviewer prompt carries the verified quotes (budgeted), so a reviewer usually
   does not need to open the document.
 
@@ -247,6 +258,9 @@ through `expand` on a fact.
   typed records, captures, edge sources) is upload-derived and none is usable and public. An
   upload-only name that becomes an alias stays on its own merged row and never enters the
   survivor's public `aliases`; a public entity merged into an upload-only one swaps names with it.
+- `save_artifact`'s `entity` (id, `{ id }` or `{ kind, name }`) resolves the same way
+  (`resolveEntity`: alias / survivor, else created with merge suggestions) and is stored on
+  the capture; with a `flow` it adds `has_flow` (source: the artifact).
 
 ## 8. Documents
 
@@ -290,7 +304,9 @@ cap at `maxTextChars` (2 000 000). Status per artifact in `artifact_texts`:
 
 Run inline when the file is small (≤ 1 MB), otherwise by an in-process queue
 (concurrency 1). `pending` rows are re-queued at startup. `expand` on a pending
-artifact says so.
+artifact says so. A `save_finding` quote on a still-`pending` artifact extracts
+it at once through the same pipeline (joining a run in flight), so the quote is
+checked against, and located in, the stored chunks.
 
 Library choice is the builder's, within §5. Suggested: an HTML tokenizer/parser,
 a PDF text library that runs in plain Node, a zip reader for the office formats

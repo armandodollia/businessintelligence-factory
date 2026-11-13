@@ -102,11 +102,17 @@ Start with Claude Code and Codex; OpenCode third. Every raw event stream is pers
 ### 6.2 Harness MCP server (tools every agent gets)
 - `log_decision({ what, why, alternatives[], signals_positive[], signals_negative[], confidence })`
 - `save_artifact({ kind: screenshot|page_snapshot|document|text, ... }) → artifactId`
-  (knowledge store KS-1: also `description` — required for screenshots and images —, `entity`, `applies_to`;
+  (knowledge store: also `description` — required for screenshots and images —, `entity` (filed on the capture; with
+  a `flow` it adds a `has_flow` edge), `applies_to`;
   returns `{ artifactId, sha256, captureId, extraction }`; every save records a capture; see
   `2026-11-13-knowledge-store-design.md` §8.1)
-- `describe_artifact({ artifact_id, description })` (knowledge store KS-1)
+- `describe_artifact({ artifact_id, description })` (knowledge store)
 - `save_finding({ claim, subject, criteria{...}, evidence: artifactId[] })` — **rejected if `evidence` is empty or references unknown artifacts**
+  (knowledge store: also `relation` (`new` / `{confirms}` / `{replaces}`; omitted → duplicate handshake against current
+  facts of the same entity), `entity`, `relations`, `applies_to`, `evidence_refs` with verified quotes, `ttl_days`;
+  returns `entityId` when a fact is saved; see `2026-11-13-knowledge-store-design.md` §7.2–7.4)
+- `confirm_finding({ finding_id, evidence })`, `retract_finding({ finding_id, reason, evidence })` — evidence must include
+  an artifact this task saved with `save_artifact`; applied when the task is verified (knowledge store)
 - `propose_tasks([...])` — orchestrator only (§7)
 - `submit_result({...})` — worker deliverable
 - `submit_review({ score, issues[] })` — reviewer only

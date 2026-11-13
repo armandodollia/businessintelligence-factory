@@ -871,3 +871,28 @@ Smaller decisions taken while building KS-3 (none changes §3, §9 or §12).
   matched (a merged row for an upload-only alias) and list that id in `results`; `entityNames` gives
   names with their status; `neighbours` for relations on cards. KS-7: `listEntities`,
   `listMergeSuggestions` (with `uploadOnly`), `rejectMergeSuggestion`, the two actions above.
+
+## KS-1/2/3 integration notes
+
+Merged into `feat/learning-loop` in the order KS-1, KS-2, KS-3, then wired (no migration added).
+
+- **Quotes (KS-1 × KS-2):** `FactToolEnv.ensureExtracted` = `ingestorFor(…).ensure(id)`: ingests a
+  `pending` artifact now whatever its size, joining a queued run in flight. Captures written by
+  `save_artifact` carry the task and agent run, so confirm / retract / auto-confirm work in production
+  (`test/core/knowledge/storeWiring.test.ts`, no hand-inserted captures).
+- **Artifacts (KS-1 × KS-3):** `resolveArtifactEntity` calls `resolveEntity`; `save_artifact` calls
+  `linkArtifactEntity` in the capture transaction (`has_flow`, flow taken from this save). The
+  `entity` schema reuses KS-3's `entityRefInput` and still accepts a plain id string.
+- **Facts (KS-2 × KS-3):** `saveFindingFact(…, { entity: { peek, resolve, link } })` instead of a
+  pre-resolved `entityId` (still accepted). `peek` = `peekFindingEntity` (`lookupEntity` /
+  `lookupSubjectEntity`: what resolution would return, writing nothing; `null` = would be created,
+  so only entity-less facts can match by subject key, `CandidateQuery.entityId: null`). `resolve`
+  and `link` run inside the insert transaction of `saveNew` / `saveReplacement`; the handshake and
+  `confirms` never create an entity (an unreferenced entity is not upload-only, so an upload-only
+  name would otherwise read as public). `replaces` resolves `{ id: prior.entityId }` (survivor)
+  unless `entity` is given. The same-(task, claim) replay keeps KS-3's `relinkFinding`.
+- **Tests:** `boot({ port: 0 })` now listens on an ephemeral port (`runtime.setListeningPort` points
+  the supervisor's MCP base URL at it); two runs of the suite at once used to collide on 4317, which
+  is the likely source of KS-3's two unreproduced failures (both `test/api/main.test.ts` boot tests
+  fail exactly that way). The two supervisor idle-kill tests that read files the fake CLI writes
+  use a 1.5 s idle window (the watchdog starts at spawn; node start-up under load exceeded 200 ms).
