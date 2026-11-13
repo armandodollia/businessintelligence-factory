@@ -7,7 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { formatBytes, itemPart, parseEvidence } from '../../web/src/logic/knowledge.js';
+import { formatBytes, itemAllPages, itemPart, parseEvidence } from '../../web/src/logic/knowledge.js';
 import { App } from '../../web/src/views/App.js';
 
 type Handler = (url: URL, body: unknown) => unknown;
@@ -101,6 +101,20 @@ describe('knowledge logic', () => {
     expect(itemPart({ type: 'field', field: 'summary', value: 'Raise prices' })).toEqual({ label: 'summary', text: 'Raise prices' });
     expect(itemPart({ type: 'field', field: 'profile.goals', value: 'Ship faster', confidence: 0.7 })).toMatchObject({ label: 'profile.goals', text: 'Ship faster' });
     expect(itemPart({ type: 'meta', mime: 'text/plain', captured_at: '2026-11-01' }).text).toBe('mime: text/plain · captured_at: 2026-11-01');
+  });
+});
+
+describe('itemAllPages', () => {
+  it('joins every page under page 1\'s header; after the page cap it keeps truncated, more and the cursor', async () => {
+    const page = (n: number) => ({ tokens: 1, truncated: n < 5, ...(n < 5 ? { more: 5 - n, cursor: `c${n + 1}` } : {}), items: [{ type: 'field', field: `f${n}` }], ...(n === 1 ? { kind: 'record', id: 'per_1', notes: ['first'] } : {}) });
+    const fetchPage = async (cursor?: string) => page(cursor ? Number(cursor.slice(1)) : 1);
+    const all = await itemAllPages(fetchPage);
+    expect(all).toMatchObject({ kind: 'record', id: 'per_1', notes: ['first'], truncated: false });
+    expect(all.items!.map((i) => i.field)).toEqual(['f1', 'f2', 'f3', 'f4', 'f5']);
+    expect(all.cursor).toBeUndefined();
+    const capped = await itemAllPages(fetchPage, 3);
+    expect(capped).toMatchObject({ truncated: true, more: 2, cursor: 'c4' });
+    expect(capped.items).toHaveLength(3);
   });
 });
 
@@ -246,5 +260,28 @@ describe('Knowledge view', () => {
     expect(src).not.toMatch(/\bfetch\(/);
     expect(src).not.toMatch(/logic\/api/);
     expect(src).not.toMatch(/dangerouslySetInnerHTML|innerHTML/);
+  });
+
+  it('an item served over several pages shows every item: a 13-field persona shows all 13 fields (the logic follows the cursor)', async () => {
+    seed();
+    const FIELDS = Array.from({ length: 13 }, (_, n) => `profile.field_${n}`);
+    const field = (f: string) => ({ type: 'field', field: f, value: `value of ${f}`, confidence: 0.7, evidence: ['art_1'] });
+    routes[`GET ${K}/search`] = () => ({ tokens: 30, truncated: false, query: 'it', scope: 'node', hits: [{ kind: 'record', id: 'per_real', type: 'persona', title: 'it-lead persona' }] });
+    routes[`GET ${K}/items/per_real`] = (u) =>
+      u.searchParams.get('cursor') === 'c1.p2'
+        ? { tokens: 400, truncated: false, items: FIELDS.slice(11).map(field), content_trust: 'untrusted' }
+        : { tokens: 1990, truncated: true, more: 2, cursor: 'c1.p2', kind: 'record', type: 'persona', id: 'per_real', name: 'it-lead', items: FIELDS.slice(0, 11).map(field), content_trust: 'untrusted' };
+    window.location.hash = '#/w/ws_1/knowledge';
+    render(<App />);
+    const input = await screen.findByLabelText('search the knowledge store');
+    fireEvent.change(input, { target: { value: 'it' } });
+    await act(async () => {
+      screen.getByRole('button', { name: 'Search' }).click();
+    });
+    await act(async () => {
+      (await screen.findByRole('button', { name: 'it-lead persona' })).click();
+    });
+    for (const f of FIELDS) expect(await screen.findByText(f), f).toBeTruthy();
+    expect(calls.some((c) => c.path.includes('/items/per_real') && c.path.includes('cursor=c1.p2'))).toBe(true);
   });
 });

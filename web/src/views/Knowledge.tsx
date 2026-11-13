@@ -254,6 +254,7 @@ function ItemDetail({ k }: { k: View }) {
           );
         })}
       </ul>
+      {it.truncated && <p className="muted small">{it.more ?? 0} more item(s) not loaded</p>}
       {(it.notes ?? []).map((n) => (
         <p key={n} className="muted small">
           {n}

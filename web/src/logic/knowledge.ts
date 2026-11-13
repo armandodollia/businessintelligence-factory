@@ -182,6 +182,31 @@ export function itemPart(i: Record<string, unknown>): ItemPart {
   };
 }
 
+/** Pages fetched for one item before the view says how many items are left (`more`). */
+export const ITEM_MAX_PAGES = 40;
+
+/**
+ * One item with all its pages (paging rework: a record's fields, a fact's quotes and an artifact's
+ * outline are items, paged by `cursor`): page 1 (the header and its notes) with the items of every page
+ * appended, following `cursor` until it is absent. After `ITEM_MAX_PAGES` pages it stops and keeps
+ * `truncated` / `more` / `cursor`, so the view can say what is not loaded.
+ */
+export async function itemAllPages(
+  fetchPage: (cursor?: string) => Promise<ItemView>,
+  maxPages = ITEM_MAX_PAGES,
+): Promise<ItemView> {
+  const first = await fetchPage();
+  const items = [...(first.items ?? [])];
+  let last: ItemView = first;
+  for (let n = 1; last.cursor && n < maxPages; n++) {
+    const cursor: string = last.cursor;
+    last = await fetchPage(cursor);
+    items.push(...(last.items ?? []));
+  }
+  const { cursor: _c, more: _m, truncated: _t, ...rest } = first;
+  return { ...rest, items, truncated: Boolean(last.cursor), ...(last.cursor ? { cursor: last.cursor, more: last.more ?? 0 } : {}) };
+}
+
 // ---------------------------------------------------------------------------
 // the view's state
 
@@ -203,7 +228,10 @@ export function useKnowledgeView(wsId: string) {
   const search = useResource(`k-search:${wsId}:${scope}:${submitted}`, submitted.trim() ? () => knowledgeApi.search(wsId, submitted, scope) : null);
   const entities = useResource(`k-ent:${wsId}:${scope}`, () => knowledgeApi.entities(wsId, scope));
   const card = useResource(`k-card:${wsId}:${scope}:${entityId ?? ''}`, entityId ? () => knowledgeApi.card(wsId, entityId, scope) : null);
-  const item = useResource(`k-item:${wsId}:${scope}:${itemId ?? ''}`, itemId ? () => knowledgeApi.item(wsId, itemId, scope) : null);
+  const item = useResource(
+    `k-item:${wsId}:${scope}:${itemId ?? ''}`,
+    itemId ? () => itemAllPages((cursor) => knowledgeApi.item(wsId, itemId, scope, cursor)) : null,
+  );
   const stats = useResource(`k-stats:${wsId}:${scope}`, () => knowledgeApi.stats(wsId, scope));
   const stale = useResource(`k-stale:${wsId}:${scope}`, () => knowledgeApi.stale(wsId, scope));
   const conflicts = useResource(`k-conf:${wsId}:${scope}`, () => knowledgeApi.conflicts(wsId, scope));
