@@ -5,7 +5,7 @@ import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Criteria, Decision, Recommendation } from '../types.js';
-import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, toNumber } from './criteria.js';
+import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, pctFraction, toNumber } from './criteria.js';
 
 export type PriorityConfig = { weights?: Record<string, number>; personaWeight?: number };
 
@@ -24,14 +24,26 @@ export function costAmountScore(amount: number): number {
   return amount <= 1000 ? 1 : clamp(Math.log10(amount) - 2, 1, 5);
 }
 
+/** Units that make a "cost" not money (effort / time / headcount); such values are rejected. */
+const NON_MONEY_UNITS =
+  /\b(?:months?|mos?|weeks?|wks?|days?|hours?|hrs?|h|years?|yrs?|quarters?|sprints?|ftes?|people|persons?|person-\w+|man-\w+|engineers?|devs?|developers?|headcount|hc|points?|story\s*points?)\b/;
+
+/** Human-readable list of accepted cost formats (tool schema + synthesizer prompt). */
+export const COST_FORMATS =
+  'a 1–5 score (5 = most expensive), a level word (very low|low|medium|high|very high), or a money ' +
+  'amount/range: "$250k", "$10k–$50k", "$1M–$5M", "$1-5M", "$2 million", "2 million USD", "€500k–€1M", ' +
+  '"EUR 40,000". Currency symbols $ € £ or codes USD/EUR/GBP; k/M/B or thousand/million/billion. ' +
+  'Effort or time units (months, weeks, hours, FTE, people…) are NOT costs — use timeToValue/difficulty.';
+
 /**
  * Cost (`range` scale) → 1–5 score where higher = more expensive (inverted later):
  * - a level word: very low 1, low 2, medium/moderate 3, high 4, very high 5;
- * - a plain number or plain range within 1–5 with no currency or k/M/B suffix ("3", "2-3"): a score;
- * - otherwise a money amount or range ("$10–$50", "10k-50k", "$1M–$5M", "$1-5M", 250000): the
- *   arithmetic midpoint (a suffix on the upper bound also applies to a bare lower bound), scored
- *   with `costAmountScore`.
- * Undefined when unparseable.
+ * - a plain number or plain range within 1–5 with no money marker ("3", "2-3"): a score;
+ * - otherwise a money amount or range (money markers: $ € £, USD/EUR/GBP, k/M/MM/B/bn,
+ *   thousand/million/billion; e.g. "$10–$50", "10k-50k", "$1M–$5M", "$1-5M", "$2 million",
+ *   "2 million USD", "€500k–€1M", 250000): the arithmetic midpoint (a multiplier on the upper bound
+ *   also applies to a bare lower bound), scored with `costAmountScore`.
+ * Undefined when unparseable or when it carries a non-money unit (months, weeks, hours, FTE…).
  */
 export function costScore(v: unknown): number | undefined {
   if (typeof v === 'number') {
@@ -39,12 +51,20 @@ export function costScore(v: unknown): number | undefined {
     return v >= 1 && v <= 5 ? v : costAmountScore(v);
   }
   if (typeof v !== 'string') return undefined;
-  const s = v.trim().toLowerCase();
-  if (LEVELS[s] !== undefined) return LEVELS[s];
-  const re = /([$€£])?\s*(\d+(?:\.\d+)?)\s*(mm|bn|k|m|b)?\b/g;
-  const tokens = [...s.replace(/,/g, '').matchAll(re)].slice(0, 2);
+  const raw = v.trim().toLowerCase();
+  if (LEVELS[raw] !== undefined) return LEVELS[raw];
+  if (NON_MONEY_UNITS.test(raw)) return undefined;
+  const iso = /\b(?:usd|eur|gbp)\b/.test(raw);
+  const s = raw
+    .replace(/,/g, '')
+    .replace(/\b(?:usd|eur|gbp)\b/g, ' ')
+    .replace(/\s*\bthousand\b/g, 'k')
+    .replace(/\s*\bmillions?\b/g, 'm')
+    .replace(/\s*\bbillions?\b/g, 'b');
+  const re = /([$€£])?\s*(\d+(?:\.\d+)?)\s*(mm|bn|k|m|b)?(?![a-z])/g;
+  const tokens = [...s.matchAll(re)].slice(0, 2);
   if (!tokens.length) return undefined;
-  const money = /[$€£]/.test(s) || tokens.some((t) => t[3]);
+  const money = iso || /[$€£]/.test(s) || tokens.some((t) => t[3]);
   const last = tokens.at(-1)![3];
   const values = tokens.map((t) => Number(t[2]) * (SUFFIX[t[3] ?? last ?? ''] ?? 1));
   const mid = values.reduce((a, b) => a + b, 0) / values.length;
@@ -54,8 +74,9 @@ export function costScore(v: unknown): number | undefined {
 
 /**
  * A recommendation criterion normalized to 0–5 where higher is better (difficulty, cost, risk and
- * timeToValue inverted as 6 − v). `confidence` is a percent 0–100 (→ v/100·5). Undefined when
- * missing or unparseable; such criteria are left out of the weighted mean.
+ * timeToValue inverted as 6 − v). `pct` criteria use their declared unit (recommendation
+ * `confidence` is a percent 0–100 → v/100·5). Undefined when missing or unparseable; such criteria
+ * are left out of the weighted mean.
  */
 export function normalizeCriterion(key: string, value: unknown): number | undefined {
   const def = CRITERIA.recommendation.find((c) => c.key === key);
@@ -63,7 +84,7 @@ export function normalizeCriterion(key: string, value: unknown): number | undefi
   let v: number | undefined;
   if (def.scale === 'pct') {
     const n = toNumber(value);
-    return n === undefined ? undefined : (clamp(n, 0, 100) / 100) * 5;
+    return n === undefined ? undefined : pctFraction(n, def.unit) * 5;
   }
   if (def.scale === 'range') v = costScore(value);
   else {
@@ -126,13 +147,14 @@ export function checkRecommendationCriteria(c: Criteria): string | undefined {
   const unknown = Object.keys(c).filter((k) => !allowed.has(k));
   if (unknown.length) return `unknown recommendation criteria: ${unknown.join(', ')} (allowed: ${[...allowed].join(', ')})`;
   for (const [k, v] of Object.entries(c)) {
-    const scale = CRITERIA.recommendation.find((d) => d.key === k)!.scale;
+    const def = CRITERIA.recommendation.find((d) => d.key === k)!;
     const n = toNumber(v);
-    if (scale === 'pct' && (n === undefined || n < 0 || n > 100)) return `criteria.${k} must be a percent 0–100`;
-    if (scale === '1-5' && (n === undefined || n < 1 || n > 5)) return `criteria.${k} must be a number 1–5`;
-    if (scale === 'range' && costScore(v) === undefined) {
-      return `criteria.${k} must be a 1–5 score, low/medium/high, or a money amount/range like "$10k–$50k"`;
+    if (def.scale === 'pct') {
+      const max = def.unit === 'fraction' ? 1 : 100;
+      if (n === undefined || n < 0 || n > max) return `criteria.${k} must be a ${def.unit === 'fraction' ? 'fraction 0–1' : 'percent 0–100'}`;
     }
+    if (def.scale === '1-5' && (n === undefined || n < 1 || n > 5)) return `criteria.${k} must be a number 1–5`;
+    if (def.scale === 'range' && costScore(v) === undefined) return `criteria.${k} must be ${COST_FORMATS}`;
   }
   return undefined;
 }

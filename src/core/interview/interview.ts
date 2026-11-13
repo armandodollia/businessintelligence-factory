@@ -173,7 +173,10 @@ export function mergePatch(target: unknown, patch: unknown): unknown {
   return out;
 }
 
-const TRENDS: Record<string, string> = { '↑': '↑', '→': '→', '↓': '↓', up: '↑', flat: '→', down: '↓' };
+/** Profile keys owned by the app (see `uploadInternal`); `update_profile` patches never touch them. */
+export const PROTECTED_PROFILE_KEYS = ['uploads'] as const;
+
+const TRENDS: Record<string, string> ={ '↑': '↑', '→': '→', '↓': '↓', up: '↑', flat: '→', down: '↓' };
 
 /** Validates/normalizes symptom criteria (severity 1–5, trend ↑/→/↓, causeConfidence 0–100). */
 export function validateSymptomCriteria(c: Criteria): { ok: true; criteria: Criteria } | { ok: false; error: string } {
@@ -196,14 +199,18 @@ export function interviewToolHandlers(): Partial<Record<ToolName, ExtraToolHandl
     async update_profile(ctx, raw, deps) {
       const input = raw as ToolInput<'update_profile'>;
       const { store } = deps;
+      // App-managed keys (internal upload links) cannot be set, replaced or deleted by agents.
+      const patch = { ...input.patch };
+      const ignored = PROTECTED_PROFILE_KEYS.filter((k) => Object.hasOwn(patch, k));
+      for (const k of ignored) delete patch[k];
       const data = store.transaction(() => {
         const existing = store.profiles.get(ctx.workspaceId);
-        const next = mergePatch(existing?.data ?? {}, input.patch) as Record<string, unknown>;
+        const next = mergePatch(existing?.data ?? {}, patch) as Record<string, unknown>;
         if (existing) store.profiles.update(ctx.workspaceId, { data: next });
         else store.profiles.insert({ workspaceId: ctx.workspaceId, data: next });
         return next;
       });
-      return { ok: true, data: { profile: data } };
+      return { ok: true, data: ignored.length ? { profile: data, ignored, note: `${ignored.join(', ')} is managed by the app` } : { profile: data } };
     },
 
     async save_symptom(ctx, raw, deps) {

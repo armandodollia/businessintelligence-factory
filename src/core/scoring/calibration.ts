@@ -38,11 +38,11 @@ export function calibrationReport(workspaceId: string, deps: { store: Store }): 
     g.ratings.push(r);
   }
   const byCriterion = [...groups.values()].map(({ targetType, criterion, ratings }) => {
-    const scale = criterionDef(targetType, criterion)?.scale;
+    const def = criterionDef(targetType, criterion);
     const deltas: number[] = [];
     for (const r of ratings) {
-      if (!scale) continue;
-      const d = normalizedDelta(scale, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue);
+      if (!def) continue;
+      const d = normalizedDelta(def, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue);
       if (d !== undefined) deltas.push(d);
     }
     return {
@@ -57,30 +57,49 @@ export function calibrationReport(workspaceId: string, deps: { store: Store }): 
   return { byCriterion };
 }
 
-/** Solves A x = b (A square) by Gaussian elimination with partial pivoting; undefined if singular. */
-function solve(A: number[][], b: number[]): number[] | undefined {
-  const n = b.length;
-  const M = A.map((row, i) => [...row, b[i]!]);
-  for (let c = 0; c < n; c++) {
-    let p = c;
-    for (let r = c + 1; r < n; r++) if (Math.abs(M[r]![c]!) > Math.abs(M[p]![c]!)) p = r;
-    if (Math.abs(M[p]![c]!) < 1e-12) return undefined;
-    [M[c], M[p]] = [M[p]!, M[c]!];
-    for (let r = 0; r < n; r++) {
-      if (r === c) continue;
-      const f = M[r]![c]! / M[c]![c]!;
-      for (let k = c; k <= n; k++) M[r]![k]! -= f * M[c]![k]!;
-    }
+/** Euclidean projection of `v` onto the probability simplex {a ≥ 0, Σa = 1} (Duchi et al. 2008). */
+export function projectSimplex(v: number[]): number[] {
+  const u = [...v].sort((a, b) => b - a);
+  let css = 0;
+  let theta = 0;
+  for (let i = 0; i < u.length; i++) {
+    css += u[i]!;
+    const t = (css - 1) / (i + 1);
+    if (u[i]! - t > 0) theta = t;
   }
-  return M.map((row, i) => row[n]! / row[i]!);
+  return v.map((x) => Math.max(0, x - theta));
+}
+
+/**
+ * min ‖Xα − y‖² subject to α ≥ 0, Σα = 1, by projected gradient descent (step 1/L with
+ * L = 2‖X‖²_F ≥ the gradient's Lipschitz constant). Convex, so it converges to the optimum.
+ */
+export function simplexLeastSquares(X: number[][], y: number[], iterations = 20_000): number[] {
+  const k = X[0]?.length ?? 0;
+  let a = new Array<number>(k).fill(1 / k);
+  const L = 2 * X.reduce((s, row) => s + row.reduce((t, v) => t + v * v, 0), 0);
+  if (!(L > 0)) return a;
+  for (let it = 0; it < iterations; it++) {
+    const r = X.map((row, i) => row.reduce((s, v, j) => s + v * a[j]!, 0) - y[i]!);
+    const g = Array.from({ length: k }, (_, j) => 2 * X.reduce((s, row, i) => s + row[j]! * r[i]!, 0));
+    const next = projectSimplex(a.map((v, j) => v - g[j]! / L));
+    const moved = next.reduce((s, v, j) => s + Math.abs(v - a[j]!), 0);
+    a = next;
+    if (moved < 1e-12) break;
+  }
+  return a;
 }
 
 /**
  * Proposes priority weights from the user's priority overrides (ratings on recommendation
- * `priority` with verdict `disagree` and a numeric value; latest per recommendation): least
- * squares of the user's priority on the normalized criteria (small ridge, no intercept),
- * negatives clamped to 0, rescaled to mean 1. Returns the current weights (default 1) when there
- * are fewer than 5 overrides or the fit is degenerate. Proposal only — never applied here.
+ * `priority` with verdict `disagree` and a numeric value; latest per recommendation).
+ *
+ * Fits the model `computePriority` actually uses — priority = Σ w·n / Σ w, i.e. a convex
+ * combination Σ α·n with α = w / Σw (α ≥ 0, Σα = 1) — by simplex-constrained least squares on
+ * the normalized criteria, then reports weights α·K (mean 1 over the K fitted criteria; only
+ * ratios matter). Criteria a sample lacks are imputed with the column mean (exact when samples are
+ * complete); criteria no sample has keep their current weight. Returns the current weights
+ * (default 1) when there are fewer than 5 overrides. Proposal only — never applied here.
  */
 export function proposeWeights(workspaceId: string, deps: { store: Store; config: BifConfig }): Record<string, number> {
   const { store, config } = deps;
@@ -108,19 +127,9 @@ export function proposeWeights(workspaceId: string, deps: { store: Store; config
   const X = raw.map((row) => cols.map((c) => row[c.j] ?? c.mean));
   const y = samples.map((s) => s.y);
 
-  const k = cols.length;
-  const lambda = 1e-3;
-  const XtX = Array.from({ length: k }, (_, a) =>
-    Array.from({ length: k }, (_, b) => X.reduce((s, row) => s + row[a]! * row[b]!, 0) + (a === b ? lambda : 0)),
-  );
-  const Xty = Array.from({ length: k }, (_, a) => X.reduce((s, row, i) => s + row[a]! * y[i]!, 0));
-  const beta = solve(XtX, Xty);
-  if (!beta) return current;
-  const clamped = beta.map((b) => Math.max(0, b));
-  const sum = clamped.reduce((a, b) => a + b, 0);
-  if (!(sum > 0)) return current;
+  const alpha = simplexLeastSquares(X, y);
   const out = { ...current };
-  cols.forEach((c, i) => (out[c.key] = Math.round((clamped[i]! * k * 100) / sum) / 100));
+  cols.forEach((c, i) => (out[c.key] = Math.round(alpha[i]! * cols.length * 1000) / 1000));
   return out;
 }
 
@@ -139,7 +148,7 @@ export function proposePromptPatch(workspaceId: string, role: Role, deps: { stor
       const target = resolveTarget(store, workspaceId, r.targetType, r.targetId, r.criterion);
       if (!target || target.role !== role) return [];
       const def = criterionDef(r.targetType, r.criterion);
-      const d = def ? normalizedDelta(def.scale, r.agentValue, r.userValue) : undefined;
+      const d = def ? normalizedDelta(def, r.agentValue, r.userValue) : undefined;
       return [{ r, title: target.title, mag: d === undefined ? 0 : Math.abs(d) }];
     })
     .sort((a, b) => b.mag - a.mag)

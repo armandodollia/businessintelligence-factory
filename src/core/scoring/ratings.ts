@@ -70,10 +70,11 @@ export function resolveTarget(
       return { agentValue: scalar(p[criterion]), title: String(p.what ?? p.tool ?? d.kind), role: d.role };
     }
     case 'competitor': {
-      // No competitor table yet: competitors live in findings (subject = competitor). Value from
-      // the latest finding about that subject carrying the criterion, if any.
-      const fs = store.findings.list({ workspaceId, subject: targetId }).filter((f) => f.criteria[criterion] !== undefined);
-      const f = fs.at(-1);
+      // No competitor table: a competitor exists when ≥ 1 finding has it as subject (targetId =
+      // subject). Value from the latest such finding carrying the criterion, else null.
+      const all = store.findings.list({ workspaceId, subject: targetId });
+      if (!all.length) return undefined;
+      const f = all.filter((x) => x.criteria[criterion] !== undefined).at(-1);
       return { agentValue: f ? scalar(f.criteria[criterion]) : null, title: targetId, role: 'worker' };
     }
   }

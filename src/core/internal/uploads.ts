@@ -39,7 +39,10 @@ export function uploadInternal(
  * read contents on demand with `read_artifact` when relevant to a task.
  */
 export function listUploads(workspaceId: string, deps: { store: Store }): Array<{ id: string; title: string }> {
-  return uploadIds(deps.store, workspaceId).flatMap((id) => {
+  // Profile-linked ids first (covers sha-deduped uploads), then any other `upload` artifact.
+  const ids = new Set(uploadIds(deps.store, workspaceId));
+  for (const a of deps.store.artifacts.list({ workspaceId, kind: 'upload' })) ids.add(a.id);
+  return [...ids].flatMap((id) => {
     const a = deps.store.artifacts.get(id);
     return a && a.workspaceId === workspaceId ? [{ id, title: a.title ?? id }] : [];
   });

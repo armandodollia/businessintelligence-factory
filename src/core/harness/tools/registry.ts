@@ -172,7 +172,15 @@ export const toolInputSchemas = {
   save_recommendation: z.object({
     title: z.string().min(1),
     summary: z.string().min(1),
-    criteria: criteria.default({}),
+    // Keep in sync with COST_FORMATS / checkRecommendationCriteria in scoring/priority.ts.
+    criteria: criteria
+      .default({})
+      .describe(
+        'Keys: upside, difficulty, timeToValue, risk, strategicFit, competitiveUrgency (each 1–5; difficulty/timeToValue/risk: 5 = worst); ' +
+          'confidence (percent 0–100); cost: a 1–5 score (5 = most expensive), very low|low|medium|high|very high, or a money ' +
+          'amount/range such as "$250k", "$10k–$50k", "$1M–$5M", "$2 million", "2 million USD", "€500k–€1M" ' +
+          '($ € £ or USD/EUR/GBP; k/M/B or thousand/million/billion). Effort/time units (months, weeks, hours, FTE) are rejected.',
+      ),
     finding_ids: z.array(id).min(1),
     priority: z.number().optional(),
   }),

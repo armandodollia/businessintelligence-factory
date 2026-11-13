@@ -1,14 +1,19 @@
 import type { Store } from '../store/db.js';
 import type { Decision, Rating } from '../types.js';
 
-/** Ids a decision is about: its refs plus ids named in its payload. */
-function decisionTargets(d: Decision): Set<string> {
-  const ids = new Set<string>([d.id, ...d.refs]);
+/** Payload keys naming a decision's primary subject, in precedence order. */
+const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId'] as const;
+
+/**
+ * Ids whose (non-persona_feedback) ratings join a decision: its primary subject id when the payload
+ * names one (e.g. a `save_finding` score decision joins only that finding's ratings, not ratings of
+ * the evidence or task it also references); otherwise its refs. Ratings of the decision itself
+ * (targetType `decision`) always join.
+ */
+function joinTargets(d: Decision): Set<string> {
   const p = (d.payload ?? {}) as Record<string, unknown>;
-  for (const k of ['findingId', 'symptomId', 'recommendationId', 'personaId']) {
-    if (typeof p[k] === 'string') ids.add(p[k] as string);
-  }
-  return ids;
+  for (const k of PRIMARY_KEYS) if (typeof p[k] === 'string') return new Set([p[k] as string]);
+  return new Set(d.refs);
 }
 
 /**
@@ -38,33 +43,45 @@ function uploadIds(store: Store): Set<string> {
 }
 
 /**
+ * A decision's refs expanded one hop: each referenced finding / symptom / persona contributes the
+ * evidence artifacts it cites (so a decision about a finding backed by an upload is upload-linked).
+ */
+function expandedRefs(store: Store, d: Decision): string[] {
+  const out = new Set(d.refs);
+  for (const id of d.refs) {
+    const evidence =
+      store.findings.get(id)?.evidence ??
+      store.symptoms.get(id)?.evidence ??
+      Object.values(store.personas.get(id)?.profile ?? {}).flatMap((f) => f.evidence ?? []);
+    for (const e of evidence) out.add(e);
+  }
+  return [...out];
+}
+
+/**
  * Training export: one JSON line per decision in the workspace (`{decision, ratings}`), joined with
- * the user's ratings of the decision itself or of the items it refers to. A persona_feedback
- * decision joins only the persona_feedback ratings of exactly its `<recId>:<personaId>`; other
- * decisions never join persona_feedback ratings. Decisions referencing any internal upload (see
- * `uploadIds`) are excluded unless `includeUploads`.
+ * the user's ratings. A persona_feedback decision joins only the persona_feedback ratings of exactly
+ * its `<recId>:<personaId>`; other decisions join ratings of their primary subject (see
+ * `joinTargets`) and never persona_feedback ratings; every decision joins ratings of itself.
+ * Decisions referencing an internal upload — directly or through a referenced finding / symptom /
+ * persona's evidence (one hop) — are excluded unless `includeUploads`.
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   const { store } = deps;
   const ratings = store.ratings.list({ workspaceId });
-  const uploads = includeUploads ? new Set<string>() : uploadIds(store);
+  const uploads = includeUploads ? undefined : uploadIds(store);
   const lines: string[] = [];
   for (const decision of store.decisions.list({ workspaceId })) {
-    if (decision.refs.some((id) => uploads.has(id))) continue;
+    if (uploads && expandedRefs(store, decision).some((id) => uploads.has(id))) continue;
+    const self = (r: Rating) => r.targetType === 'decision' && r.targetId === decision.id;
     let joined: Rating[];
     if (decision.kind === 'persona_feedback') {
       const target = feedbackTargetId(decision);
-      joined = ratings.filter((r) =>
-        r.targetType === 'persona_feedback' ? r.targetId === target : r.targetType === 'decision' && r.targetId === decision.id,
-      );
+      joined = ratings.filter((r) => self(r) || (r.targetType === 'persona_feedback' && r.targetId === target));
     } else {
-      const targets = decisionTargets(decision);
-      joined = ratings.filter((r) =>
-        r.targetType === 'persona_feedback'
-          ? false
-          : r.targetType === 'decision'
-            ? r.targetId === decision.id
-            : targets.has(r.targetId),
+      const targets = joinTargets(decision);
+      joined = ratings.filter(
+        (r) => self(r) || (r.targetType !== 'persona_feedback' && r.targetType !== 'decision' && targets.has(r.targetId)),
       );
     }
     lines.push(JSON.stringify({ decision, ratings: joined }));

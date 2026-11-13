@@ -408,12 +408,21 @@ describe('Supervisor post-cap fixes', () => {
   });
 
   it('a clean exit is not flipped to failed while descendants are reaped', async () => {
-    // idle timeout shorter than the reap grace: the watchdog must already be stopped
-    const { dir, store, config, tokens, events, handle } = setup((c) => (c.limits.idleTimeoutMs = 300)); // > fake-cli's 200 ms start-up delay
-    const sup = new Supervisor({ store, config, tokens, events, handle, dataDir: dir, mcpBaseUrl: 'http://x', killGraceMs: 900 });
+    // The idle timeout is shorter than the reap grace, so a watchdog still running during the reap
+    // would fire. It is generous (2.5 s) so CLI start-up (node spawn + fake-cli's 200 ms grandchild
+    // delay) never trips it under full-suite load; the 4 s grace (the stubborn grandchild ignores
+    // SIGTERM, so the reap waits the full grace) still outlasts it by 1.5 s.
+    const idleTimeoutMs = 2500;
+    const killGraceMs = 4000;
+    const { dir, store, config, tokens, events, handle } = setup((c) => (c.limits.idleTimeoutMs = idleTimeoutMs));
+    const sup = new Supervisor({ store, config, tokens, events, handle, dataDir: dir, mcpBaseUrl: 'http://x', killGraceMs });
+    const started = Date.now();
     const res = await sup.run(cli({ lines: CLAUDE_FIXTURE, stubbornChild: true }));
     expect(res).toMatchObject({ status: 'done', exitCode: 0 });
     expect(res.reason).toBeUndefined();
-  });
+    // The reap really outlasted the idle timeout (so the watchdog had the chance to misfire).
+    expect(Date.now() - started).toBeGreaterThanOrEqual(killGraceMs);
+    expect(killGraceMs).toBeGreaterThan(idleTimeoutMs);
+  }, 30_000);
 });
 
