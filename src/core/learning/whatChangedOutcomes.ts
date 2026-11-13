@@ -7,6 +7,7 @@
 import type { BifConfig } from '../config/schema.js';
 import { recordStaleOutcome } from '../knowledge/facts.js';
 import { lineageOutcomesOfRun, observedLineages } from '../knowledge/outcomes.js';
+import { contradictedFindings, factsOfRun } from '../scheduler/diff.js';
 import type { Store } from '../store/db.js';
 import type { Finding, ResearchRun } from '../types.js';
 import { outputSaveDecision, recordOutcome } from './outcomes.js';
@@ -28,9 +29,9 @@ export type WhatChangedOutcomesInput = {
  *    observations were applied at task end (`applyObservations`, keyed by observation id). They are
  *    returned here, never written twice.
  * 2. Facts of the previous run (saved or observed in it) whose lineage the next run did NOT observe:
- *    - text fallback, only against facts the next run saved as `new` (design §11): when the next run
- *      saved a new fact on the same subject and none with the same claim, `contradicted` / `stale`
- *      (source `what_changed`) — e.g. "$10/mo" then a new "$12/mo" instead of a replacement;
+ *    - text fallback, only against facts the next run saved as `new` (design §11): the scheduler
+ *      diff's `contradictedFindings` (one function for the diff and these outcomes) → `contradicted` /
+ *      `stale` (source `what_changed`) — e.g. "$10/mo" then a new "$12/mo" instead of a replacement;
  *    - a screenshot the fact cites changed in the next run: `changed` / `stale` (source `what_changed`);
  *    - with `config`: past its TTL now → the lazy `stale` lineage outcome (`recordStaleOutcome`,
  *      once per lapse, shared with `list_changes` and the briefing).
@@ -51,14 +52,13 @@ export function recordWhatChangedOutcomes(store: Store, input: WhatChangedOutcom
     if (o) out.push(o);
   };
 
+  // The text fallback is the scheduler diff's (one function, KS-5 × KS-6).
+  const contradicted = new Set(contradictedFindings(input.prev.id, input.next.id, { store }));
   const unobserved = factsOfRun(store, input.prev).filter((f) => !observed.has(f.lineageId ?? f.id));
-  const next = store.findings.list({ runId: input.next.id }).filter((f) => f.status !== 'superseded');
-  const nextKeys = new Set(next.map(findingKey));
-  const newSubjects = new Set(next.filter(savedAsNew).map((f) => norm(f.subject)));
   const changed = new Map(input.changedArtifacts.map((c) => [c.prev, c.next]));
   for (const f of unobserved) {
     if ((f.lifecycle ?? 'current') !== 'current') continue;
-    if (newSubjects.has(norm(f.subject)) && !nextKeys.has(findingKey(f))) write(f, 'contradicted', {});
+    if (contradicted.has(f.id)) write(f, 'contradicted', {});
     const hits = f.evidence.filter((a) => changed.has(a));
     if (hits.length) write(f, 'changed', { changedArtifacts: hits.map((a) => ({ prev: a, next: changed.get(a) })) });
     if (input.config) {
@@ -68,33 +68,3 @@ export function recordWhatChangedOutcomes(store: Store, input: WhatChangedOutcom
   }
   return out;
 }
-
-/** Facts of a run: findings it saved (not superseded) and the current facts it observed (applied). */
-function factsOfRun(store: Store, run: ResearchRun): Finding[] {
-  const out = new Map<string, Finding>();
-  for (const f of store.findings.list({ runId: run.id })) {
-    if (f.workspaceId === run.workspaceId && f.status !== 'superseded') out.set(f.id, f);
-  }
-  const observed = store.db
-    .prepare(`SELECT DISTINCT finding_id AS id FROM fact_observations WHERE run_id = ? AND status = 'applied' AND workspace_id = ?`)
-    .all(run.id, run.workspaceId) as Array<{ id: string }>;
-  for (const { id } of observed) {
-    const f = store.findings.get(id);
-    if (f && !out.has(f.id)) out.set(f.id, f);
-  }
-  return [...out.values()];
-}
-
-/** A fact saved as a new lineage (not a replacement of an earlier version). */
-const savedAsNew = (f: Finding) => !f.replacesId && (f.version ?? 1) === 1;
-
-/** Lowercase, punctuation removed, whitespace collapsed (the scheduler diff's text normalization). */
-const norm = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}$€£%.\s]/gu, ' ')
-    .replace(/\.(?!\d)/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-const findingKey = (f: Finding) => `${norm(f.subject)}|${norm(f.claim)}`;

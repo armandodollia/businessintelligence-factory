@@ -152,32 +152,52 @@ function runLineage(store: Store, runId: string): RunLineage {
   return out;
 }
 
-/** Lineage ids a research run confirmed, replaced or retracted (applied). */
-export function observedLineages(store: Store, runId: string): Set<string> {
-  return runLineage(store, runId).lineages;
-}
 // --- end KS-5 -------------------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// learning loop WP-C: findings a later run contradicts
+// learning loop WP-C: findings a later run contradicts — THE text fallback (design §11), shared by the
+// scheduled "what changed" outcomes (`learning/whatChangedOutcomes.ts`); KS-5 × KS-6 integration.
+
+/** Facts of a run: findings it saved (not superseded) and the facts it observed (applied), in its workspace. */
+export function factsOfRun(store: Store, run: { id: string; workspaceId: string }): Finding[] {
+  const out = new Map<string, Finding>();
+  for (const f of store.findings.list({ runId: run.id })) {
+    if (f.workspaceId === run.workspaceId && f.status !== 'superseded') out.set(f.id, f);
+  }
+  const observed = store.db
+    .prepare(`SELECT DISTINCT finding_id AS id FROM fact_observations WHERE run_id = ? AND status = 'applied' AND workspace_id = ?`)
+    .all(run.id, run.workspaceId) as Array<{ id: string }>;
+  for (const { id } of observed) {
+    const f = store.findings.get(id);
+    if (f && !out.has(f.id)) out.set(f.id, f);
+  }
+  return [...out.values()];
+}
+
+/** A fact saved as a new lineage (not a replacement of an earlier version). */
+const savedAsNew = (f: Finding) => !f.replacesId && (f.version ?? 1) === 1;
 
 /**
- * Ids of the previous run's findings whose subject the next run re-researched (it has findings with
- * the same normalized subject) but whose claim it no longer found — e.g. "Acme Pro costs $10/mo"
- * when the next run only says "$12/mo". Subjects the next run did not cover are not contradicted.
+ * Ids of the previous run's current facts (saved or observed by it) that the next run contradicts by
+ * text — e.g. "Acme Pro costs $10/mo" when the next run saved a NEW fact "$12/mo" instead of a
+ * replacement. Text matching is only the fallback for facts saved as `new` (design §11):
+ * - a fact whose lineage the next run confirmed, replaced or retracted is never contradicted by text
+ *   (its lineage outcomes say what happened), nor is a version that is no longer current;
+ * - the next run must have saved a NEW fact (not a replacement version, not a candidate) on the same
+ *   normalized subject, and no fact it saved or confirmed may carry the same subject and claim.
  */
 export function contradictedFindings(prevRunId: string, nextRunId: string, deps: { store: Store }): string[] {
-  const live = (f: Finding) => f.status !== 'superseded';
-  const prev = deps.store.findings.list({ runId: prevRunId }).filter(live);
-  const next = deps.store.findings.list({ runId: nextRunId }).filter(live);
-  // KS-5: a fact whose lineage the next run confirmed, replaced or retracted is not "contradicted" by
-  // text (a confirmation saves no row; KS-2 records the lineage outcomes), nor is a version that is no
-  // longer current. Only facts the next run did not address fall back to text matching.
-  const lineage = runLineage(deps.store, nextRunId);
+  const { store } = deps;
+  const prevRun = store.researchRuns.get(prevRunId);
+  const nextRun = store.researchRuns.get(nextRunId);
+  if (!prevRun || !nextRun) return [];
+  const live = (f: Finding) => f.status !== 'superseded' && (f.lifecycle ?? 'current') !== 'candidate';
+  const next = store.findings.list({ runId: nextRunId }).filter(live);
+  const lineage = runLineage(store, nextRunId);
   const nextKeys = new Set([...next, ...lineage.confirmedFacts].map(findingKey));
-  const nextSubjects = new Set([...next, ...lineage.observedFacts].map((f) => norm(f.subject)));
-  return prev
+  const newSubjects = new Set(next.filter(savedAsNew).map((f) => norm(f.subject)));
+  return factsOfRun(store, prevRun)
     .filter((f) => (f.lifecycle ?? 'current') === 'current' && !lineage.lineages.has(f.lineageId ?? f.id))
-    .filter((f) => nextSubjects.has(norm(f.subject)) && !nextKeys.has(findingKey(f)))
+    .filter((f) => newSubjects.has(norm(f.subject)) && !nextKeys.has(findingKey(f)))
     .map((f) => f.id);
 }
