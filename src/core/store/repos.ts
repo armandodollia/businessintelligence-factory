@@ -269,6 +269,7 @@ export const specs = {
       id: 'text', workspaceId: 'text', targetType: 'text', targetId: 'text', criterion: 'text',
       agentValue: { type: 'any', nullable: true }, verdict: 'text', userValue: 'any', reason: 'text',
       createdAt: 'text',
+      actor: 'text', agentRunId: 'text', promptVersion: 'text', // WP-A (migration 14)
     },
   } satisfies TableSpec<Rating>,
   userRequests: {
@@ -277,6 +278,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', agentRunId: 'text', taskId: 'text', kind: 'text', site: 'text',
       details: 'text', status: 'text', response: 'text', createdAt: 'text', taskPriorStatus: 'text',
+      resolvedAt: 'text', actor: 'text', // WP-A (migration 14)
     },
   } satisfies TableSpec<UserRequest>,
   recommendations: {
@@ -316,7 +318,10 @@ export const specs = {
   interview: {
     table: 'interview_turns',
     key: 'id',
-    fields: { id: 'text', workspaceId: 'text', role: 'text', text: 'text', createdAt: 'text' },
+    fields: {
+      id: 'text', workspaceId: 'text', role: 'text', text: 'text', createdAt: 'text',
+      agentRunId: 'text', // WP-A (migration 14)
+    },
   } satisfies TableSpec<InterviewTurn>,
   profiles: {
     table: 'profiles',
@@ -338,6 +343,7 @@ export const specs = {
       id: 'text', workspaceId: 'text', name: 'text', description: 'text', level: 'text', audiences: 'json',
       evidence: 'json', reasoning: 'text', status: 'text', childWorkspaceId: 'text', decisionId: 'text',
       createdAt: 'text',
+      decidedAt: 'text', actor: 'text', decisionReason: 'text', originalPayload: 'json', // WP-A (migration 14)
     },
   } satisfies TableSpec<UnitProposal>,
   pipelines: {

@@ -119,6 +119,7 @@ describe('store', () => {
       details: 'Site requires phone verification',
       status: 'pending',
       createdAt: now(),
+      actor: 'local-user', // WP-A: column default (migration 14)
     };
     s1.userRequests.insert(req);
     s1.userRequests.insert({ ...req, id: newId('ureq'), status: 'resolved', response: 'done' });
@@ -169,6 +170,7 @@ describe('store', () => {
     const rating: Rating = {
       id: newId('rat'), workspaceId: ws, targetType: 'finding', targetId: 'fnd_1', criterion: 'impact',
       agentValue: 7, verdict: 'disagree', userValue: 'low', reason: 'meh', createdAt: now(),
+      actor: 'local-user', agentRunId: agentRun.id, promptVersion: 'v1', // WP-A (migration 14)
     };
     const ratingNull: Rating = { ...rating, id: newId('rat'), agentValue: null, verdict: 'agree' };
     delete ratingNull.userValue;

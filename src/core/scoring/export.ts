@@ -1,7 +1,10 @@
 import { artifactIdsIn } from '../harness/tools/handlers.js';
 import { taskOutputEvidence } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
-import type { Decision, Rating } from '../types.js';
+import type { Decision, InterviewTurn, Rating, UserRequest } from '../types.js';
+// Learning loop WP-A: human feedback lines (request answers, interview turns, feedback events).
+import { listFeedback, type FeedbackEvent } from '../feedback/events.js';
+import { descendants, rootOf } from '../workspace/tree.js';
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
@@ -169,6 +172,7 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   for (const decision of decisions) {
     if (isReuseRecord(decision)) continue;
     if (uploads && expandedRefs(store, decision, taskEvidenceOf).some((id) => uploads.has(id))) continue;
+    if (uploads && citedDecisionsLinkUpload(store, decision, uploads, taskEvidenceOf)) continue; // WP-A
     if (isSuperseded(store, primarySubject(decision))) continue;
     // save_hypothesis decisions name their symptom as primary subject; the hypothesis itself decides.
     const hypothesisId = (decision.payload as { hypothesisId?: unknown } | null)?.hypothesisId;
@@ -188,7 +192,149 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
         return refs.has(r.targetId);
       });
     }
-    lines.push(JSON.stringify({ decision, ratings: joined }));
+    const status = finalReviewStatus(store, decision);
+    lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}) }));
   }
+  lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf));
   return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
+// ---------------------------------------------------------------------------
+// Learning loop WP-A: human feedback in the export
+
+const DECISION_ID = /\bdec_[0-9A-Z]{26}\b/g;
+
+/**
+ * Whether a Decision cited by id in `d` (e.g. the `sources` of an applied prompt patch, a feedback
+ * event's rated decision) rests on an internal upload (`expandedRefs` of the cited decision).
+ */
+function citedDecisionsLinkUpload(store: Store, d: Decision, uploads: Set<string>, taskEvidenceOf: (id: string) => string[]): boolean {
+  for (const m of JSON.stringify([d.refs, d.payload ?? null]).matchAll(DECISION_ID)) {
+    const cited = m[0] === d.id ? undefined : store.decisions.get(m[0]);
+    if (cited && expandedRefs(store, cited, taskEvidenceOf).some((id) => uploads.has(id))) return true;
+  }
+  return false;
+}
+
+const TERMINAL = new Set(['verified', 'unverified', 'failed', 'superseded']);
+
+/** Final review status of the output a decision judges, else of its run's task (terminal statuses only). */
+function finalReviewStatus(store: Store, d: Decision): string | undefined {
+  const p = (d.payload ?? {}) as Record<string, unknown>;
+  const subject = typeof p.hypothesisId === 'string' ? p.hypothesisId : primarySubject(d);
+  return outputStatus(store, subject) ?? taskStatus(store, store.agentRuns.get(d.agentRunId)?.taskId);
+}
+
+function outputStatus(store: Store, id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  const item =
+    store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id) ?? store.competitors.get(id) ??
+    store.symptomHypotheses.get(id);
+  return item?.status && TERMINAL.has(item.status) ? item.status : undefined;
+}
+
+function taskStatus(store: Store, taskId: string | undefined): string | undefined {
+  const status = taskId ? store.tasks.get(taskId)?.status : undefined;
+  return status && TERMINAL.has(status) ? status : undefined;
+}
+
+/** A Decision-shaped view of a human record, so the decision provenance rules (`expandedRefs`) apply to it. */
+function pseudoDecision(workspaceId: string, agentRunId: string | undefined, refs: string[], payload: unknown): Decision {
+  return {
+    id: 'pseudo', workspaceId, agentRunId: agentRunId ?? '', role: 'orchestrator', model: { provider: 'claude', model: 'none' },
+    kind: 'decision', payload, refs, promptVersion: 'n/a', createdAt: '',
+  };
+}
+
+/**
+ * Earliest time an internal upload of the workspace's business tree was stored, if any. The
+ * interviewer is told about uploads and may read them (reads are not logged), so its turns from then
+ * on are treated as upload-derived.
+ */
+function firstUploadAt(store: Store, workspaceId: string, uploads: Set<string>): string | undefined {
+  const root = store.workspaces.get(workspaceId) ? rootOf(store, workspaceId) : workspaceId;
+  const tree = new Set([root, ...descendants(store, root).map((w) => w.id), workspaceId]);
+  let first: string | undefined;
+  for (const id of uploads) {
+    const a = store.artifacts.get(id);
+    if (a && tree.has(a.workspaceId) && (first === undefined || a.capturedAt < first)) first = a.capturedAt;
+  }
+  return first;
+}
+
+/**
+ * Human feedback lines of the export (after the decision lines):
+ * - `{type: 'request_answer', request}`: answered user requests (who, when, response);
+ * - `{type: 'interview_turn', turn}`: the interview transcript, each turn linked to its interviewer
+ *   run (`turn.agentRunId`);
+ * - `{type: 'feedback_event', feedbackEvent, finalReviewStatus?}`: every feedback event, with the
+ *   final review status of the output it acted on.
+ * Upload provenance (unless `includeUploads`, i.e. `uploads` undefined): a request is left out when
+ * its text, task or run rests on an upload; a turn when its text cites an upload, its run's
+ * decisions rest on one, or (agent turns) an upload of the tree existed when it was written; a
+ * feedback event when its before/after/reason, its target (evidence, task) or its agent run rests on
+ * one — including decisions it cites (e.g. a prompt patch's rated sources).
+ */
+function humanFeedbackLines(
+  store: Store,
+  workspaceId: string,
+  uploads: Set<string> | undefined,
+  taskEvidenceOf: (id: string) => string[],
+): string[] {
+  const linked = (d: Decision) =>
+    !!uploads && (expandedRefs(store, d, taskEvidenceOf).some((id) => uploads.has(id)) || citedDecisionsLinkUpload(store, d, uploads, taskEvidenceOf));
+  const lines: string[] = [];
+
+  for (const request of store.userRequests.list({ workspaceId })) {
+    if (request.status === 'pending') continue;
+    const d = pseudoDecision(workspaceId, request.agentRunId, request.taskId ? [request.taskId] : [], requestText(request));
+    if (linked(d)) continue;
+    lines.push(JSON.stringify({ type: 'request_answer', request }));
+  }
+
+  const runLinked = new Map<string, boolean>();
+  const runRestsOnUpload = (runId: string) => {
+    let v = runLinked.get(runId);
+    if (v === undefined) {
+      v = store.decisions.list({ agentRunId: runId }).some(linked);
+      runLinked.set(runId, v);
+    }
+    return v;
+  };
+  const uploadSince = uploads ? firstUploadAt(store, workspaceId, uploads) : undefined;
+  for (const turn of store.interview.list({ workspaceId })) {
+    if (uploads && turnRestsOnUpload(turn, uploadSince, runRestsOnUpload, linked, workspaceId)) continue;
+    lines.push(JSON.stringify({ type: 'interview_turn', turn }));
+  }
+
+  for (const e of listFeedback(store, { workspaceId })) {
+    if (linked(feedbackPseudoDecision(store, e))) continue;
+    const status = outputStatus(store, e.targetId);
+    lines.push(JSON.stringify({ type: 'feedback_event', feedbackEvent: e, ...(status ? { finalReviewStatus: status } : {}) }));
+  }
+  return lines;
+}
+
+const requestText = (r: UserRequest) => ({ site: r.site ?? null, details: r.details, response: r.response ?? null });
+
+function turnRestsOnUpload(
+  turn: InterviewTurn,
+  uploadSince: string | undefined,
+  runRestsOnUpload: (runId: string) => boolean,
+  linked: (d: Decision) => boolean,
+  workspaceId: string,
+): boolean {
+  if (linked(pseudoDecision(workspaceId, undefined, [], { text: turn.text }))) return true;
+  if (turn.role !== 'agent') return false;
+  if (uploadSince !== undefined && turn.createdAt >= uploadSince) return true;
+  return !!turn.agentRunId && runRestsOnUpload(turn.agentRunId);
+}
+
+function feedbackPseudoDecision(store: Store, e: FeedbackEvent): Decision {
+  const refs = [e.targetId];
+  if (e.targetType === 'user_request') {
+    const taskId = store.userRequests.get(e.targetId)?.taskId;
+    if (taskId) refs.push(taskId);
+  }
+  return pseudoDecision(e.workspaceId, e.agentRunId, refs, { before: e.beforeJson ?? null, after: e.afterJson ?? null, reason: e.reason ?? null });
 }

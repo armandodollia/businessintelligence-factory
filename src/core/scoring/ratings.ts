@@ -4,8 +4,11 @@ import { newId } from '../store/repos.js';
 import type { Rating, Role } from '../types.js';
 import { CRITERIA, criterionDef, toNumber, type CriterionDef, type TargetType } from './criteria.js';
 import { COST_FORMATS, costScore } from './priority.js';
+// Learning loop WP-A: who rated, and which agent judgment (run + prompt version) was rated.
+import { DEFAULT_ACTOR } from '../feedback/events.js';
+import { targetProvenance } from '../feedback/provenance.js';
 
-export type RatingInput = Omit<Rating, 'id' | 'createdAt' | 'agentValue'>;
+export type RatingInput = Omit<Rating, 'id' | 'createdAt' | 'agentValue' | 'agentRunId' | 'promptVersion'>;
 
 export class RatingError extends Error {
   constructor(message: string) {
@@ -145,5 +148,10 @@ export function rateCriterion(input: RatingInput, deps: { store: Store }): Ratin
   };
   if (input.verdict === 'disagree') rating.userValue = input.userValue;
   if (input.reason?.trim()) rating.reason = input.reason.trim();
+  // WP-A provenance, resolved at write time from the target's current judgment.
+  rating.actor = input.actor?.trim() || DEFAULT_ACTOR;
+  const prov = targetProvenance(store, input.workspaceId, input.targetType, input.targetId, rating.createdAt);
+  if (prov.agentRunId) rating.agentRunId = prov.agentRunId;
+  if (prov.promptVersion) rating.promptVersion = prov.promptVersion;
   return store.ratings.insert(rating);
 }

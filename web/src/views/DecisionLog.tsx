@@ -2,6 +2,7 @@ import { decisionCriteria, formatValue, shortDate, summarize } from '../logic/fo
 import { useCalibration, useDecisions, useForm, usePromptPatch } from '../logic/hooks.js';
 import type { Decision, PatchRole } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
+import { FeedbackLog } from './FeedbackLog.js';
 
 const KINDS: Decision['kind'][] = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'];
 
@@ -71,6 +72,8 @@ export function DecisionLog({ wsId }: { wsId: string }) {
           ))}
         </tbody>
       </table>
+
+      <FeedbackLog wsId={wsId} />
 
       <h3>Calibration</h3>
       <p className="muted">Where your ratings disagree with the agents, per criterion.</p>

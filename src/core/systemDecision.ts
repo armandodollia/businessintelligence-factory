@@ -20,18 +20,22 @@ export function recordSystemDecision(
     kind?: Decision['kind'];
     payload: Record<string, unknown>;
     refs?: string[];
+    /** Learning loop WP-A: the acting user id (`config.user.id`), recorded as `agentRunId` and `payload.actorId`. */
+    actorId?: string;
+    /** Learning loop WP-A: prompt version the decision concerns (e.g. the patched role's new version). */
+    promptVersion?: string;
   },
 ): Decision {
   const decision: Decision = {
     id: newId('dec'),
     workspaceId: input.workspaceId,
-    agentRunId: input.actor,
+    agentRunId: input.actorId ?? input.actor,
     role: 'orchestrator',
     model: { provider: 'claude', model: 'none' },
     kind: input.kind ?? 'decision',
-    payload: { actor: input.actor, ...input.payload },
+    payload: { actor: input.actor, ...(input.actorId !== undefined ? { actorId: input.actorId } : {}), ...input.payload },
     refs: input.refs ?? [],
-    promptVersion: 'n/a',
+    promptVersion: input.promptVersion ?? 'n/a',
     createdAt: new Date().toISOString(),
   };
   deps.store.decisions.insert(decision);

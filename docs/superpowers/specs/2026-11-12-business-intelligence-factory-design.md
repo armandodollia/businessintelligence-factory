@@ -221,6 +221,15 @@ Criteria agents assign (each with reasoning + evidence links):
 - A "calibration" job (manual trigger) summarizes rating disagreements per role/criterion/task type and proposes prompt changes (few-shot examples from corrected items, rubric clarifications). The user approves changes; prompts are versioned, and every run records the prompt version it used so improvements can be measured.
 - Priority weights can be refit from the user's ratings (simple regression), proposed to the user, not auto-applied.
 - Export: decision log + ratings as JSONL for later model training.
+- Feedback provenance (learning-loop parity WP-A, migration 14): every human input records who
+  (`config.user.id`), when and why; ratings record the agent run and prompt version they judged; an
+  append-only `feedback_events` log (`src/core/feedback/events.ts`) records include overrides,
+  profile edits, unit proposal accept / edit / reject (the agent's original kept on edit), symptom
+  hypothesis corrections, request answers, weight changes and prompt patch approvals, before → after.
+  Calibration counts exclusions as disagreements, inclusions of unverified outputs as agreements and
+  unit proposal decisions on a 0–1 scale; items revised after a rating are re-queued for review. The
+  export adds request answers, interview turns (linked to the interviewer run), feedback events and
+  final review status, all under the upload exclusion.
 
 ## 11. Scheduler
 

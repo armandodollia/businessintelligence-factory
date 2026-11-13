@@ -408,4 +408,45 @@ export const MIGRATIONS: readonly string[] = [
       WHERE c.workspace_id = ratings.workspace_id AND lower(trim(replace(replace(replace(replace(c.name, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' '))) = lower(trim(replace(replace(replace(replace(ratings.target_id, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' ')))
     );
   `,
+  // 14: learning loop WP-A — feedback provenance: who/when/why on every human input (ratings,
+  // user request answers, unit proposal decisions), the agent run + prompt version a rating judged,
+  // the interviewer run of each interview turn, and the append-only `feedback_events` log
+  // (src/core/feedback/events.ts). Existing rows keep NULL timestamps / runs (unknown) and the
+  // default actor.
+  `
+  ALTER TABLE ratings ADD COLUMN actor TEXT NOT NULL DEFAULT 'local-user';
+  ALTER TABLE ratings ADD COLUMN agent_run_id TEXT;
+  ALTER TABLE ratings ADD COLUMN prompt_version TEXT;
+
+  ALTER TABLE user_requests ADD COLUMN resolved_at TEXT;
+  ALTER TABLE user_requests ADD COLUMN actor TEXT NOT NULL DEFAULT 'local-user';
+
+  ALTER TABLE unit_proposals ADD COLUMN decided_at TEXT;
+  ALTER TABLE unit_proposals ADD COLUMN actor TEXT NOT NULL DEFAULT 'local-user';
+  ALTER TABLE unit_proposals ADD COLUMN decision_reason TEXT;
+  ALTER TABLE unit_proposals ADD COLUMN original_payload TEXT;
+
+  ALTER TABLE interview_turns ADD COLUMN agent_run_id TEXT;
+
+  CREATE TABLE feedback_events (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    before_json TEXT,
+    after_json TEXT,
+    reason TEXT,
+    agent_run_id TEXT,
+    prompt_version TEXT
+  );
+  CREATE INDEX feedback_events_ws ON feedback_events (workspace_id);
+  CREATE INDEX feedback_events_target ON feedback_events (target_type, target_id);
+  CREATE TRIGGER feedback_events_no_update BEFORE UPDATE ON feedback_events
+    BEGIN SELECT RAISE(ABORT, 'feedback_events is append-only'); END;
+  CREATE TRIGGER feedback_events_no_delete BEFORE DELETE ON feedback_events
+    BEGIN SELECT RAISE(ABORT, 'feedback_events is append-only'); END;
+  `,
 ];

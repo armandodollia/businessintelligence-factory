@@ -7,10 +7,9 @@ import { ConfigError, parseConfig } from '../core/config/load.js';
 import { ROLES, type BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
 import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
-import { setIncludeInSynthesis, treeWorkspaceIds } from '../core/evidence/synthesis.js';
-import { lastReviewsByTask, setOutputInclude, withLastReview } from '../core/research/outputs.js';
+import { treeWorkspaceIds } from '../core/evidence/synthesis.js';
+import { lastReviewsByTask, withLastReview } from '../core/research/outputs.js';
 import { isPipelineLocked } from '../core/research/lock.js';
-import { resolveUserRequest } from '../core/harness/tools/handlers.js';
 import { uploadInternal } from '../core/internal/uploads.js';
 import { interviewCoverage, sendInterviewMessage, type InterviewerFake } from '../core/interview/interview.js';
 import { competitorCriteria } from '../core/market/competitors.js';
@@ -18,7 +17,7 @@ import type { ResearchDeps } from '../core/research/deps.js';
 import { currentResearchRun, runPipeline } from '../core/research/orchestrator.js';
 import { ALL_PHASES } from '../core/research/phases.js';
 import { validateCron } from '../core/scheduler/scheduler.js';
-import { applyPromptPatch, calibrationReport, calibrationScope, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
+import { calibrationReport, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
 import { RECOMMENDATION_KEYS } from '../core/scoring/criteria.js';
 import { exportTrainingData } from '../core/scoring/export.js';
 import { scoreRecommendations } from '../core/scoring/priority.js';
@@ -29,9 +28,20 @@ import type { Store } from '../core/store/db.js';
 import { newId } from '../core/store/repos.js';
 import { recordSystemDecision } from '../core/systemDecision.js';
 import type { Decision, Phase, Rating, Schedule, UserRequest, Workspace } from '../core/types.js';
-import { acceptUnitProposal, crossCuttingSymptoms, rejectUnitProposal, rollup } from '../core/workspace/businessMap.js';
+import { crossCuttingSymptoms, rollup } from '../core/workspace/businessMap.js';
 import { createWorkspace, workspaceTree } from '../core/workspace/tree.js';
 import { mountMcp, type McpDeps } from './mcp.js';
+// Learning loop WP-A: feedback provenance on every human route.
+import {
+  FeedbackActionError,
+  answerUserRequest,
+  applyPromptPatchAsUser,
+  decideUnitProposal,
+  recordWeightsChange,
+  setIncludeOverride,
+} from '../core/feedback/actions.js';
+import { actorOf } from '../core/feedback/events.js';
+import { mountFeedbackRoutes } from './feedbackRoutes.js';
 import { sseResponse } from './sse.js';
 
 export type AppDeps = {
@@ -102,6 +112,7 @@ const schemas = {
   unitProposal: z.discriminatedUnion('action', [
     z.object({
       action: z.literal('accept'),
+      reason: z.string().optional(),
       edits: z
         .object({ name: z.string().min(1).optional(), description: z.string().optional(), level: scopeLevel.optional(), audiences: z.array(audience).min(1).optional() })
         .optional(),
@@ -216,6 +227,7 @@ export function createApp(deps: AppDeps): Hono {
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.message, ...err.extra }, err.status);
     if (err instanceof RatingError) return c.json({ error: err.message }, 400);
+    if (err instanceof FeedbackActionError) return c.json({ error: err.message }, err.status);
     if (err instanceof ConfigError) return c.json({ error: err.message, issues: err.issues }, 400);
     if (err instanceof ArtifactNotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof ArtifactTooLargeError) return c.json({ error: err.message }, 413);
@@ -248,9 +260,11 @@ export function createApp(deps: AppDeps): Hono {
   const scoringChanged = (before: BifConfig['scoring'], logIn: string[], source: string): Decision[] => {
     const after = structuredClone(config.scoring);
     for (const ws of store.workspaces.list()) scoreRecommendations(ws.id, { store, config });
-    return logIn.map((workspaceId) =>
-      recordSystemDecision({ store, events }, { workspaceId, actor: 'user', payload: { tool: 'set_scoring_weights', source, before, after } }),
-    );
+    return logIn.map((workspaceId) => {
+      const decision = recordSystemDecision({ store, events }, { workspaceId, actor: 'user', payload: { tool: 'set_scoring_weights', source, before, after } });
+      recordWeightsChange(store, workspaceId, before, after, { actor: actorOf(config), source, decisionId: decision.id }); // WP-A
+      return decision;
+    });
   };
 
   // --- workspaces & business map ------------------------------------------------------------
@@ -281,12 +295,11 @@ export function createApp(deps: AppDeps): Hono {
     const proposal = store.unitProposals.get(id);
     if (!proposal) throw new HttpError(404, `unit proposal '${id}' not found`);
     if (proposal.status !== 'proposed') throw new HttpError(409, `unit proposal '${id}' is already ${proposal.status}`);
-    if (input.action === 'accept') {
-      const edits = Object.fromEntries(Object.entries(input.edits ?? {}).filter(([, v]) => v !== undefined));
-      const ws = acceptUnitProposal(store, id, edits);
-      return c.json({ proposal: store.unitProposals.get(id), workspace: ws });
-    }
-    return c.json(rejectUnitProposal(store, id, input.reason ?? ''));
+    // WP-A: decidedAt / actor / reason, the original proposal on accept-with-edit, a calibration
+    // signal and a feedback event (decideUnitProposal wraps acceptUnitProposal / rejectUnitProposal).
+    const out = decideUnitProposal(store, id, input as Parameters<typeof decideUnitProposal>[2], { actor: actorOf(config) });
+    if (input.action === 'accept') return c.json({ proposal: out.proposal, workspace: out.workspace, feedbackEventId: out.feedback.id });
+    return c.json({ proposal: out.proposal, rating: out.rating, feedbackEventId: out.feedback.id });
   });
 
   // --- interview & uploads -------------------------------------------------------------------
@@ -375,7 +388,7 @@ export function createApp(deps: AppDeps): Hono {
     const id = c.req.param('id');
     const { include } = await body(c, schemas.includeFinding);
     if (!store.findings.get(id)) throw new HttpError(404, `finding '${id}' not found`);
-    return c.json(setIncludeInSynthesis(store, id, include));
+    return c.json(setIncludeOverride(store, 'finding', id, include, { actor: actorOf(config) })); // WP-A
   });
   // User override for the persona panel / Strategy: include an unverified (or failed) recommendation
   // or persona, or exclude a verified one. `null` resets to the default (verified only).
@@ -383,13 +396,13 @@ export function createApp(deps: AppDeps): Hono {
     const id = c.req.param('id');
     const { include } = await body(c, schemas.includeFinding);
     if (!store.recommendations.get(id)) throw new HttpError(404, `recommendation '${id}' not found`);
-    return c.json(setOutputInclude(store, 'recommendation', id, include));
+    return c.json(setIncludeOverride(store, 'recommendation', id, include, { actor: actorOf(config) })); // WP-A
   });
   app.post('/api/personas/:id/include', async (c) => {
     const id = c.req.param('id');
     const { include } = await body(c, schemas.includeFinding);
     if (!store.personas.get(id)) throw new HttpError(404, `persona '${id}' not found`);
-    return c.json(setOutputInclude(store, 'persona', id, include));
+    return c.json(setIncludeOverride(store, 'persona', id, include, { actor: actorOf(config) })); // WP-A
   });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
   /** Rated competitors (spec §9), each with its ratable `criteria` (threat, directness, comparison areas). */
@@ -403,7 +416,7 @@ export function createApp(deps: AppDeps): Hono {
     const id = c.req.param('id');
     const { include } = await body(c, schemas.includeFinding);
     if (!store.competitors.get(id)) throw new HttpError(404, `competitor '${id}' not found`);
-    return c.json(setOutputInclude(store, 'competitor', id, include));
+    return c.json(setIncludeOverride(store, 'competitor', id, include, { actor: actorOf(config) })); // WP-A
   });
   /** Research hypotheses per interview symptom (spec §8 drill-down). */
   app.get('/api/workspaces/:id/hypotheses', (c) => c.json(store.symptomHypotheses.list({ workspaceId: workspace(c.req.param('id')).id })));
@@ -450,7 +463,7 @@ export function createApp(deps: AppDeps): Hono {
     const req = store.userRequests.get(id);
     if (!req) throw new HttpError(404, `user request '${id}' not found`);
     if (req.status !== 'pending') throw new HttpError(409, `user request '${id}' is already ${req.status}`);
-    return c.json(resolveUserRequest({ store, events }, id, input.status, input.response));
+    return c.json(answerUserRequest({ store, events }, id, input.status, input.response, { actor: actorOf(config) })); // WP-A
   });
 
   // --- artifacts ------------------------------------------------------------------------------
@@ -488,7 +501,7 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/ratings', async (c) => {
     const input = await body(c, schemas.rating);
     workspace(input.workspaceId);
-    return c.json(rateCriterion(input as Parameters<typeof rateCriterion>[0], { store }), 201);
+    return c.json(rateCriterion({ ...(input as Parameters<typeof rateCriterion>[0]), actor: actorOf(config) }, { store }), 201); // WP-A: actor from config
   });
   /**
    * The user's current rating per (targetType, targetId, criterion): ratings are append-only
@@ -530,15 +543,14 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/workspaces/:id/calibration/prompt-patch/apply', async (c) => {
     const id = workspace(c.req.param('id')).id;
     const patch = await body(c, schemas.applyPromptPatch);
-    const { path } = applyPromptPatch(
+    // WP-A: logged by the real actor at the patched role's new prompt version, plus a feedback event.
+    const applied = applyPromptPatchAsUser(
+      { store, events, config },
+      id,
       { role: patch.role, patchText: patch.patchText, examples: (patch.examples ?? []) as never },
-      calibrationScope(store, config.dataDir, id),
+      { actor: actorOf(config) },
     );
-    const decision = recordSystemDecision(
-      { store, events },
-      { workspaceId: id, actor: 'user', payload: { tool: 'apply_prompt_patch', role: patch.role, patchText: patch.patchText, path } },
-    );
-    return c.json({ path, decisionId: decision.id });
+    return c.json({ path: applied.path, decisionId: applied.decisionId, promptVersion: applied.promptVersion, previousPromptVersion: applied.previousPromptVersion });
   });
   app.get('/api/workspaces/:id/scoring-weights', (c) => {
     const id = workspace(c.req.param('id')).id;
@@ -629,6 +641,9 @@ export function createApp(deps: AppDeps): Hono {
       signal: c.req.raw.signal,
     });
   });
+
+  // --- learning loop WP-A: feedback log, hypothesis corrections, profile edits ------------------
+  mountFeedbackRoutes(app, { store, config });
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

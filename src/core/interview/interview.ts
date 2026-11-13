@@ -145,8 +145,10 @@ function drillDownSection(store: Store, workspaceId: string, symptoms: Symptom[]
 // ---------------------------------------------------------------------------
 // turn
 
-function insertTurn(store: Store, workspaceId: string, role: InterviewTurn['role'], text: string): InterviewTurn {
-  return store.interview.insert({ id: newId('itv'), workspaceId, role, text, createdAt: new Date().toISOString() });
+function insertTurn(store: Store, workspaceId: string, role: InterviewTurn['role'], text: string, agentRunId?: string): InterviewTurn {
+  const turn: InterviewTurn = { id: newId('itv'), workspaceId, role, text, createdAt: new Date().toISOString() };
+  if (agentRunId) turn.agentRunId = agentRunId; // WP-A: the interviewer run (migration 14)
+  return store.interview.insert(turn);
 }
 
 /**
@@ -160,7 +162,7 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
   const ws = store.workspaces.get(workspaceId);
   if (!ws) throw new Error(`workspace '${workspaceId}' not found`);
   if (!text.trim()) throw new Error('interview message is empty');
-  insertTurn(store, workspaceId, 'user', text);
+  const userTurn = insertTurn(store, workspaceId, 'user', text);
 
   const prompt = loadPrompt('interviewer', calibrationScope(store, config.dataDir, workspaceId));
   let fakeReply: string | undefined;
@@ -179,6 +181,8 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
     };
   }
   const outcome = await supervisor.run(opts);
+  // WP-A: link the user's turn to the interviewer run that answered (or tried to answer) it.
+  store.interview.update(userTurn.id, { agentRunId: outcome.agentRunId });
   if (outcome.status !== 'done') {
     throw new Error(`interviewer run ${outcome.agentRunId} failed${outcome.reason ? `: ${outcome.reason}` : ` (exit ${outcome.exitCode})`}`);
   }
@@ -189,7 +193,7 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
       .map((e) => e.text)
       .at(-1);
   if (!reply?.trim()) throw new Error(`interviewer run ${outcome.agentRunId} produced no reply`);
-  return insertTurn(store, workspaceId, 'agent', reply.trim());
+  return insertTurn(store, workspaceId, 'agent', reply.trim(), outcome.agentRunId);
 }
 
 // ---------------------------------------------------------------------------

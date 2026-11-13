@@ -22,6 +22,8 @@ the agent CLIs call into, and a small React web app. Design spec:
      and workers per task type). Every role model must be listed under an enabled provider.
    - `loop`: review loop `maxRounds` / `passThreshold`, globally and per task type.
    - `limits`, `browser`, `identity`, `actionPolicy`, `scoring`, `server.port`, `dataDir`.
+   - `user.id`: who you are in the feedback log (default `local-user`). Every rating, override,
+     correction, answer and approval records this id; the API never takes it from a request.
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -168,6 +170,18 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   priority overrides (never auto-applied). The Decision log page proposes prompt patches per role from
   your disagreements; you edit and approve them before they are written. Weight changes and patches
   are logged as decisions. The decision log plus ratings export as JSONL.
+- **Feedback log.** Every human action on agent output is also an append-only feedback event: who
+  (`user.id`), when, what changed (before → after), why, and the agent run and prompt version that
+  produced the item. Recorded actions: include overrides (findings, recommendations, personas,
+  competitors, symptom hypotheses), profile edits, unit proposal accept / accept-with-edits / reject,
+  symptom hypothesis corrections (Findings page), request answers, weight changes and prompt patch
+  approvals. Ratings store the agent run and prompt version they judged. Feedback feeds calibration:
+  excluding an output counts as a disagreement with it, including an unverified one as an agreement,
+  and unit proposal rejections / edits are scaled disagreements on the proposing decision, so they
+  rank among the prompt patch examples. When an agent revises an item after you rated it, the item
+  returns to the review queue. The Decision log page lists the feedback with actor, time and reason.
+  The export adds answered requests, the interview transcript (each turn linked to its interviewer
+  run), feedback events and each output's final review status, with the same upload exclusion.
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is
   diffed against the previous run of the same phase (new findings, subjects no longer found, changed
   screenshots), shown on the Research page.
@@ -212,7 +226,9 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
 - **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
 - **"What changed" only compares artifacts that findings cite.**
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with
-  `payload.actor` telling them apart.
+  `payload.actor` telling them apart. Prompt patch approvals record the acting user id as the run id
+  and the patched role's new prompt version (worker / synthesizer: the base worker prompt without
+  task-type extras; persona: the persona calibration appendix).
 - **Local only, no authentication.** The server rejects requests whose `Host` is not
   `127.0.0.1`/`localhost` (DNS rebinding), requires JSON (or multipart uploads) on state-changing
   requests and refuses non-local `Origin`s. Artifacts are served with `Content-Security-Policy:
