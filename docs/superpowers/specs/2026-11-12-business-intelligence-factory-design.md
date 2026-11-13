@@ -110,6 +110,7 @@ Start with Claude Code and Codex; OpenCode third. Every raw event stream is pers
 - `request_approval({ action, site, details })` — required before gated actions (§6.6); blocks until the user approves/denies
 - `save_persona({ segment, profile{...}, evidence })` — market research workers only
 - `submit_persona_feedback({ recommendationId, scores{...}, concerns[], reasoning, would_change_mind })` — persona panel runs only
+- `submit_escalation({ questions: [{ question, options[2–4], recommended, why }] (0–3) })` — escalation role only (§7.4)
 
 Tools are scoped by role: a run only sees the tools its role permits.
 
@@ -133,6 +134,14 @@ Every `log_decision`, every review score, every pushback, every task proposal is
 | Browse; sign up with disposable identities; accept standard ToS for those signups; start free trials that need no card; walk checkout up to (not including) payment | Entering payment details (the user enters them personally; agents never see or store card data); requesting demos; contacting sales/support or anything that reaches a real person | Completing a purchase autonomously |
 
 The policy lives in config and in every worker prompt; the reviewer checks walkthroughs against it.
+
+**Policy history (learning loop WP-D, migration 17).** Every action-policy event is appended to
+`policy_events` with the business-tree root it happened in: `approval_requested`,
+`approval_granted`, `approval_denied`, and `blocked` (a tool call rejected by role scope, or an
+approval request whose action matches a `never` item). The requesting role's last five denials in
+the same tree (one short line each) are added to its task prompt (workers, synthesizers,
+orchestrator); `listPolicyEvents` (`src/core/policy/policyEvents.ts`) is the query API for the
+lessons engine.
 
 ## 7. Research flow and adversarial loop
 
@@ -163,6 +172,18 @@ loop:
 - Reviewer model is configurable; default to a different provider than the worker where available (builder's call — reduces shared blind spots).
 - **Unverified** results are kept, flagged in the UI with the last reviewer's objections, and excluded from recommendation synthesis unless the user overrides.
 - `max_rounds` and `pass_threshold` are configurable globally and per task type.
+
+### 7.4 Structured escalations (learning loop WP-D)
+When a task ends `unverified` or `failed`, an `escalation` agent run (prompt `escalation.md`, model
+`escalation.model`, default `roles.orchestrator`) gets the brief, criteria, outcome, last review
+issues, run failures and deliverable, and calls `submit_escalation` with 0–3 multiple-choice
+questions, each with 2–4 options and one recommended option. Each question is a `user_request` of
+kind `escalation` (`options_json`); the task keeps its final status. When every question of the
+escalation is answered (`POST /api/requests/:id/escalation-answer { choice, note? }`; dismiss =
+deny) and at least one is not dismissed, the task re-runs through the review loop with a fresh
+round budget — as a revision when the last review raised issues, else as new work — and its prompt
+carries the previous outcome, the previous run's tool calls (prior-attempt summary) and the answers.
+At most `escalation.maxPerTask` (default 2) escalations per task.
 
 ### 7.3 Evidence rule
 Every finding references ≥1 stored artifact. Flow walkthroughs store an ordered screenshot per step. Articles are archived as full page snapshot + extracted text + source URL + retrieval time. Documents (PDF filings, reports) stored as original files. Recommendations reference findings; the UI can traverse recommendation → findings → artifacts.
@@ -238,8 +259,18 @@ Criteria agents assign (each with reasoning + evidence links):
 - **browser** backend (MCP plugin with dedicated profile | T3 Code browser), identity/disposable-email provider
 - **action policy** (§6.6)
 - **persona weight** in priority (default 0)
+- **escalation** (optional): enabled, model, max questions (≤ 3), max escalations per task (§7.4)
+- **telemetry** (optional): `bus_events` retention in days; OTLP/HTTP JSON log export of the event
+  bus (off by default; metadata only — ids, types, statuses, harness error text — never agent or
+  user free text, so upload-derived text cannot leave through it)
 
 Editable in a simple settings page and as a file.
+
+**Event persistence (WP-D).** Bus events that are not stored elsewhere (`tool_call` incl.
+validation errors, `run_status`, `task_status`, and `user_request(_resolved)` as ids/kind/status)
+are appended to `bus_events` (identity secrets redacted) and pruned after
+`telemetry.busEventRetentionDays`; `run_event` stays in `events.jsonl` and `decision` in
+`decisions`.
 
 ## 13. Web app (v1, minimal)
 
