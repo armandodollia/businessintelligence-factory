@@ -262,6 +262,14 @@ Responses of saves that insert a fact carry `entityId`.
   `finding_evidence` with the quote text itself, so a citation survives
   re-extraction (`chunk_id` is a locator hint and is re-resolved by substring
   search).
+- **Quote cap (paging rework, binding).** A `quote` is at most 1 200 characters
+  (`QUOTE_MAX_CHARS`); a longer one is rejected with "cite a shorter span or several
+  quotes" (tool schema and `verifyEvidenceRefs`). A quote is an item of `expand <fact>`,
+  so a capped quote always fits a page whole and a pointer to it is never `too_large`.
+  Quotes stored before the cap are served as ordinary items (cut with `full` when larger
+  than a page). A quote item carries `passage` — `expand <chunk>`, with the fewest
+  `around` neighbours (up to 3) whose text holds the WHOLE quote — only when such a call
+  exists: it shows the text around the quote; it is not how a cut quote is recovered.
 - Confirmations and retractions must cite ≥ 1 artifact captured by the same task
   (a `save_artifact` capture row with the task or one of its agent runs; saving
   bytes identical to an earlier artifact still records this task's capture).
@@ -429,37 +437,73 @@ Budgets (`config.knowledge.budgets`, tokens, defaults): search 1 200, card 800,
 expand 2 000, prompt briefing 1 500; per-role overrides (reviewer expand 3 000,
 synthesizer briefing 4 000); optional per-provider scale for CLIs with smaller
 tool-output limits; `hardMaxTokens` 8 000 for any single response whatever the
-caller asks. A response over budget drops its tail and returns `truncated`, how
-many more, and a `cursor`. Every response states its token estimate. No response is ever
-smaller than `MIN_RESPONSE_TOKENS` (100): a smaller configured budget (or `max_tokens`) is
-clamped up to it, so even a response that can serve nothing of its page still says
-`truncated`, how many items, and the cursor that repeats the page with a larger budget —
-"nothing fit" never reads as "nothing exists". Prompt sections degrade instead (left-out
-ids → counts → one count line → empty only when not even that fits).
+caller asks. `max_tokens` replaces the role budget for one call: lower, or higher up to the hard
+maximum (scaled for the provider). Every response states its measured size (`tokens`). Prompt
+sections degrade instead (left-out ids → counts → one count line → empty only when not even that fits).
 
-As built (KS-8 ruling after the real-CLI smoke): `cursor` never skips content. Text reads
-(`read_artifact` text / raw, `expand` on a chunk or with neighbours) page by position: a passage that
-does not fit is served up to the budget and marked `cut: true`, and the next cursor continues from
-exactly that character (no placeholder, no `retry_cursor`). In lists (hits, card lines, changes,
-expanded items; final-gate ruling): an item that does not fit the rest of a page ends the page and the
-cursor points at it, so it opens the next page whole; only an item too big for a whole page on its own
-is shortened and served alone — text fields cut first; list entries dropped only if that is not enough,
-counted per field in `omitted_entries`; marked `cut: true`. The role notes a page carries count against
-its budget, so a page never overflows into "nothing fits".
+**Paging (rework after the KS-8 gate, binding; `paging.ts`).** One rule set for every read tool:
 
-Recovery (re-gate ruling, binding): what is shortened or left out is recovered by the first that applies —
-(1) it is an item of this response, so the request's `cursor` reaches it (a fact's quotes are items of
-`expand <fact>`; a node card has one line per profile key); (2) `full` names the exact call that returns
-it, `{kind, tool, input}`: `expand_id` (a search hit: `expand <id>`), `expand_chunk` (a quote too long for
-a page: `expand <its chunk>`, position-paged), `get_card_line` (a line of `expand <entity>`: that line of
-`get_card <entity>`, cursor and budget), `read_workspace_line` (a node card line: `read_workspace <node>`
-at it); (3) `same_call`: this request at the item (its cursor) with the `max_tokens` that holds it.
-`max_tokens` may raise a response's budget up to the hard maximum (scaled for the provider) for this.
-Stated limit: a single value larger than the hard maximum (default 8 000 tokens) is served cut, flagged
-`too_large: true` with `size_tokens`, and has no pointer. `expand` of a node id returns its node card.
-Cursors are compact strings (`c1.<key>.<offset>[.<pos>].<check>`). The header of `expand` / `read_artifact` goes on the first page only (a page
-too small for it gets a shortened header, `header_cut: true`); later pages carry the id, the items
-and the envelope. Agents are told: follow `cursor` until it is absent and you have read everything.
+- **One shape.** Every paged response is a small, fixed **header**, then **items**
+  (`hits`, `lines`, `changes` or `items`), then the envelope (`tokens`, `truncated`, `more`,
+  `cursor`, `relaxed`, `content_trust`, `notes`). The header holds identity only and is bounded:
+  kind, id, a name (subject, title, name; at most 200 JSON characters, so even a name full of
+  escapes is bounded — a name cut there is also served whole as a `field` item), source node,
+  short fixed-width state (a fact's status, lifecycle, version, entity; a record's status; an
+  artifact's kind, mode, `document_truncated`), the `upload` flag; for `search` the query (echo,
+  bounded) and scope, for `list_changes` its window and scope. It never needs cutting:
+  `header_cut` is gone. Everything else is an item reached through the cursor: a fact's claim,
+  criteria, state (lineage, confirmations, freshness), evidence, each quote, versions and relations;
+  a record's fields (one `field` item each: a persona's 13 profile fields are 13 items); an
+  artifact's `meta` (mime, capture, URL, extraction state) and `description`, its captures, page
+  versions and outline; card lines, with an entity's aliases and a node's scope, description and
+  audiences as its first lines; passages.
+- **Header on the first page only**, for every tool, `read_workspace` included. A request without a
+  cursor is the first page: header, item notes (extraction state, what node scope left out, history
+  not shown) and items. Any cursor — a later page or a pointer — gets no header and no item notes.
+  The dispatcher's role notes are on every page.
+- **Measured, not estimated.** A page is assembled by rendering the real response — header, items,
+  the cursor it would hand out, `more`, the notes, the request's own echo — and measuring it
+  (`estimateTokens` of its JSON). An item is added only while the rendered page still fits. No
+  envelope reserve, no estimate: `tokens` is the page's true size.
+- **An item that does not fit after others ends the page**; the cursor points AT it, so it opens the
+  next page whole. **An item too big for a page on its own is cut** (`shortenItem`: text fields cut
+  first at a token boundary, never inside a fence marker and only after redaction; list entries
+  dropped only if that is not enough, counted in `omitted_entries`), alone on its page, marked
+  `cut: true`, and **always carries `full`**, the exact call that returns it whole. Passages (chunk
+  text, `read_artifact` text and raw) page by position instead: a piece that does not end its
+  passage is `cut: true` and the cursor continues from exactly its next character (the cursor is
+  its pointer); a piece shorter than 48 characters is not started after other items.
+- **Pointer rule** (`full: { kind, tool, input }`, `RECOVERY_KINDS`), first that applies:
+  `expand_id` (a search hit: `expand <id>`); `get_card_line` (a line of `expand <entity>`: that line
+  of `get_card <entity>`, when the 15-fact card has it); `read_workspace_line` (a node card line,
+  from `get_card`, `read_workspace` or `expand` of a node: `read_workspace <node>` at it);
+  `same_call` (this request at the item). Every pointer that names a page states its `max_tokens`,
+  **measured**: the size of the target's later page holding the item whole (no header there),
+  raised to the target tool's floor. Above the hard maximum the item is flagged `too_large` with
+  `size_tokens` (that measured size) instead: the only cut without a working pointer, and a capped
+  quote never reaches it.
+- **Floors (floor invariant).** While content remains, every page returns at least one item: whole,
+  a passage piece, or cut with its pointer. Each tool's budget is clamped up to its floor
+  (`READ_FLOOR_TOKENS`), which holds the bounded header, every first-page note, the envelope and the
+  barest cut item with its pointer: **search 200, get_card 200, list_changes 200, read_workspace
+  200, expand 300, read_artifact 300** tokens (measured worst cases: 100, 168, 132, 149, 270, 213).
+  `max_tokens` accepts any positive value; below the floor it is raised to it. A "nothing fits"
+  answer no longer exists; should a request ever not fit its floor, the page is assembled at the
+  smallest budget that serves an item, with a note saying so (never seen in the sweep).
+- **Kept:** redaction before every cut; no cut inside a fence marker; cursors are compact strings
+  (`c1.<key>.<offset>[.<pos>].<check>`) bound to the request (`{tool, caller node, role, every input
+  except cursor / max_tokens}`) with a check value; one retrieval row per page listing everything
+  the page served (header refs on the first page, every item served whole, as a piece or cut).
+- **Acceptance test:** the paging sweep (`test/core/knowledge/pagingSweep[A-D].test.ts`) sweeps
+  every read tool over budgets from 1 upward — scope, `around`, later-page cursors, keys full of
+  escape characters, long records, quotes across chunk boundaries, nodes with many keys — from the
+  start and from later cursors, following every pointer. It fails on an empty page while content
+  remains, a false "nothing fits", a page over budget or a `tokens` that is not its size, a header
+  on a later page, a cut without a pointer (or sharing its page), a pointer that does not return the
+  item whole, and content never served once cursors and pointers are followed to the end.
+
+`expand` of a node id returns its node card. Agents are told: follow `cursor` until it is absent; an
+item marked `cut` carries `full`, the exact call that returns it.
 
 ## 10. Cards (computed)
 

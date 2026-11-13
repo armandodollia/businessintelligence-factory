@@ -1275,3 +1275,57 @@ Recorded from the design thread (implemented in `scoring/export.ts`, tested in
 - A confirm or retract by an exposed task does not taint the fact it targets: the target keeps its
   existing status.
 - Fact-observation export lines follow the same task rule as decisions (`taskCitesExposedOutput`).
+
+## Paging rework builder notes (after the KS-8 gate; supersedes the paging parts of the KS-4 and KS-8 notes)
+
+Three review rounds each found new paging edge cases (the last, at dadcd82: a 13-field persona silently
+cut at the default budget; false "nothing fits" on `expand` of an artifact with captures, `scope: "tree"`;
+a quote across a chunk boundary recovered as half a quote; undersized node-line pointers). The causes
+were estimates (room computed without the request's echo or the longer pointers), a header that held
+content (and so needed `header_cut`), and pointers measured against a page shape other than the one the
+target serves. Design §7.3 and §9 ("Paging") state the binding rules; the choices inside them:
+
+- **One assembler.** `paging.ts` `assemblePage` builds every page of every read tool: it renders the
+  response exactly as served (header on the first page, items, `tokens`, `truncated`, `more`, `cursor`,
+  `relaxed`, `content_trust`, notes — role notes on every page, item notes on the first) and adds an item
+  only while that fits. `knowledgeRead` no longer wraps an envelope or answers "nothing fits";
+  `pageOf`, `ENVELOPE_TOKENS`, `textHeader`, `finishText`, `rawPage`, `cursorAtItem` and the stalled /
+  restart paths are gone. `tokens` is the fixed point of the page's own size.
+- **Cursor meaning.** No cursor = first page (header). Any cursor = later page (no header), including a
+  pointer at item 0; `pos` is only a character position inside a position-paged item (passages; raw text
+  is one such item, `{ type: 'raw', offset }` per piece). The format is unchanged.
+- **Header contents.** Identity plus short fixed-width state (the web item view needs a fact's
+  `lifecycle`). Names are bounded at 200 JSON characters (`boundedText`, `HEADER_NAME_JSON`); a name cut
+  there is also served whole as a `field` item (or a `name: …` card line). Cards gained `detail` lines
+  (aliases with their own refs and upload marks; a node's scope, description, audiences) served before
+  `lines`; briefings keep using `lines` only.
+- **Item shapes.** Fact: `claim` `{ text }`, `criteria` (when not empty), `state`, then evidence /
+  quote / version / unverified_update / relation as before. Artifact: `meta` (mime, captured_at,
+  source_url, flow, step, extraction) and `description` first. Record: `{ type: 'field', field, value }`
+  (a persona field: `{ field: 'profile.<key>', value, confidence, evidence }`).
+- **Pointers measured on their target.** `laterPageNeed(itemsKey, value, cursor, more, notes)` renders
+  the target's later page; `same_call` uses this request's items; `get_card_line` the 15-fact card's
+  string line (that card is built only when a line needs a pointer — the `expandEntity` double build
+  is gone); `read_workspace_line` the node card's string line (`nodeLineRecover`, now in `cards.ts`).
+  `max_tokens` = max(need, the target tool's floor); above the hard maximum (or the floor, if larger),
+  `too_large` with `size_tokens` = need. `expand_chunk` left `RECOVERY_KINDS`: it is a quote's
+  `passage`, given only when `expand <chunk>` with the fewest `around` (≤ 3) holds the whole quote
+  (whitespace-normalized, as the save-time check); `shortenItem` keeps `passage` and `field` whole.
+- **Floors.** `READ_FLOOR_TOKENS` (budget.ts; registry imports it for the descriptions): search,
+  get_card, list_changes, read_workspace 200; expand, read_artifact 300. Measured worst cases (names at
+  their bound, every first-page note, role note): search ≤ 100, list_changes 132, read_workspace 149,
+  get_card 168, read_artifact 213, expand 270. `max_tokens` schema minimum is 1 (raised to the floor).
+  Below a floor `assemblePage` would raise the page's budget with a note; the sweep fails if it ever does.
+- **Quote cap.** `QUOTE_MAX_CHARS` = 1 200 (`factTools.ts`), enforced by the tool schema and by
+  `verifyEvidenceRefs` ("cite a shorter span or several quotes").
+- **Elsewhere note.** Unchanged rule (added only when the page's hits are identical with it); with exact
+  pages it appears only when the last hit leaves room, so `crossNode` checks a range of budgets.
+- **Retrieval rows** are deduplicated per page (`uniqueRefs`), search included.
+- **Tests.** Acceptance: `pagingSweep[A-D].test.ts` (shapes in `sweepHelpers.ts` `SWEEP_SPECS`, four
+  shards so they run in parallel): 28 request shapes, about 140 budgets each from 1 to 2 400 plus restarts
+  from three later cursors at four budgets; about 21 000 pages and 1 500 pointers followed per run
+  (same_call ~970, read_workspace_line ~290, get_card_line ~130, expand_id ~120). The four findings at
+  dadcd82 and the floors: `pagingFindings.test.ts`. The paging tests that encoded the old algorithm
+  (`pageExact`, `expandPaging`, `listPaging`, `readTinyBudget`, `recovery`, `smokeContracts`) now assert
+  the new rules. Nit: `actorRoutes.test.ts` now requires a real request for a route proven elsewhere; that
+  exposed three untested include routes (recommendation, persona, competitor), proven there now.
