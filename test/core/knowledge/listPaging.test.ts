@@ -231,3 +231,30 @@ describe('shortened text never splits an id (Opus finding 6)', () => {
     }
   });
 });
+
+describe('expand of a non-text item shortens its header like text reads (Opus finding 4, §9)', () => {
+  it('a fact with a long claim at 100-300 tokens: header_cut on the first page, never "nothing fits", every item visited', async () => {
+    const t = ks4(opened);
+    const a = await t.page('ws_a', 'Acme pricing page: the Pro plan costs 49 dollars per seat.');
+    const f = t.fact('ws_a', `Acme pricing claim ${'with a fairly long explanation of the plan tiers and seat prices '.repeat(8)}`, {
+      evidence: [a.id], criteria: { a: 'b'.repeat(200) } as never,
+    });
+    const c = t.ctx('ws_a');
+    const [whole] = await t.call<Page>(c, 'expand', { id: f.id, max_tokens: 8000 }).then((p) => [p]);
+    const ref = (whole!.items as unknown[]) ?? [];
+    for (let budget = 100; budget <= 300; budget += 10) {
+      const pages: Page[] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < 40; i++) {
+        const p = await t.call<Page>(c, 'expand', { id: f.id, max_tokens: budget, ...(cursor ? { cursor } : {}) });
+        pages.push(p);
+        expect(p.tokens).toBeLessThanOrEqual(budget);
+        expect(JSON.stringify(p.notes ?? []), `budget ${budget}`).not.toMatch(NOTHING_FITS);
+        if (!p.cursor) break;
+        cursor = p.cursor;
+      }
+      expect(pages[0]).toMatchObject({ id: f.id, header_cut: true });
+      expect(pages.flatMap((p) => (p.items as unknown[]) ?? []).length, `budget ${budget}`).toBe(ref.length);
+    }
+  });
+});

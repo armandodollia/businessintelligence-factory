@@ -35,7 +35,7 @@ import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
 import { itemIsUploadDerived } from './provenance.js';
 import {
-  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, outsideScopeNote, pageOf, readableById, shortenItem,
+  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, itemExpandId, outsideScopeNote, pageOf, readableById, shortenItem,
   sourceLabel, uniqueRefs, usableOnly,
   type ReadEnv, type ReadOutput,
 } from './readCommon.js';
@@ -93,8 +93,16 @@ const cursorAt = (cursor: string | undefined, key: string) => (cursor ? decodeCu
 /** Pages `b.items` within `budget` and assembles the output. */
 function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
   if (b.outside) b.notes.push(outsideScopeNote(b.outside));
-  const { header, first } = firstPage(b.header, cursorAt(cursor, key));
-  const notes = first ? b.notes : [];
+  // Opus finding 4 (§9): the first page shortens its header the way text reads do (`header_cut`), so a
+  // long claim never turns a small page into "nothing fits": room is kept for the envelope and the
+  // barest form of the first item.
+  const next = b.items[0];
+  const nextId = next !== undefined ? itemExpandId(next) : undefined;
+  const minItem = next === undefined ? 0 : estimateTokens(JSON.stringify({
+    ...(typeof (next as Item).type === 'string' ? { type: (next as Item).type } : {}),
+    ...(nextId ? { id: nextId, full: `expand ${nextId} for the full item` } : {}), cut: true,
+  }));
+  const { header, first, notes } = textHeader(b, cursorAt(cursor, key), budget - envelopeTokens(budget, key, b.items.length, 0) - minItem);
   const page = pageOf(b.items, header, budget, { key, notes, ...(cursor ? { cursor } : {}) });
   // A shortened item is a new object: its refs are those of the item it was cut from.
   const src = b.items.slice(page.offset, page.offset + page.items.length);

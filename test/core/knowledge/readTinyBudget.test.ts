@@ -85,17 +85,16 @@ describe('tool responses at tiny configured budgets (clamped to MIN_RESPONSE_TOK
     });
   }
 
-  it('a header too large for max_tokens gives the notice with a cursor that serves the content once the budget is raised', async () => {
+  it('a header too large for max_tokens is shortened (header_cut, Opus finding 4); expand with a larger budget serves it whole', async () => {
     const t = ks4(opened);
     const f = t.fact('ws_a', `Long claim ${'word '.repeat(700)}`);
     const c = t.ctx('ws_a');
-    const small = await t.call<{ truncated: boolean; more: number; cursor: string; tokens: number; notes: string[] }>(c, 'expand', { id: f.id, max_tokens: MIN_RESPONSE_TOKENS });
+    const small = await t.call<{ id: string; claim?: string; header_cut?: boolean; tokens: number; notes?: string[] }>(c, 'expand', { id: f.id, max_tokens: MIN_RESPONSE_TOKENS });
     expect(small.tokens).toBeLessThanOrEqual(MIN_RESPONSE_TOKENS);
-    expect(small).toMatchObject({ truncated: true });
-    expect(small.cursor).toBeDefined();
-    expect(small.notes.join(' ')).toMatch(/max_tokens/);
-    const big = await t.call<{ claim: string }>(c, 'expand', { id: f.id, cursor: small.cursor, max_tokens: 4000 });
-    expect(big.claim).toContain('Long claim');
+    expect(small).toMatchObject({ id: f.id, header_cut: true });
+    expect(JSON.stringify(small.notes ?? [])).not.toMatch(/nothing of this page fits/);
+    const big = await t.call<{ claim: string }>(c, 'expand', { id: f.id, max_tokens: 4000 });
+    expect(big.claim).toBe(f.claim);
   });
 
   it('an item larger than the page is shortened and marked cut, and the cursor moves on (KS-8: no placeholder)', async () => {
