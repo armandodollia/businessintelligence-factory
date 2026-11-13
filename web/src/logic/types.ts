@@ -196,6 +196,10 @@ export interface PromptPatch {
 export interface AppliedPromptPatch {
   path: string;
   decisionId: string;
+  /** The calibration history version the approval created (revertable on the Usage & prompts page). */
+  versionId: string;
+  promptVersion: string;
+  previousPromptVersion: string;
 }
 
 /** Recommendation criteria the priority weights apply to (mirrors `RECOMMENDATION_KEYS`). */
@@ -384,7 +388,10 @@ export interface RevertedCalibration {
   path: string;
   version: import('../../../src/core/types.js').CalibrationVersion;
   decisionId: string;
+  promptVersion: string;
+  previousPromptVersion: string;
 }
+
 // ---------------------------------------------------------------------------
 // learning loop WP-C: decision outcomes report (`GET .../outcomes`)
 

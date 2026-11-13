@@ -147,4 +147,35 @@ describe('WP-A routes: actor and feedback events', () => {
       expect.objectContaining({ actor: 'ana@acme', targetId: 'reviewer', promptVersion: a.body.promptVersion }),
     ]);
   });
+
+  it('integration: weights, apply and revert are logged by the real actor, never the `user` pseudo run id', async () => {
+    const t = setup();
+    const w = await t.json('PUT', `/api/workspaces/${t.ws.id}/scoring-weights`, { weights: { upside: 2 } });
+    expect(t.store.decisions.get(w.body.decisionId)!.agentRunId).toBe('ana@acme');
+
+    // One apply path: a calibration version (WP-B) AND a prompt_patch_apply feedback event (WP-A).
+    const a = await t.json('POST', `/api/workspaces/${t.ws.id}/calibration/prompt-patch/apply`, { role: 'worker', patchText: '1. cite sources\n' });
+    expect(a.status).toBe(200);
+    expect(a.body).toMatchObject({ decisionId: expect.any(String), versionId: expect.any(String), promptVersion: expect.any(String), previousPromptVersion: expect.any(String) });
+    const versions = (await t.json('GET', `/api/workspaces/${t.ws.id}/calibration/versions?role=worker`)).body;
+    expect(versions.map((v: { source: string }) => v.source)).toEqual(['import', 'apply']);
+    expect(versions[1]).toMatchObject({ id: a.body.versionId, decisionId: a.body.decisionId, actor: 'ana@acme' });
+    expect(listFeedback(t.store, { kind: 'prompt_patch_apply' })).toEqual([
+      expect.objectContaining({ actor: 'ana@acme', targetId: 'worker', afterJson: expect.objectContaining({ decisionId: a.body.decisionId, versionId: a.body.versionId }) }),
+    ]);
+
+    const r = await t.json('POST', `/api/workspaces/${t.ws.id}/calibration/versions/${versions[0].id}/revert`, {});
+    expect(r.status).toBe(200);
+    const rd = t.store.decisions.get(r.body.decisionId)!;
+    expect(rd).toMatchObject({ agentRunId: 'ana@acme', payload: { tool: 'revert_calibration', actor: 'user', actorId: 'ana@acme' } });
+    expect(rd.promptVersion).toBe(a.body.previousPromptVersion);
+    expect(listFeedback(t.store, { kind: 'prompt_patch_revert' })).toEqual([
+      expect.objectContaining({
+        actor: 'ana@acme', targetType: 'prompt', targetId: 'worker', promptVersion: a.body.previousPromptVersion,
+        beforeJson: expect.objectContaining({ promptVersion: a.body.promptVersion }),
+        afterJson: expect.objectContaining({ promptVersion: a.body.previousPromptVersion, decisionId: r.body.decisionId, versionId: r.body.version.id }),
+      }),
+    ]);
+    expect(t.store.decisions.list().filter((d) => d.agentRunId === 'user')).toEqual([]);
+  });
 });

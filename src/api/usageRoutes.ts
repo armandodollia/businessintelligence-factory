@@ -11,10 +11,11 @@ import { promptVersionMetrics } from '../core/metrics/promptMetrics.js';
 import { costReport, usageTotals } from '../core/metrics/usage.js';
 import { getPromptText } from '../core/prompts/store.js';
 import { calibrationScope } from '../core/scoring/calibration.js';
-import { actorOf, calibrationHistory, revertCalibration, setCalibrationDecision } from '../core/scoring/calibrationHistory.js';
+import { FeedbackActionError, revertCalibrationAsUser } from '../core/feedback/actions.js';
+import { actorOf } from '../core/feedback/events.js';
+import { calibrationHistory } from '../core/scoring/calibrationHistory.js';
 import type { Store } from '../core/store/db.js';
 import { usageRepos } from '../core/store/usageRepos.js';
-import { recordSystemDecision } from '../core/systemDecision.js';
 import type { AgentRun, Role } from '../core/types.js';
 
 export type UsageRouteDeps = { store: Store; config: BifConfig; events: EventBus };
@@ -97,26 +98,19 @@ export function mountUsageRoutes(app: Hono, deps: UsageRouteDeps): void {
     return c.json(calibrationHistory(store, calibrationScope(store, config.dataDir, id), role));
   });
 
-  /** User action: restores a calibration version (logged as a `revert_calibration` Decision). */
+  /**
+   * User action: restores a calibration version — a `revert_calibration` Decision and a
+   * `prompt_patch_revert` feedback event by the configured actor (`revertCalibrationAsUser`).
+   */
   app.post('/api/workspaces/:id/calibration/versions/:versionId/revert', (c) => {
     const id = c.req.param('id');
     if (!store.workspaces.get(id)) return c.json(notFound(`workspace '${id}'`), 404);
-    const versionId = c.req.param('versionId');
-    let result;
     try {
-      result = revertCalibration(store, calibrationScope(store, config.dataDir, id), versionId, actorOf(config));
+      const r = revertCalibrationAsUser({ store, events, config }, id, c.req.param('versionId'), { actor: actorOf(config) });
+      return c.json({ path: r.path, version: r.version, decisionId: r.decisionId, promptVersion: r.promptVersion, previousPromptVersion: r.previousPromptVersion });
     } catch (e) {
-      return c.json({ error: (e as Error).message }, 404);
+      if (e instanceof FeedbackActionError) return c.json({ error: e.message }, e.status);
+      throw e;
     }
-    const decision = recordSystemDecision(
-      { store, events },
-      {
-        workspaceId: id,
-        actor: 'user',
-        payload: { tool: 'revert_calibration', role: result.version.role, versionId, newVersionId: result.version.id, path: result.path },
-      },
-    );
-    setCalibrationDecision(store, result.version.id, decision.id);
-    return c.json({ path: result.path, version: { ...result.version, decisionId: decision.id }, decisionId: decision.id });
   });
 }

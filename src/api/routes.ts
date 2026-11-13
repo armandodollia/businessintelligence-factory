@@ -264,7 +264,7 @@ export function createApp(deps: AppDeps): Hono {
     const after = structuredClone(config.scoring);
     for (const ws of store.workspaces.list()) scoreRecommendations(ws.id, { store, config });
     return logIn.map((workspaceId) => {
-      const decision = recordSystemDecision({ store, events }, { workspaceId, actor: 'user', payload: { tool: 'set_scoring_weights', source, before, after } });
+      const decision = recordSystemDecision({ store, events }, { workspaceId, actor: 'user', actorId: actorOf(config), payload: { tool: 'set_scoring_weights', source, before, after } });
       recordWeightsChange(store, workspaceId, before, after, { actor: actorOf(config), source, decisionId: decision.id }); // WP-A
       return decision;
     });
@@ -546,14 +546,21 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/workspaces/:id/calibration/prompt-patch/apply', async (c) => {
     const id = workspace(c.req.param('id')).id;
     const patch = await body(c, schemas.applyPromptPatch);
-    // WP-A: logged by the real actor at the patched role's new prompt version, plus a feedback event.
+    // Learning loop WP-A + WP-B: one path — calibration version (history, revertable), a Decision by
+    // the real actor at the patched role's new prompt version, and a prompt_patch_apply feedback event.
     const applied = applyPromptPatchAsUser(
       { store, events, config },
       id,
       { role: patch.role, patchText: patch.patchText, examples: (patch.examples ?? []) as never },
       { actor: actorOf(config) },
     );
-    return c.json({ path: applied.path, decisionId: applied.decisionId, promptVersion: applied.promptVersion, previousPromptVersion: applied.previousPromptVersion });
+    return c.json({
+      path: applied.path,
+      decisionId: applied.decisionId,
+      versionId: applied.versionId,
+      promptVersion: applied.promptVersion,
+      previousPromptVersion: applied.previousPromptVersion,
+    });
   });
   app.get('/api/workspaces/:id/scoring-weights', (c) => {
     const id = workspace(c.req.param('id')).id;

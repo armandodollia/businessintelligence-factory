@@ -41,6 +41,8 @@ export const FEEDBACK_KINDS = [
   'weights_change',
   /** A prompt calibration patch was approved and applied. */
   'prompt_patch_apply',
+  /** A role's calibration appendix was reverted to an earlier version (integration: WP-B history). */
+  'prompt_patch_revert',
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 

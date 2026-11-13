@@ -12,6 +12,9 @@ import {
   rolePromptVersion,
   setIncludeOverride,
 } from '../../src/core/feedback/actions.js';
+import { actorOf as calibrationActorOf } from '../../src/core/scoring/calibrationHistory.js';
+import { recordSystemDecision } from '../../src/core/systemDecision.js';
+import { usageRepos } from '../../src/core/store/usageRepos.js';
 import { actorOf, latestFeedback, listFeedback, onFeedback, recordFeedback } from '../../src/core/feedback/events.js';
 import { targetProvenance } from '../../src/core/feedback/provenance.js';
 import { feedbackRatings, signalDelta } from '../../src/core/feedback/signals.js';
@@ -368,6 +371,28 @@ describe('prompt patch apply', () => {
     for (const role of ['orchestrator', 'reviewer', 'interviewer', 'persona', 'synthesizer'] as const) {
       expect(rolePromptVersion(t.config, role, scope)).toMatch(/^[0-9a-f]{8}$/);
     }
+  });
+
+  it('is the versioned apply too: one calibration_versions row linked to the decision and the feedback event', () => {
+    const t = setup();
+    const out = applyPromptPatchAsUser(t, 'ws_a', { role: 'reviewer', patchText: '## Calibration\n\n1. be strict\n', examples: [] }, { actor: 'ana' });
+    const versions = usageRepos(t.store).calibrationVersions.list({ rootWorkspaceId: 'ws_a', role: 'reviewer' });
+    expect(versions.map((v) => v.source)).toEqual(['import', 'apply']);
+    expect(versions[1]).toMatchObject({ id: out.versionId, actor: 'ana', decisionId: out.decisionId });
+    expect(out.feedback.afterJson).toMatchObject({ versionId: out.versionId, decisionId: out.decisionId });
+    expect(listFeedback(t.store, { kind: 'prompt_patch_apply' })).toHaveLength(1);
+  });
+
+  it('one actorOf: the calibration history module re-exports the feedback one', () => {
+    expect(calibrationActorOf).toBe(actorOf);
+  });
+
+  it('a user system decision without an actor id falls back to the default actor, never the `user` pseudo run id', () => {
+    const t = setup();
+    const d = recordSystemDecision(t, { workspaceId: 'ws_a', actor: 'user', payload: { tool: 'x' } });
+    expect(d.agentRunId).toBe('local-user');
+    expect(d.payload).toMatchObject({ actor: 'user', actorId: 'local-user' });
+    expect(recordSystemDecision(t, { workspaceId: 'ws_a', actor: 'scheduler', payload: {} }).agentRunId).toBe('scheduler');
   });
 });
 

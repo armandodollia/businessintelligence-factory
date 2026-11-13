@@ -1,4 +1,5 @@
 import type { EventBus } from './events.js';
+import { DEFAULT_ACTOR } from './feedback/events.js';
 import type { Store } from './store/db.js';
 import { newId } from './store/repos.js';
 import type { Decision } from './types.js';
@@ -11,6 +12,8 @@ export type SystemActor = 'user' | 'scheduler';
  * approved) or a scheduler outcome ("what changed"). `agentRunId` is the actor name, `role` is
  * `orchestrator` (the closest system-level role), `model` is `{ provider: 'claude', model: 'none' }`
  * and `promptVersion` is `'n/a'`; `payload.actor` names the actor so consumers can tell these apart.
+ * A `user` decision always records the real acting user (`actorId`, default `local-user`) as
+ * `agentRunId` and `payload.actorId` — never the `user` pseudo run id.
  */
 export function recordSystemDecision(
   deps: { store: Store; events?: EventBus },
@@ -26,14 +29,15 @@ export function recordSystemDecision(
     promptVersion?: string;
   },
 ): Decision {
+  const actorId = input.actorId ?? (input.actor === 'user' ? DEFAULT_ACTOR : undefined);
   const decision: Decision = {
     id: newId('dec'),
     workspaceId: input.workspaceId,
-    agentRunId: input.actorId ?? input.actor,
+    agentRunId: actorId ?? input.actor,
     role: 'orchestrator',
     model: { provider: 'claude', model: 'none' },
     kind: input.kind ?? 'decision',
-    payload: { actor: input.actor, ...(input.actorId !== undefined ? { actorId: input.actorId } : {}), ...input.payload },
+    payload: { actor: input.actor, ...(actorId !== undefined ? { actorId } : {}), ...input.payload },
     refs: input.refs ?? [],
     promptVersion: input.promptVersion ?? 'n/a',
     createdAt: new Date().toISOString(),

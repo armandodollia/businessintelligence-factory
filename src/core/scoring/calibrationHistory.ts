@@ -9,11 +9,16 @@
  * - `calibrationHistory(store, scope, role?)` — versions, oldest first (the last per role is current).
  * - `revertCalibration(store, scope, versionId, actor)` — restores a version (recorded as a new `revert` version).
  * - `setCalibrationDecision` — links a version to the Decision that recorded the user's approval.
- * - `actorOf(config)` — the human actor id (`config.user.id`, default `local-user`).
+ * - `actorOf(config)` — re-export of the one actor helper (`src/core/feedback/events.ts`).
+ *
+ * The user-facing actions (apply with a Decision + `prompt_patch_apply` feedback event, revert with a
+ * Decision + `prompt_patch_revert` event) are `applyPromptPatchAsUser` / `revertCalibrationAsUser`
+ * in `src/core/feedback/actions.ts`; call those from routes, not these primitives.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROLES, type BifConfig } from '../config/schema.js';
+import { ROLES } from '../config/schema.js';
+import { DEFAULT_ACTOR } from '../feedback/events.js';
 import { calibrationDir, type CalibrationScope } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
@@ -21,13 +26,8 @@ import { usageRepos } from '../store/usageRepos.js';
 import type { CalibrationVersion, Role } from '../types.js';
 import { applyPromptPatch, type PromptPatch } from './calibration.js';
 
-export const DEFAULT_ACTOR = 'local-user';
-
-/** The human actor: `config.user.id` when configured (WP-A), else `local-user`. */
-export function actorOf(config: BifConfig): string {
-  const id = (config as { user?: { id?: unknown } }).user?.id;
-  return typeof id === 'string' && id.trim() ? id : DEFAULT_ACTOR;
-}
+/** One actor helper for the whole app: WP-A's (`config.user.id`, default `local-user`). */
+export { actorOf, DEFAULT_ACTOR } from '../feedback/events.js';
 
 const fileOf = (scope: CalibrationScope, role: Role) => join(calibrationDir(scope), `${role}.md`);
 const readLive = (scope: CalibrationScope, role: Role) => {

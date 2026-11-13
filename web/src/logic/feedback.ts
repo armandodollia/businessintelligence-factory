@@ -20,6 +20,7 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   request_answer: 'request answered',
   weights_change: 'weights changed',
   prompt_patch_apply: 'prompt patch applied',
+  prompt_patch_revert: 'prompt calibration reverted',
 };
 
 const short = (v: unknown, max = 80): string => {
@@ -39,6 +40,7 @@ export function feedbackChange(e: Pick<FeedbackEvent, 'kind' | 'beforeJson' | 'a
     case 'request_answer':
       return `${String(after.status ?? '')}${after.response !== undefined ? `: ${short(after.response)}` : ''}`;
     case 'prompt_patch_apply':
+    case 'prompt_patch_revert':
       return `prompt ${String(before.promptVersion ?? '?')} → ${String(after.promptVersion ?? '?')}`;
     case 'proposal_accept':
     case 'proposal_reject':

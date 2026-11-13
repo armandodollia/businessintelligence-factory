@@ -12,11 +12,14 @@ import { PROTECTED_PROFILE_KEYS, mergePatch } from '../interview/interview.js';
 import { calibrationAppendix, loadPrompt, promptVersion, withCalibration, type CalibrationScope } from '../prompts/index.js';
 import { reviewerSystemPrompt, workerSystemPrompt } from '../research/systemPrompts.js';
 import { setOutputInclude } from '../research/outputs.js';
-import { applyPromptPatch, calibrationScope, proposePromptPatch, type PromptPatch } from '../scoring/calibration.js';
+import { calibrationScope, proposePromptPatch, type PromptPatch } from '../scoring/calibration.js';
+import { applyPromptPatchVersioned, revertCalibration, setCalibrationDecision } from '../scoring/calibrationHistory.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
+import { usageRepos } from '../store/usageRepos.js';
 import { recordSystemDecision } from '../systemDecision.js';
 import type {
+  CalibrationVersion,
   Competitor,
   Decision,
   Finding,
@@ -375,15 +378,25 @@ export function rolePromptVersion(config: BifConfig, role: Role, scope: Calibrat
   }
 }
 
-export type AppliedPatch = { path: string; decisionId: string; promptVersion: string; previousPromptVersion: string; feedback: FeedbackEvent };
+export type AppliedPatch = {
+  path: string;
+  decisionId: string;
+  /** The `calibration_versions` row this approval created (WP-B history). */
+  versionId: string;
+  promptVersion: string;
+  previousPromptVersion: string;
+  feedback: FeedbackEvent;
+};
 
 /**
- * User approval of a (possibly edited) prompt calibration patch: merges it into the role's
- * calibration appendix of the workspace's business tree (`applyPromptPatch`), logs an
+ * User approval of a (possibly edited) prompt calibration patch — THE apply path (learning loop
+ * WP-A + WP-B): merges it into the role's calibration appendix of the workspace's business tree and
+ * keeps the history (`applyPromptPatchVersioned` → a `calibration_versions` row), logs an
  * `apply_prompt_patch` Decision by the real actor (`agentRunId` = actor id) at the role's new
- * prompt version, and records a `prompt_patch_apply` feedback event (before: previous version +
- * appendix; after: new version + patch). `sources` = the rated items behind the role's current
- * proposal, so exports can apply upload-provenance filtering to the patch.
+ * prompt version (linked from the version row), and records a `prompt_patch_apply` feedback event
+ * (before: previous version + appendix; after: new version + patch + decision + version ids).
+ * `sources` = the rated items behind the role's current proposal, so exports can apply
+ * upload-provenance filtering to the patch.
  */
 export function applyPromptPatchAsUser(
   deps: { store: Store; events?: EventBus; config: BifConfig },
@@ -397,9 +410,14 @@ export function applyPromptPatchAsUser(
   const previousPromptVersion = rolePromptVersion(config, patch.role, scope);
   const previousAppendix = calibrationAppendix(patch.role, scope);
   const sources = proposePromptPatch(workspaceId, patch.role, { store }).sources ?? [];
-  const { path } = applyPromptPatch({ role: patch.role, patchText: patch.patchText, examples: patch.examples }, scope);
-  const version = rolePromptVersion(config, patch.role, scope);
   return store.transaction(() => {
+    const { path, version: cal } = applyPromptPatchVersioned(
+      store,
+      { role: patch.role, patchText: patch.patchText, examples: patch.examples },
+      scope,
+      who,
+    );
+    const version = rolePromptVersion(config, patch.role, scope);
     const decision: Decision = recordSystemDecision(
       { store, ...(deps.events ? { events: deps.events } : {}) },
       {
@@ -407,9 +425,10 @@ export function applyPromptPatchAsUser(
         actor: 'user',
         actorId: who,
         promptVersion: version,
-        payload: { tool: 'apply_prompt_patch', role: patch.role, patchText: patch.patchText, path, previousPromptVersion, sources },
+        payload: { tool: 'apply_prompt_patch', role: patch.role, patchText: patch.patchText, path, previousPromptVersion, sources, versionId: cal.id },
       },
     );
+    setCalibrationDecision(store, cal.id, decision.id);
     const feedback = recordFeedback(store, {
       workspaceId,
       actor: who,
@@ -417,10 +436,72 @@ export function applyPromptPatchAsUser(
       targetType: 'prompt',
       targetId: patch.role,
       beforeJson: { promptVersion: previousPromptVersion, appendix: previousAppendix },
-      afterJson: { promptVersion: version, patchText: patch.patchText, path, decisionId: decision.id, sources },
+      afterJson: { promptVersion: version, patchText: patch.patchText, path, decisionId: decision.id, versionId: cal.id, sources },
       promptVersion: version,
       ...(opts.reason ? { reason: opts.reason } : {}),
     });
-    return { path, decisionId: decision.id, promptVersion: version, previousPromptVersion, feedback };
+    return { path, decisionId: decision.id, versionId: cal.id, promptVersion: version, previousPromptVersion, feedback };
+  });
+}
+
+export type RevertedPatch = {
+  path: string;
+  decisionId: string;
+  version: CalibrationVersion;
+  promptVersion: string;
+  previousPromptVersion: string;
+  feedback: FeedbackEvent;
+};
+
+/**
+ * User action: restores calibration version `versionId` of the workspace's business tree
+ * (`revertCalibration`, recorded as a new `revert` version), logs a `revert_calibration` Decision by
+ * the real actor at the role's restored prompt version and a `prompt_patch_revert` feedback event.
+ * Throws `FeedbackActionError` (404) for an unknown version or one of another tree.
+ */
+export function revertCalibrationAsUser(
+  deps: { store: Store; events?: EventBus; config: BifConfig },
+  workspaceId: string,
+  versionId: string,
+  opts: ActorOpts = {},
+): RevertedPatch {
+  const { store, config } = deps;
+  const who = actor(opts);
+  const scope = calibrationScope(store, config.dataDir, workspaceId);
+  return store.transaction(() => {
+    let result: ReturnType<typeof revertCalibration>;
+    let previousPromptVersion: string;
+    try {
+      const target = usageRepos(store).calibrationVersions.get(versionId);
+      previousPromptVersion = target ? rolePromptVersion(config, target.role, scope) : '';
+      result = revertCalibration(store, scope, versionId, who);
+    } catch (e) {
+      throw new FeedbackActionError((e as Error).message, 404);
+    }
+    const role = result.version.role;
+    const version = rolePromptVersion(config, role, scope);
+    const decision = recordSystemDecision(
+      { store, ...(deps.events ? { events: deps.events } : {}) },
+      {
+        workspaceId,
+        actor: 'user',
+        actorId: who,
+        promptVersion: version,
+        payload: { tool: 'revert_calibration', role, versionId, newVersionId: result.version.id, path: result.path, previousPromptVersion },
+      },
+    );
+    const cal = setCalibrationDecision(store, result.version.id, decision.id);
+    const feedback = recordFeedback(store, {
+      workspaceId,
+      actor: who,
+      kind: 'prompt_patch_revert',
+      targetType: 'prompt',
+      targetId: role,
+      beforeJson: { promptVersion: previousPromptVersion },
+      afterJson: { promptVersion: version, revertedTo: versionId, path: result.path, decisionId: decision.id, versionId: cal.id },
+      promptVersion: version,
+      ...(opts.reason ? { reason: opts.reason } : {}),
+    });
+    return { path: result.path, decisionId: decision.id, version: cal, promptVersion: version, previousPromptVersion, feedback };
   });
 }
