@@ -1024,3 +1024,73 @@ gate (reads by id, interviewer tools, `get_card` / `read_workspace` inputs).
   `(knowledge: N item(s) left out)` → `''` (budget too small to say anything); `factIds` (the slice)
   and evidence ids are never cut, and only shown text is logged. **KS-5:** briefings follow the same
   ladder.
+
+## KS-6 builder notes
+
+Smaller decisions taken while building KS-6 (no migration added; no change to §3, §9 or §12 — the
+`duplicate-saved` reading below is flagged to the design thread).
+
+- **Modules:** `knowledge/uses.ts` (use linkage), `knowledge/outcomes.ts` (label table, `duplicate-saved`,
+  lineage outcomes of a run), `knowledge/metrics.ts` (`knowledgeMetrics`, `knowledgeSignals`),
+  `api/knowledgeMetricsRoutes.ts`. Hot files only got delimited calls: `handlers.ts` (dispatcher hook),
+  `export.ts` (block at the end + three call lines), `busEvents.ts`, `policyEvents.ts`, `feedbackOutcomes.ts`,
+  `facts.ts` (`retractFactByUser` option), `feedback/actions.ts` (merge pairs), `feedback/events.ts` (kind),
+  `learning/types.ts` (label), `routes.ts` (mount).
+- **Use linkage:** generic — after every successful call of `save_finding`, `confirm_finding`,
+  `retract_finding`, `save_recommendation`, `save_persona`, `save_competitor`, `save_hypothesis`, `save_symptom`,
+  every string of the input that an earlier `retrieval_events` row of the SAME agent run returned is marked
+  used (one row per returning retrieval; `used_by_kind` = `observation` for confirmations / retractions, else
+  the output kind). A handshake (`saved: false`) uses nothing; replays add nothing (`INSERT OR IGNORE`).
+- **Outcomes, each written once** (keyed by `recordOutcome`'s unique index): `confirmed` / `changed` /
+  `retracted` by `applyObservations` (observation id); `stale` by `recordStaleOutcome` (freshness base) from
+  `list_changes`, the KS-5 briefing and — only when given a `config` — the scheduled "what changed";
+  `user-rejected` from `fact_retract` (observation id); `changed` from `fact_replacement_accept`;
+  `duplicate-saved` (new label) from the feedback listener (feedback event id).
+- **`duplicate-saved` (design §13 "a duplicate handshake answered `new` that the user later merges"):** v1 has
+  no fact merge, so two triggers: (1) `entity_merge` that joins a fact saved with explicit `relation: "new"`
+  after a handshake of the same run (same or ≥ 0.5-similar claim) with a shown candidate's lineage on the
+  other entity — pairs computed before the merge (`mergeDuplicateSaves`) and stored as
+  `afterJson.duplicateSaved`; (2) `retractFactByUser(…, { duplicateOf })` (new optional field; same tree,
+  other lineage) on such a fact — `afterJson.duplicateOf`. Without an answered handshake nothing is
+  written (the agent was never shown the duplicate). Source `user_reject`, actor = the event's actor.
+  **KS-7:** expose `duplicateOf` on the fact-retract route if the user wants it.
+- **"What changed" (`learning/whatChangedOutcomes.ts`, interface for KS-5):**
+  `recordWhatChangedOutcomes(store, { whatChangedDecisionId, prev, next, changedArtifacts, config?, now? }):
+  DecisionOutcome[]` — signature unchanged plus optional `config` / `now`. Returns the next run's lineage
+  outcomes (`lineageOutcomesOfRun`, read only); for facts of `prev` (saved, or observed with an applied
+  observation) whose lineage `next` did NOT observe (`observedLineages`): text fallback `contradicted` only
+  when `next` saved a NEW fact (no `replacesId`, version 1) on the same subject and no equal claim; a changed
+  cited screenshot → `changed`; with `config`, past TTL → `stale`. KS-5: pass `config` to get `stale`.
+- **Policy events:** `policy_blocked` → `policy_events` row `blocked`, `action` = tool, `site` =
+  `knowledge:out_of_slice` | `knowledge:out_of_tree`, `detail` names the id. `policyDenialsSection` leaves out
+  `knowledge:out_of_tree` (new `excludeSites` filter): the agent was told "not found", and a reminder would
+  confirm that the id exists in another tree.
+- **Bus events:** `retrieval` and `policy_blocked` are persisted; the retrieval row is `{type, workspaceId,
+  retrievalEventId}` + run / task columns only.
+- **Export:** `exportExclusion(store)` = KS-2's set + upload exposure (`uploadExposure`: runs with
+  `runIsUploadExposed`, their TASKS, and those tasks' outputs; records resolved through what they cite).
+  Excluded by default: decisions of an exposed run; decisions whose expansion reaches an exposed task or
+  its outputs (so the task's review / deliverable, and later judgments resting on its findings); feedback
+  events, requests and agent interview turns tied to an exposed run. Task granularity is deliberate (a
+  later round's worker continues from the exposed round's context); over-exclusion only. New lines
+  `{type: 'retrieval_event', retrievalEvent, uses}` and `{type: 'fact_observation', observation}`, left out
+  when upload-derived (row flag, any result now, the fact / prior / evidence) or of an exposed run / task.
+  Consequence: once KS-5 briefings carry upload-derived lines, every run shown one is excluded.
+- **Metrics:** human reads (`role: 'user'`, KS-7) are never agent figures (design-thread ruling): reported
+  in `retrieval.user` only, outside hit rate, zero-result rate, tokens, usage share and signals; they have
+  no run, so no exposure. Used tokens are an estimate (`tokens × min(1, used items / result count)`; no
+  per-item token count is stored). Input tokens = input + cache read + cache write. Freshness counts current,
+  not superseded facts (pending ones included). `missing_caption` / `rejected_quote` come from persisted
+  `tool_call` bus events (retention `telemetry.busEventRetentionDays`).
+- **WP-E / WP-G API:** `knowledgeMetrics(store, { workspaceId, scope?: 'tree'|'node', since?, until?,
+  config?, dataDir?, now? })` → `{ rootWorkspaceId, workspaceIds, window, store, freshness, retrieval
+  { …, user, byTool, byGroup[role, taskType, promptVersion, model] }, usage { total, byRole, byModel,
+  byPromptVersion ('role:pv'), byTask } (with retrievedTokens / retrievedShare), signals }`;
+  `knowledgeSignals(store, filter)` → `KnowledgeSignal[]` `{ kind, rootWorkspaceId, role, promptVersion,
+  count, total, rate, tokens?, taskIds, examples }`. Routes: `GET /api/workspaces/:id/knowledge/metrics` and
+  `/knowledge/signals` (`?scope=node`, `?since=`, `?until=`).
+- **Feedback kinds:** `artifact_prune` + target type `artifact` added (KS-7's prune writes it). The §13 check
+  (`trackingFeedback.test.ts`) covers fact scope change, retract, replacement accept, entity merge / rename,
+  artifact prune; **after the KS-7 merge add `entity_merge_reject`** (KS-7's kind) to that list.
+- **Known limit:** a run whose only retrieval rows were lost (crash before a prompt read was logged) cannot
+  be exposed; unchanged from KS-4.
