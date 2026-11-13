@@ -169,11 +169,16 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
 - **Decision outcomes.** Agent decisions get labels after the fact (`decision_outcomes`): `confirmed`
   (task verified), `over-scoped` / `missed-evidence` / `weak-review` (task unverified),
   `run-failed`, `missed-evidence` (output superseded by a later round), `stale` (a scheduled re-run
-  changed or no longer found a finding), `user-rejected` (you excluded an output or rejected a unit
-  proposal; excluding a verified output also marks the passing review `weak-review`),
-  `reviewer-false-positive` (an issue dropped after a pushback) and `worker-miss` (an upheld issue
-  the worker then fixed). The Decision log shows the counts per role, task type and prompt version
-  (this workspace or the whole business tree).
+  changed or no longer found a finding), `user-rejected` (you excluded an output — finding,
+  recommendation, persona, competitor or symptom hypothesis — or rejected a unit proposal; excluding
+  a verified output also marks the passing review `weak-review`), `confirmed` (you included an output
+  the review did not verify), `reviewer-false-positive` (an issue dropped after a pushback) and
+  `worker-miss` (an upheld issue the worker then fixed); `changed` and `retracted` are reserved for
+  the knowledge store's fact lineage. Your actions reach outcomes from one place: the feedback event
+  each action records (see Feedback log) — so each action writes its outcome once, under your
+  `user.id`. An outcome can also judge a non-decision subject (e.g. a fact version), and each one is
+  written once per subject, outcome and source event. The Decision log shows the counts per role,
+  task type and prompt version (this workspace or the whole business tree).
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.
@@ -204,14 +209,16 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   of recommendation criteria; the Strategy page edits the weights and offers weights refit from your
   priority overrides (never auto-applied). Worker pushbacks are ratable too (criterion `pushback`, 0–1:
   how justified it was). The Decision log page proposes prompt patches per role from
-  your disagreements; you edit and approve them before they are written. Weight changes and patches
-  are logged as decisions. The decision log plus ratings export as JSONL.
+  your disagreements; you edit and approve them before they are written. An approval keeps the
+  role's calibration history (revertable on the Usage & prompts page) and is logged as a decision and
+  a feedback event; weight changes and reverts are logged the same way. The decision log plus ratings
+  export as JSONL.
 - **Feedback log.** Every human action on agent output is also an append-only feedback event: who
   (`user.id`), when, what changed (before → after), why, and the agent run and prompt version that
   produced the item. Recorded actions: include overrides (findings, recommendations, personas,
   competitors, symptom hypotheses), profile edits, unit proposal accept / accept-with-edits / reject,
-  symptom hypothesis corrections (Findings page), request answers, weight changes and prompt patch
-  approvals. Ratings store the agent run and prompt version they judged. Feedback feeds calibration:
+  symptom hypothesis corrections (Findings page), request and escalation answers, weight changes,
+  prompt patch approvals and calibration reverts. Ratings store the agent run and prompt version they judged. Feedback feeds calibration:
   excluding an output counts as a disagreement with it, including an unverified one as an agreement,
   and unit proposal rejections / edits are scaled disagreements on the proposing decision, so they
   rank among the prompt patch examples. When an agent revises an item after you rated it, the item
@@ -222,11 +229,11 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   stored with its cost, computed from the dated price table `src/core/harness/pricing.json` (USD per
   1M tokens, editable — bump its `version` / `effectiveDate` when you change a price; the codex model
   price is a marked placeholder) next to the cost the CLI itself reports. Runs also record attempts,
-  rate-limit back-offs, round, task type and why they failed. Every prompt version hash resolves to
-  its full text. The **Usage & prompts** page shows costs per role / model / prompt version / task,
+  rate-limit back-offs, round, task type and why they failed. Every prompt version hash recorded
+  anywhere (runs, decisions, usage, ratings, feedback events, outcomes, review issues) resolves to its
+  full text. The **Usage & prompts** page shows costs per role / model / prompt version / task,
   budget status, a per-prompt-version trend (rating agreement, mean delta, review pass and
-  first-round pass rate), the calibration history of each role (revert to any earlier version; the
-  revert is logged as a decision) and every agent run with a paged event viewer. API:
+  first-round pass rate), the calibration history of each role (revert to any earlier version) and every agent run with a paged event viewer. API:
   `GET /api/costs[?workspaceId=]`, `GET /api/runs/:id`, `GET /api/runs/:id/events?offset=&limit=`,
   `GET /api/prompts/:hash`, `GET /api/workspaces/:id/agent-runs`,
   `GET /api/workspaces/:id/metrics/prompt-versions[?role=]`,
@@ -276,9 +283,10 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
 - **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
 - **"What changed" only compares artifacts that findings cite.**
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with
-  `payload.actor` telling them apart. Prompt patch approvals record the acting user id as the run id
-  and the patched role's new prompt version (worker / synthesizer: the base worker prompt without
-  task-type extras; persona: the persona calibration appendix).
+  `payload.actor` telling them apart. User decisions (weight changes, prompt patch approvals and
+  calibration reverts) record your `user.id` as the run id; approvals and reverts also record the
+  role's resulting prompt version (worker / synthesizer: the base worker prompt without task-type
+  extras; persona: the persona calibration appendix).
 - **Local only, no authentication.** The server rejects requests whose `Host` is not
   `127.0.0.1`/`localhost` (DNS rebinding), requires JSON (or multipart uploads) on state-changing
   requests and refuses non-local `Origin`s. Artifacts are served with `Content-Security-Policy:

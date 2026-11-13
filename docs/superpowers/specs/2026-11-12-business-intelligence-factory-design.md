@@ -244,7 +244,7 @@ Criteria agents assign (each with reasoning + evidence links):
 
 - No model training in v1.
 - A "calibration" job (manual trigger) summarizes rating disagreements per role/criterion/task type and proposes prompt changes (few-shot examples from corrected items, rubric clarifications). The user approves changes; prompts are versioned, and every run records the prompt version it used so improvements can be measured.
-- Calibration appendices are versioned (WP-B): every approved patch, import and revert is a row in `calibration_versions` (per business tree root and role, with actor and the approval Decision); the live text stays in `calibration/<role>.md`, and any earlier version can be restored (logged as a `revert_calibration` Decision).
+- Calibration appendices are versioned (WP-B): every approved patch, import and revert is a row in `calibration_versions` (per business tree root and role, with actor and the approval Decision); the live text stays in `calibration/<role>.md`, and any earlier version can be restored. Approve and revert each have one path (`applyPromptPatchAsUser` / `revertCalibrationAsUser`, `src/core/feedback/actions.ts`) that writes the version row, an `apply_prompt_patch` / `revert_calibration` Decision by the acting user (`agentRunId` = `config.user.id`, never a `user` pseudo id) at the role's resulting prompt version, and a `prompt_patch_apply` / `prompt_patch_revert` feedback event. Both prompt versions (before and after) are stored in `prompt_versions`, so every hash resolves.
 - Per-prompt-version metrics (WP-B): rating agreement, mean delta, review pass rate, first-round pass rate, rounds and cost grouped by the prompt version of the run that produced the work, ordered by first use (trend).
 - Priority weights can be refit from the user's ratings (simple regression), proposed to the user, not auto-applied.
 - Export: decision log + ratings as JSONL for later model training.
@@ -252,12 +252,13 @@ Criteria agents assign (each with reasoning + evidence links):
   (`config.user.id`), when and why; ratings record the agent run and prompt version they judged; an
   append-only `feedback_events` log (`src/core/feedback/events.ts`) records include overrides,
   profile edits, unit proposal accept / edit / reject (the agent's original kept on edit), symptom
-  hypothesis corrections, request answers, weight changes and prompt patch approvals, before → after.
+  hypothesis corrections, request and escalation answers, weight changes, prompt patch approvals and
+  calibration reverts, before → after.
   Calibration counts exclusions as disagreements, inclusions of unverified outputs as agreements and
   unit proposal decisions on a 0–1 scale; items revised after a rating are re-queued for review. The
   export adds request answers, interview turns (linked to the interviewer run), feedback events and
   final review status, all under the upload exclusion.
-- **Decision outcomes (learning loop WP-C):** `decision_outcomes` labels agent decisions after the fact, all through one writer (`recordOutcome`, `src/core/learning/outcomes.ts`): task end (`confirmed`; unverified → `over-scoped` / `missed-evidence` / `weak-review`; `run-failed`), superseded outputs (`missed-evidence`), scheduled "what changed" (`stale`: claim no longer found for a re-researched subject, or a cited screenshot changed), user include overrides / unit-proposal rejects (`user-rejected`, plus `weak-review` on the passing review when a verified output is excluded; `confirmed` when an unverified output is included) and review disputes (`reviewer-false-positive`, `worker-miss`). Each row copies the judged decision's role, prompt version and task type; the outcomes report (`GET /api/workspaces/:id/outcomes`, Decision log table) counts labels per role / task type / prompt version, per workspace or per business tree.
+- **Decision outcomes (learning loop WP-C):** `decision_outcomes` labels agent decisions — or a non-decision subject such as a fact version — after the fact, all through one writer (`recordOutcome(store, RecordOutcomeInput)`, `src/core/learning/outcomes.ts`): task end (`confirmed`; unverified → `over-scoped` / `missed-evidence` / `weak-review`; `run-failed`), superseded outputs (`missed-evidence`), scheduled "what changed" (`stale`: claim no longer found for a re-researched subject, or a cited screenshot changed; one isolated hook, `src/core/learning/whatChangedOutcomes.ts`, which the knowledge store replaces with fact lineage), user include overrides on findings / recommendations / personas / competitors / hypotheses and unit-proposal rejects (`user-rejected`, plus `weak-review` on the passing review when a verified output is excluded; `confirmed` when an unverified output is included) and review disputes (`reviewer-false-positive`, `worker-miss`); `changed` and `retracted` are reserved for fact lineage. User outcomes come from one place: an `onFeedback` listener registered at boot (`src/core/learning/feedbackOutcomes.ts`) maps `include_override` / `proposal_reject` feedback events to outcomes, keyed by the feedback event, so each action writes its outcome once. A row has `decision_id` and/or `subject_type` + `subject_id` (CHECK: one is set), `run_id` when known, and `source_key`: rows are unique per (subject — else decision —, outcome, source key) — e.g. a fact observation id, or for `stale` the caller's `<factId>|stale|<lastConfirmedAt>`. Each row copies the judged decision's role, prompt version and task type; the outcomes report (`GET /api/workspaces/:id/outcomes`, Decision log table) counts labels per role / task type / prompt version, per workspace or per business tree.
 
 ## 11. Scheduler
 
@@ -286,8 +287,9 @@ Editable in a simple settings page and as a file.
 **Event persistence (WP-D).** Bus events that are not stored elsewhere (`tool_call` incl.
 validation errors, `run_status`, `task_status`, and `user_request(_resolved)` as ids/kind/status)
 are appended to `bus_events` (identity secrets redacted) and pruned after
-`telemetry.busEventRetentionDays`; `run_event` stays in `events.jsonl` and `decision` in
-`decisions`.
+`telemetry.busEventRetentionDays`; `run_event` stays in `events.jsonl` (its `usage` events in
+`agent_usage`) and `decision` in `decisions`; review issues and outcomes are never copied onto the bus
+rows (references only).
 
 ## 13. Web app (v1, minimal)
 

@@ -14,13 +14,14 @@ import {
 } from './types.js';
 
 /**
- * Decision outcomes (learning loop WP-C, migration 16): after-the-fact labels on agent decisions,
- * written automatically by the review loop (task end, superseded outputs, review disputes), the
- * scheduler's "what changed" step and the user's include overrides / rejects. Everything goes through
+ * Decision outcomes (learning loop WP-C, migration 16): after-the-fact labels on agent decisions or
+ * non-decision subjects, written automatically by the review loop (task end, superseded outputs,
+ * review disputes), the scheduler's "what changed" hook (`whatChangedOutcomes.ts`) and the user's
+ * include overrides / rejects (via feedback events, `feedbackOutcomes.ts`). Everything goes through
  * `recordOutcome`, the single writer.
  */
 
-/** Actor of human outcomes until the API passes the configured user (`config.user.id`, WP-A). */
+/** Actor of human outcomes when the caller passes none (the feedback listener passes the event's actor). */
 export const DEFAULT_USER_ACTOR = 'local-user';
 /** Actor of automatic outcomes (review loop, scheduler, disputes). */
 export const SYSTEM_ACTOR = 'system';
