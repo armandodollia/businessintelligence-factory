@@ -25,6 +25,9 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   fact_scope_change: 'fact scope changed',
   fact_retract: 'fact retracted',
   fact_replacement_accept: 'fact update accepted',
+  // knowledge store KS-3
+  entity_merge: 'entities merged',
+  entity_rename: 'entity renamed',
 };
 
 const short = (v: unknown, max = 80): string => {

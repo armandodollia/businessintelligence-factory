@@ -241,6 +241,12 @@ through `expand` on a fact.
   entity; `save_hypothesis` → cause `causes` symptom; an artifact with `flow` and an
   entity → `has_flow`. `save_finding` may pass `relations: [{ type, to }]`.
 - Graph reads are 1–2 hop recursive CTEs inside `get_card` / `expand`.
+- As built (KS-3): near-match score = Dice coefficient of padded character trigrams of the name
+  keys, floor 0.5, ≤ 3 suggestions per new entity. Upload-only names (§12) are resolved at check
+  time (`entityIsUploadOnly`): an entity is upload-only while every record referencing it (facts,
+  typed records, captures, edge sources) is upload-derived and none is usable and public. An
+  upload-only name that becomes an alias stays on its own merged row and never enters the
+  survivor's public `aliases`; a public entity merged into an upload-only one swaps names with it.
 
 ## 8. Documents
 

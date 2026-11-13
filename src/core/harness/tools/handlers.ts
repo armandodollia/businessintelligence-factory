@@ -17,6 +17,8 @@ import { findReplay } from './idempotency.js';
 import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave } from '../../knowledge/artifactTools.js';
 import type { CaptureResult } from '../../evidence/artifacts.js';
 import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
+// knowledge store KS-3
+import { findingEntity, linkFindingRelations, relinkFinding } from '../../knowledge/entityLinks.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -308,6 +310,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         .list({ taskId: task.id, claim: input.claim })
         .find((f) => f.workspaceId === ctx.workspaceId);
       if (dup) {
+        // knowledge store KS-3: an explicit entity or a changed subject re-resolves the entity; relations are added.
+        const entityId = store.transaction(() => relinkFinding(store, dup, input, { agentRunId: ctx.agentRunId })?.id);
         // Same (task, claim): update the mutable fields in place (keeping the id) and log a new
         // score Decision when the judgment (criteria / subject) changed. Re-saving marks the finding
         // as re-submitted in the task's current round (superseded tracking, reviewLoop).
@@ -316,7 +320,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
           JSON.stringify(dup.criteria) !== JSON.stringify(input.criteria) || dup.subject !== input.subject;
         if (!judgmentChanged && evidence.length === dup.evidence.length) {
           if (dup.taskRound !== task.round) store.findings.update(dup.id, { taskRound: task.round });
-          return okData({ findingId: dup.id, duplicate: true });
+          return okData({ findingId: dup.id, duplicate: true, entityId });
         }
         const d = store.transaction(() => {
           store.findings.update(dup.id, { evidence, criteria: input.criteria, subject: input.subject, taskRound: task.round });
@@ -329,7 +333,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
           );
         });
         if (d) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
-        return okData({ findingId: dup.id, duplicate: true, updated: true });
+        return okData({ findingId: dup.id, duplicate: true, updated: true, entityId });
       }
       // Knowledge store KS-2: relation / duplicate handshake / applies_to / evidence_refs / ttl_days
       // (knowledge/factTools.ts). KS-3: pass the resolved entity as `{ entityId }`.

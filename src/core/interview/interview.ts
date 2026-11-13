@@ -12,6 +12,8 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Criteria, Decision, InterviewTurn, Symptom, Workspace } from '../types.js';
 import { audiencesOf, scopeOf } from '../workspace/tree.js';
+// knowledge store KS-3
+import { linkSymptom } from '../knowledge/entityLinks.js';
 
 export const INTERVIEW_TOPICS = ['basics', 'revenue_model', 'customers', 'going_well', 'going_badly'] as const;
 export type InterviewTopic = (typeof INTERVIEW_TOPICS)[number];
@@ -289,6 +291,7 @@ export function interviewToolHandlers(): Partial<Record<ToolName, ExtraToolHandl
       };
       store.transaction(() => {
         store.symptoms.insert(symptom);
+        linkSymptom(store, symptom, { agentRunId: ctx.agentRunId }); // knowledge store KS-3
         store.decisions.insert(decision);
       });
       events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision });

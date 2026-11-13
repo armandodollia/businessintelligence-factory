@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { entityKindSchema, modelRefSchema, taskTypeSchema } from '../../config/schema.js';
+// knowledge store KS-3
+import { RELATION_TYPES } from '../../knowledge/relations.js';
 import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
 import type { Role } from '../../types.js';
 
@@ -78,6 +80,18 @@ const personaField = z.object({
 const personaProfileShape = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, personaField])) as {
   [K in PersonaField]: typeof personaField;
 };
+
+// --- knowledge store KS-3: entity references (design §7.4, §9) ---
+/** An entity of this business tree: `{ id }`, or `{ kind, name }` (resolved by name or alias, else created). */
+const entityRefInput = z.union([
+  z.strictObject({ id: id.describe('Entity id from a search, card or earlier save') }),
+  z.strictObject({ kind: entityKindSchema, name: z.string().min(1) }),
+]);
+const findingRelationInput = z.strictObject({
+  type: z.enum(RELATION_TYPES),
+  to: entityRefInput.describe('The other entity'),
+});
+// --- end knowledge store KS-3 ---
 
 // ---------------------------------------------------------------------------
 // input schemas (snake_case, as agents see them)
@@ -159,6 +173,18 @@ export const toolInputSchemas = {
       .optional()
       .describe('Citations with optional verified quotes; their artifacts count as evidence'),
     ttl_days: z.number().int().min(1).max(3650).optional().describe('Days after which this fact should be re-checked'),
+    // knowledge store KS-3
+    entity: entityRefInput
+      .optional()
+      .describe(
+        'What the claim is about: { id } or { kind, name }. Omitted: the subject names it — an existing competitor, persona ' +
+          'or company entity of this business with that name or alias, else the company of a unit with that name, else a topic',
+      ),
+    relations: z
+      .array(findingRelationInput)
+      .max(10)
+      .optional()
+      .describe('Typed links this claim asserts from its entity, e.g. { type: "offers", to: { kind: "product", name: "Widget" } }'),
   }),
   confirm_finding: z.object({
     finding_id: id.describe('A current fact of this business tree, saved by earlier work'),
@@ -327,7 +353,10 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Save a finding (a fact). Rejected unless evidence lists at least one artifact saved in this workspace. Without `relation`, ' +
     'the store is checked for the same fact: an identical current claim is confirmed instead (cite an artifact saved in this ' +
     'task), and similar current facts are returned WITHOUT saving — call again with relation "new", {"confirms": id} or ' +
-    '{"replaces": id}. `evidence_refs` quotes must occur in the artifact text.',
+    '{"replaces": id}. `evidence_refs` quotes must occur in the artifact text. ' +
+    // knowledge store KS-3
+    'The finding is filed under an entity: `entity` when given, else the subject names it (an existing competitor, persona ' +
+    'or company entity with that name or alias, else the company of a business unit with that name, else a topic). Returns entityId.',
   submit_result: 'Submit your task deliverable (one JSON object). Call once at the end; resubmit after revisions.',
   submit_review: 'Submit your review: score 0–10 and issues classed blocking | substantive | nit | scope_expansion.',
   respond_to_review: 'Answer one review issue: fix (and say what changed) or pushback (with reason).',

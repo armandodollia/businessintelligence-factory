@@ -10,6 +10,8 @@ import { newId } from '../store/repos.js';
 import type { Decision, Persona, PersonaProfileField } from '../types.js';
 import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { compileAgentMd } from './agentMd.js';
+// knowledge store KS-3
+import { linkPersona } from '../knowledge/entityLinks.js';
 
 export type MarketToolOptions = {
   /** Data root (`data/`); agent.md files go to `<dataDir>/<workspaceId>/personas/<slug>.md`. */
@@ -113,6 +115,7 @@ export function savePersonaHandler(opts: MarketToolOptions): ExtraToolHandler {
       };
       if (existing) store.personas.update(persona.id, persona);
       else store.personas.insert(persona);
+      linkPersona(store, { ...persona, entityId: existing?.entityId }, { agentRunId: ctx.agentRunId }); // knowledge store KS-3
 
       const decision: Decision = {
         id: newId('dec'),
