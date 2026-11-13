@@ -1,7 +1,8 @@
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Rating, Role } from '../types.js';
-import { CRITERIA, criterionDef, type TargetType } from './criteria.js';
+import { CRITERIA, criterionDef, toNumber, type CriterionDef, type TargetType } from './criteria.js';
+import { COST_FORMATS, costScore } from './priority.js';
 
 export type RatingInput = Omit<Rating, 'id' | 'createdAt' | 'agentValue'>;
 
@@ -80,10 +81,40 @@ export function resolveTarget(
   }
 }
 
+const TREND_VALUES = new Set(['↑', '→', '↓', 'up', 'flat', 'down']);
+
+/**
+ * Checks a user's value against the criterion's scale and unit; returns an error message or
+ * undefined. 1-5: number 1–5. pct: number 0–100 (percent) or 0–1 (fraction), per the declared
+ * unit. trend: ↑ → ↓ (or up/flat/down). range: recommendation `cost` must parse with `costScore`,
+ * recommendation `priority` is 0–5, decision `score` (review) is 0–10, anything else a number.
+ */
+export function checkUserValue(targetType: TargetType, def: CriterionDef, v: unknown): string | undefined {
+  const n = toNumber(v);
+  const between = (lo: number, hi: number, what: string) =>
+    n === undefined || n < lo || n > hi ? `must be ${what} (got ${JSON.stringify(v)})` : undefined;
+  switch (def.scale) {
+    case '1-5':
+      return between(1, 5, 'a number 1–5');
+    case 'pct':
+      return def.unit === 'fraction' ? between(0, 1, 'a fraction 0–1') : between(0, 100, 'a percent 0–100');
+    case 'trend':
+      return TREND_VALUES.has(String(v ?? '').trim().toLowerCase()) ? undefined : `must be one of ↑ → ↓ (got ${JSON.stringify(v)})`;
+    case 'range':
+      if (targetType === 'recommendation' && def.key === 'cost') {
+        return costScore(v) === undefined ? `must be ${COST_FORMATS} (got ${JSON.stringify(v)})` : undefined;
+      }
+      if (targetType === 'recommendation' && def.key === 'priority') return between(0, 5, 'a priority 0–5');
+      if (targetType === 'decision' && def.key === 'score') return between(0, 10, 'a review score 0–10');
+      return n === undefined ? `must be a number (got ${JSON.stringify(v)})` : undefined;
+  }
+}
+
 /**
  * Stores the user's rating of one agent criterion value, snapshotting the agent's current value
  * (`agentValue`). Throws `RatingError` for an unknown target type / criterion, a missing target,
- * or `disagree` without `userValue`.
+ * `disagree` without `userValue`, or a `userValue` outside the criterion's scale/unit
+ * (`checkUserValue`).
  */
 export function rateCriterion(input: RatingInput, deps: { store: Store }): Rating {
   const { store } = deps;
@@ -96,6 +127,10 @@ export function rateCriterion(input: RatingInput, deps: { store: Store }): Ratin
   if (input.verdict !== 'agree' && input.verdict !== 'disagree') throw new RatingError(`invalid verdict '${String(input.verdict)}'`);
   if (input.verdict === 'disagree' && (input.userValue === undefined || input.userValue === '')) {
     throw new RatingError('disagree needs the userValue the user believes is right');
+  }
+  if (input.verdict === 'disagree') {
+    const bad = checkUserValue(input.targetType, criterionDef(input.targetType, input.criterion)!, input.userValue);
+    if (bad) throw new RatingError(`userValue for ${input.targetType}.${input.criterion}: ${bad}`);
   }
   const target = resolveTarget(store, input.workspaceId, input.targetType, input.targetId, input.criterion);
   if (!target) throw new RatingError(`${input.targetType} '${input.targetId}' not found in workspace '${input.workspaceId}'`);

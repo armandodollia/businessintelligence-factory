@@ -36,7 +36,7 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   orchestrator: [...BASE, 'propose_tasks', 'read_workspace'],
   reviewer: ['log_decision', 'submit_review', 'read_artifact', 'read_workspace'],
   persona: ['log_decision', 'submit_persona_feedback'],
-  interviewer: ['log_decision', 'update_profile', 'save_symptom', 'read_workspace'],
+  interviewer: ['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact'],
   synthesizer: [...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace'],
 };
 

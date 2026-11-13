@@ -80,21 +80,24 @@ describe('proposeWeights fits the weighted-mean model', () => {
     for (const r of rows) expect(computePriority({ criteria: r.criteria, personaFeedback: [] }, { weights: w, personaWeight: 0 })).toBeCloseTo(r.y, 1);
   });
 
-  it('beats "unconstrained fit then rescale" when the user scale is not a convex combination', () => {
+  it('is the least-squares optimum of the weighted-mean model when the user scale is not a convex combination', () => {
     const t = setup();
-    // y = 1.2·upside + 0.3·strategicFit: unconstrained LS gives β = (1.2, 0.3) → rescaled 4:1, which is
-    // not the best weighted-mean fit; the simplex fit pushes weight toward upside and lowers the error.
+    // y = 0.5·upside + 0.1·strategicFit (valid priorities ≤ 3). Unconstrained LS gives β = (0.5, 0.1),
+    // which "rescale" turns into 5:1 — not the best weighted-mean fit. The proposal must match a
+    // brute-force grid optimum over the weight share and be strictly better than 5:1.
     const rows = Array.from({ length: 10 }, (_, i) => {
       const upside = (i % 5) + 1;
       const strategicFit = ((i * 3) % 5) + 1;
-      return { criteria: { upside, strategicFit }, y: 1.2 * upside + 0.3 * strategicFit };
+      return { criteria: { upside, strategicFit }, y: 0.5 * upside + 0.1 * strategicFit };
     });
     overrides(t, rows);
     const w = proposeWeights('ws_a', t);
     const sse = (weights: Record<string, number>) =>
       rows.reduce((s, r) => s + (computePriority({ criteria: r.criteria, personaFeedback: [] }, { weights, personaWeight: 0 }) - r.y) ** 2, 0);
-    const oldRescaled = { ...w, upside: 1.6, strategicFit: 0.4 };
-    expect(sse(w)).toBeLessThan(sse(oldRescaled) - 0.1);
+    let gridBest = Infinity;
+    for (let a = 0; a <= 1000; a++) gridBest = Math.min(gridBest, sse({ upside: a / 1000, strategicFit: 1 - a / 1000 }));
+    expect(sse(w)).toBeLessThanOrEqual(gridBest + 0.05); // slack: computePriority rounds to 2 decimals
+    expect(sse(w)).toBeLessThan(sse({ upside: 5, strategicFit: 1 }) - 0.3);
   });
 
   it('simplex helpers', () => {
