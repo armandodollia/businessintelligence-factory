@@ -19,6 +19,7 @@ import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } f
 import { PipelineBusyError, tryLockPipeline } from './lock.js';
 import { failureReason, runTaskWithReview } from './reviewLoop.js';
 import { applyTaskStatus } from './outputs.js';
+import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 
 /** At most this many orchestrator runs per phase (initial plan + one follow-up round). */
 export const MAX_ORCHESTRATOR_ROUNDS = 2;
@@ -612,6 +613,7 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
           return task;
         });
         deps.events.emit({ type: 'task_status', workspaceId: failed.workspaceId, taskId: failed.id, status: 'failed' });
+        recordTaskEndOutcomes(store, failed); // learning loop WP-C
         abandonedTasks.push(t.id);
       }
     } else if (t.status === 'waiting_user') {

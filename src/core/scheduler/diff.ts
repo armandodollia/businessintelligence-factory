@@ -91,3 +91,20 @@ export function diffRuns(prevRunId: string, nextRunId: string, deps: { store: St
   changedArtifacts.sort((a, b) => a.subject.localeCompare(b.subject) || a.flow.localeCompare(b.flow) || a.step - b.step);
   return { newFindings, removedSubjects, changedArtifacts };
 }
+
+// ---------------------------------------------------------------------------
+// learning loop WP-C: findings a later run contradicts
+
+/**
+ * Ids of the previous run's findings whose subject the next run re-researched (it has findings with
+ * the same normalized subject) but whose claim it no longer found — e.g. "Acme Pro costs $10/mo"
+ * when the next run only says "$12/mo". Subjects the next run did not cover are not contradicted.
+ */
+export function contradictedFindings(prevRunId: string, nextRunId: string, deps: { store: Store }): string[] {
+  const live = (f: Finding) => f.status !== 'superseded';
+  const prev = deps.store.findings.list({ runId: prevRunId }).filter(live);
+  const next = deps.store.findings.list({ runId: nextRunId }).filter(live);
+  const nextKeys = new Set(next.map(findingKey));
+  const nextSubjects = new Set(next.map((f) => norm(f.subject)));
+  return prev.filter((f) => nextSubjects.has(norm(f.subject)) && !nextKeys.has(findingKey(f))).map((f) => f.id);
+}

@@ -96,16 +96,18 @@ export function changedArtifactLabel(a: { subject?: string; flow: string; step: 
   return `${a.subject ? `${a.subject} · ` : ''}${a.flow} step ${a.step}`;
 }
 
-/** Ratable decision criteria (mirrors core `CRITERIA.decision`). */
+/** Ratable decision criteria (mirrors core `CRITERIA.decision`; `pushback` is derived from the kind). */
 export const DECISION_CRITERIA = ['confidence', 'score'] as const;
 
 /**
- * Agent values on a decision the user can rate: `confidence` (log_decision) and `score`
- * (review). Empty for user / scheduler decisions.
+ * Agent values on a decision the user can rate: `confidence` (log_decision), `score` (review) and
+ * `pushback` (worker pushbacks). Empty for user / scheduler decisions.
  */
-export function decisionCriteria(d: Pick<Decision, 'payload'>): Criteria {
+export function decisionCriteria(d: Pick<Decision, 'payload'> & Partial<Pick<Decision, 'kind'>>): Criteria {
   const p = (d.payload ?? {}) as Record<string, unknown>;
   const out: Criteria = {};
   for (const k of DECISION_CRITERIA) if (typeof p[k] === 'number') out[k] = p[k] as number;
+  // learning loop WP-C: a worker pushback is ratable (agent value 1: "the issue needs no change").
+  if (d.kind === 'pushback') out.pushback = 1;
   return out;
 }

@@ -38,6 +38,7 @@ import type {
   WorkspaceNode,
 } from './types.js';
 import type { FeedbackEvent, HypothesisCorrection, SymptomHypothesis } from './types.js';
+import type { OutcomeReport } from './types.js';
 
 export class ApiError extends Error {
   constructor(
@@ -214,4 +215,11 @@ export const usageApi = {
     get<import('./types.js').CalibrationVersion[]>(`${ws(wsId)}/calibration/versions${role ? `?role=${enc(role)}` : ''}`),
   revertCalibration: (wsId: string, versionId: string) =>
     post<import('./types.js').RevertedCalibration>(`${ws(wsId)}/calibration/versions/${enc(versionId)}/revert`),
+};
+
+// --- learning loop WP-C: decision outcomes ----------------------------------------------------
+export const outcomesApi = {
+  /** Outcome label counts per role / task type / prompt version; `tree`: every node of the business tree. */
+  getOutcomes: (id: string, opts: { tree?: boolean } = {}) =>
+    get<OutcomeReport>(`${ws(id)}/outcomes${opts.tree ? '?scope=tree' : ''}`),
 };

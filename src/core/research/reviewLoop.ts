@@ -10,6 +10,8 @@ import type { Finding, Role, Task, TaskType } from '../types.js';
 import { sameTree } from '../workspace/tree.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
 import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
+import { recordTaskEndOutcomes } from '../learning/outcomes.js';
+import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
@@ -187,7 +189,7 @@ export function workPrompt(deps: Pick<ResearchDeps, 'store'>, task: Task): strin
 }
 
 /** Prompt for a revision run: brief, criteria, current deliverable and the reviewer's issues. */
-export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<ResearchDeps, 'store'>): string {
+export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>): string {
   const issueLines = issues.map((i) => {
     const ev = i.evidence?.length ? ` (evidence: ${i.evidence.join(', ')})` : '';
     return `- [${i.id}] (${i.class}) ${i.description}${ev}`;
@@ -199,6 +201,7 @@ export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<Rese
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     `## Your current deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     `## Review issues\n${issueLines.join('\n') || '- (none)'}`,
+    deps ? workerDisputeSection(deps.store, task, issues, maxReasserts(deps.config)) : '', // learning loop WP-C
     deps ? currentOutputsSection(deps, task) : '',
     deps && task.phase === 'synthesis' ? synthesisFindingsSection(deps.store, task.workspaceId) : '',
     deps ? answeredRequestsSection(deps, task) : '',
@@ -232,15 +235,17 @@ export function currentOutputsSection(deps: Pick<ResearchDeps, 'store'>, task: T
 /**
  * Reviewer prompt: ONLY the task brief, acceptance criteria, the current deliverable, the content of
  * the task's submitted outputs and their evidence artifact ids (spec §7.2: no worker transcript,
- * other tasks, or prior review rounds).
+ * other tasks, or prior review rounds — except, learning loop WP-C, the issues the worker pushed back
+ * on with its reasons, which the reviewer must accept or reassert).
  */
-export function reviewPrompt(task: Task, evidence: string[], outputs = ''): string {
+export function reviewPrompt(task: Task, evidence: string[], outputs = '', disputes = ''): string {
   return [
     taskHeader(task),
     `## Brief\n${task.brief}`,
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     `## Deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     outputs,
+    disputes, // learning loop WP-C: pushed-back issues of the previous review (spec: disputes)
     `## Evidence artifact ids (inspect with read_artifact)\n${bullets(evidence)}`,
     'Call `submit_review` exactly once.',
   ]
@@ -330,7 +335,7 @@ async function reviewStep(
   const context = reviewContext(deps, task);
   const res = await runAgent(deps, {
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
-    prompt: reviewPrompt(task, context.evidence, context.outputs), systemPrompt: system,
+    prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))), systemPrompt: system,
     model, needsBrowser: false, promptVersion: version,
   });
   throwIfAborted(deps.signal);
@@ -361,6 +366,7 @@ function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unveri
   });
   // Live refresh: output lists in the web app reload when a task's outputs got their final status.
   deps.events.emit({ type: 'task_status', workspaceId: done.workspaceId, taskId: done.id, status: done.status });
+  recordTaskEndOutcomes(store, done); // learning loop WP-C: task-end + superseded outcomes
   return done;
 }
 
@@ -399,18 +405,21 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
           store.tasks.update(id, { failureReason: res.reason }); // learning loop WP-B
           return finish(deps, id, 'failed', round);
         }
+        if (step === 'revise') recordRevisionResponses(store, id, round); // learning loop WP-C: fixed / pushed_back
         step = 'review';
         store.tasks.update(id, { step, submittedRound: round });
         continue;
       }
       store.tasks.update(id, { status: 'reviewing', round, step: 'review' });
       const review = await reviewStep(deps, id, round);
+      // learning loop WP-C: append the round to the review-issue history; issues carry stable ids.
+      const issues = recordReviewRound(store, config, id, round, review);
       // Only a valid review from a successful reviewer run can pass (even with passThreshold 0).
       if (review.valid && review.score >= passThreshold) return finish(deps, id, 'verified', round);
       if (round >= maxRounds) return finish(deps, id, 'unverified', round);
       round++;
       step = 'revise';
-      store.tasks.update(id, { status: 'running', round, step, reviewIssues: review.issues });
+      store.tasks.update(id, { status: 'running', round, step, reviewIssues: issues });
     }
   } catch (err) {
     if (err instanceof AbortError || (err as Error).name === 'AbortError') throw err;

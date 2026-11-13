@@ -385,3 +385,7 @@ export interface RevertedCalibration {
   version: import('../../../src/core/types.js').CalibrationVersion;
   decisionId: string;
 }
+// ---------------------------------------------------------------------------
+// learning loop WP-C: decision outcomes report (`GET .../outcomes`)
+
+export type { OutcomeLabel, OutcomeReport, OutcomeReportRow } from '../../../src/core/learning/types.js';

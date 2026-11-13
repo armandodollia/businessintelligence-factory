@@ -5,22 +5,29 @@ import type { ReviewQueueItem } from './reviewQueue.js';
 
 const DECISION_KEYS = CRITERIA.decision.map((c) => c.key);
 
+/** Agent value of the `pushback` criterion on a pushback decision (learning loop WP-C). */
+export const PUSHBACK_AGENT_VALUE = 1;
+
 /** Display title of a decision for rating lists. */
 export function decisionTitle(d: Decision): string {
   const p = (d.payload ?? {}) as Record<string, unknown>;
   if (typeof p.what === 'string' && p.what) return p.what;
   if (p.tool === 'submit_review') return `Review score (${d.role})`;
+  if (d.kind === 'pushback') return `Pushback on ${String(p.issueId ?? '?')}: ${String(p.reason ?? '')}`; // learning loop WP-C
   return String(p.tool ?? d.kind);
 }
 
 /**
  * Ratable agent values carried by a decision: `confidence` (log_decision) and `score`
- * (submit_review), numeric only. Empty for user / scheduler decisions.
+ * (submit_review), numeric only, and `pushback` (1) on worker pushbacks. Empty for user / scheduler
+ * decisions.
  */
 export function decisionCriteria(d: Decision): Criteria {
   const p = (d.payload ?? {}) as Record<string, unknown>;
   const out: Criteria = {};
   for (const k of DECISION_KEYS) if (typeof p[k] === 'number') out[k] = p[k] as number;
+  // learning loop WP-C: a worker pushback is ratable (agent value 1: "the issue needs no change").
+  if (d.kind === 'pushback') out.pushback = PUSHBACK_AGENT_VALUE;
   return out;
 }
 

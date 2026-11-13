@@ -136,6 +136,11 @@ export const bifConfigSchema = z
       maxRounds: z.number().int().min(1),
       passThreshold: z.number().min(0).max(10),
       perTaskType: perTaskType(loopOverrideSchema),
+      /**
+       * Learning loop WP-C: how many times a reviewer may reassert an issue the worker pushed back on
+       * before the dispute is closed (the worker is then told to fix it). Default 1 when unset.
+       */
+      maxReasserts: z.number().int().min(0).optional(),
     }),
     limits: z.strictObject({
       maxParallelWorkers: z.number().int().min(1),
