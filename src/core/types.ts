@@ -116,6 +116,8 @@ export interface Artifact {
   urlKey?: string;
   /** Upload-derived (design §12): sticky, set by triggers / backfill. Optional on insert (DB default 0). */
   uploadDerived?: boolean;
+  /** First reason the flag was set: `kind:upload` | `profile:<ws>` | `duplicate_of:<artifact>`. */
+  uploadCause?: string;
 }
 
 /**
@@ -162,6 +164,11 @@ export interface Finding {
   ttlDays?: number;
   /** Upload-derived (design §12): sticky along the lineage, set by triggers. */
   uploadDerived?: boolean;
+  /**
+   * First reason the flag was set: `evidence:<artifact>` | `finding_evidence:<artifact>` |
+   * `observation:<observation>` | `lineage:<earlier version>`.
+   */
+  uploadCause?: string;
   /** A replacement was applied onto a newer head than it named (design §7.2); for the review queue. */
   lineageConflict?: boolean;
 }

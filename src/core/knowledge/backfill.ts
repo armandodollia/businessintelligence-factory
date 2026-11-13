@@ -9,9 +9,11 @@
  *    extraction queue picks it up) per artifact; a `home` scope row, lineage and first-seen time per
  *    finding; `last_confirmed_at` = `created_at` for verified findings never confirmed since.
  * 2. `url_key` on artifacts and captures (`urlKey`, http(s) only).
- * 3. `upload_derived`: artifacts the export treats as internal uploads (`internalUploadIds`: kind
- *    `upload` plus profile-linked ids), then their chunks, the findings citing them (evidence or
- *    `finding_evidence`) and later versions of those lineages. Only ever sets 1.
+ * 3. `upload_derived` (+ `upload_cause`): artifacts the export treats as internal uploads
+ *    (`internalUploadIds`: kind `upload` plus profile-linked ids), their text duplicates, chunks,
+ *    findings citing any flagged artifact (evidence, `finding_evidence`, any observation) and later
+ *    versions of those lineages — the same rules as the migration-18 triggers, so a store written
+ *    while a rule was missing is repaired at the next start. Only ever sets 1.
  * 4. Entities (per tree root): competitors → `competitor`, personas → `persona` (named by segment),
  *    symptoms → `symptom` (strengths → `topic`); finding subjects → an existing competitor /
  *    persona / company entity with that key in the tree, else a `company` entity when the subject is
@@ -102,28 +104,61 @@ function urlKeys(store: Store, r: BackfillReport): void {
   }
 }
 
+/** Same rules as the migration-18 triggers (see there), applied to every row still unflagged. */
+const UPLOAD_PROPAGATION = [
+  `UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+     SELECT 'duplicate_of:' || t.duplicate_of FROM artifact_texts t JOIN artifacts c ON c.id = t.duplicate_of
+     WHERE t.artifact_id = artifacts.id AND c.upload_derived = 1))
+   WHERE upload_derived = 0 AND id IN (
+     SELECT t.artifact_id FROM artifact_texts t JOIN artifacts c ON c.id = t.duplicate_of WHERE c.upload_derived = 1)`,
+  `UPDATE chunks SET upload_derived = 1
+   WHERE upload_derived = 0 AND artifact_id IN (SELECT id FROM artifacts WHERE upload_derived = 1)`,
+  `UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+     SELECT 'evidence:' || a.id FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j
+     JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1 LIMIT 1))
+   WHERE upload_derived = 0 AND EXISTS (
+     SELECT 1 FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j
+     JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1)`,
+  `UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+     SELECT 'finding_evidence:' || a.id FROM finding_evidence fe JOIN artifacts a ON a.id = fe.artifact_id
+     WHERE fe.finding_id = findings.id AND a.upload_derived = 1 ORDER BY fe.seq LIMIT 1))
+   WHERE upload_derived = 0 AND EXISTS (
+     SELECT 1 FROM finding_evidence fe JOIN artifacts a ON a.id = fe.artifact_id
+     WHERE fe.finding_id = findings.id AND a.upload_derived = 1)`,
+  `UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+     SELECT 'observation:' || o.id FROM fact_observations o
+     JOIN json_each(CASE WHEN json_valid(o.evidence) THEN o.evidence ELSE '[]' END) j
+     JOIN artifacts a ON a.id = j.value
+     WHERE o.finding_id = findings.id AND a.upload_derived = 1 ORDER BY o.rowid LIMIT 1))
+   WHERE upload_derived = 0 AND EXISTS (
+     SELECT 1 FROM fact_observations o
+     JOIN json_each(CASE WHEN json_valid(o.evidence) THEN o.evidence ELSE '[]' END) j
+     JOIN artifacts a ON a.id = j.value
+     WHERE o.finding_id = findings.id AND a.upload_derived = 1)`,
+  // Lineage last: any version after a flagged one (one pass suffices: the condition is "any earlier").
+  `UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+     SELECT 'lineage:' || p.id FROM findings p
+     WHERE p.lineage_id = findings.lineage_id AND p.version < findings.version AND p.upload_derived = 1 ORDER BY p.version LIMIT 1))
+   WHERE upload_derived = 0 AND EXISTS (
+     SELECT 1 FROM findings p WHERE p.lineage_id = findings.lineage_id AND p.version < findings.version AND p.upload_derived = 1)`,
+];
+
 function uploadFlags(store: Store, r: BackfillReport): void {
   const before = { artifacts: flagged(store, 'artifacts'), findings: flagged(store, 'findings'), chunks: flagged(store, 'chunks') };
-  const setArtifact = store.db.prepare('UPDATE artifacts SET upload_derived = 1 WHERE id = ? AND upload_derived = 0');
-  for (const id of internalUploadIds(store)) setArtifact.run(id);
-  changes(
-    store,
-    `UPDATE chunks SET upload_derived = 1 WHERE upload_derived = 0
-     AND artifact_id IN (SELECT id FROM artifacts WHERE upload_derived = 1)`,
+  // Which profile lists an upload (for the cause); the set itself is the export's authority.
+  const listedBy = new Map<string, string>();
+  for (const p of store.profiles.list()) {
+    const u = p.data.uploads;
+    if (Array.isArray(u)) for (const id of u) if (typeof id === 'string' && !listedBy.has(id)) listedBy.set(id, p.workspaceId);
+  }
+  const setArtifact = store.db.prepare(
+    'UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, ?) WHERE id = ? AND upload_derived = 0',
   );
-  changes(
-    store,
-    `UPDATE findings SET upload_derived = 1 WHERE upload_derived = 0 AND (
-       EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j
-               JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1)
-       OR EXISTS (SELECT 1 FROM finding_evidence fe JOIN artifacts a ON a.id = fe.artifact_id
-                  WHERE fe.finding_id = findings.id AND a.upload_derived = 1))`,
-  );
-  changes(
-    store,
-    `UPDATE findings SET upload_derived = 1 WHERE upload_derived = 0 AND EXISTS (
-       SELECT 1 FROM findings p WHERE p.lineage_id = findings.lineage_id AND p.version < findings.version AND p.upload_derived = 1)`,
-  );
+  for (const id of internalUploadIds(store)) {
+    const cause = store.artifacts.get(id)?.kind === 'upload' ? 'kind:upload' : `profile:${listedBy.get(id) ?? ''}`;
+    setArtifact.run(cause, id);
+  }
+  for (const sql of UPLOAD_PROPAGATION) changes(store, sql);
   r.uploadDerived = {
     artifacts: flagged(store, 'artifacts') - before.artifacts,
     findings: flagged(store, 'findings') - before.findings,

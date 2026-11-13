@@ -215,3 +215,91 @@ describe('migration 18 (knowledge store KS-0)', () => {
     expect(() => ins('ent_d', 'ws_a', 'competitor')).toThrow(/UNIQUE/);
   });
 });
+
+describe('migration 18: late upload classification (gate review fix)', () => {
+  const T2 = '2026-11-03T10:00:00.000Z';
+  /** Fact fnd_c (lineage of itself) confirmed by an observation citing the page; v2 replaces it later. */
+  function confirmedThenReplaced(s: Store) {
+    s.db.exec(`
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at)
+        VALUES ('fnd_c', 'ws_a', 'rrun_1', 'tsk_1', 'Acme', 'Acme has a free tier', '{}', '[]', 'verified', '${T0}');
+      INSERT INTO fact_observations (id, workspace_id, lineage_id, finding_id, kind, task_id, evidence, status, created_at)
+        VALUES ('fob_c', 'ws_a', 'fnd_c', 'fnd_c', 'confirm', 'tsk_2', '["${ART_PAGE}"]', 'pending', '${T1}');
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at, lineage_id, version, replaces_id, lifecycle)
+        VALUES ('fnd_c2', 'ws_a', 'rrun_3', 'tsk_3', 'Acme', 'Acme dropped the free tier', '{}', '[]', 'pending', '${T2}', 'fnd_c', 2, 'fnd_c', 'candidate');
+    `);
+  }
+  const flag = (s: Store, id: string) => one(s, 'SELECT upload_derived AS d, upload_cause AS c FROM findings WHERE id = ?', id);
+
+  it('a confirmation recorded before its artifact is classified as an upload flags the fact and later versions', () => {
+    const s = open(legacyDb());
+    confirmedThenReplaced(s);
+    expect(flag(s, 'fnd_c')).toEqual({ d: 0, c: null });
+    // Later: the user's upload turns out to be the same bytes as the page (profile-linked).
+    s.db.exec(`INSERT INTO profiles (workspace_id, data) VALUES ('ws_a', '{"uploads":["${ART_PAGE}"]}')`);
+    expect(one(s, `SELECT upload_derived AS d, upload_cause AS c FROM artifacts WHERE id = '${ART_PAGE}'`)).toEqual({ d: 1, c: 'profile:ws_a' });
+    expect(flag(s, 'fnd_c')).toEqual({ d: 1, c: 'observation:fob_c' });
+    expect(flag(s, 'fnd_c2')).toEqual({ d: 1, c: 'lineage:fnd_c' });
+  });
+
+  it('observations of every kind (confirm, replace, retract) count, recorded before or after the classification', () => {
+    const s = open(legacyDb());
+    const fact = (id: string) => s.db.exec(`INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at)
+      VALUES ('${id}', 'ws_a', 'r', 't', 'Acme', 'claim ${id}', '{}', '[]', 'verified', '${T0}')`);
+    const obs = (id: string, fnd: string, kind: string, art: string) => s.db.exec(`INSERT INTO fact_observations (id, workspace_id, lineage_id, finding_id, kind, evidence, status, created_at)
+      VALUES ('${id}', 'ws_a', '${fnd}', '${fnd}', '${kind}', '["${art}"]', 'pending', '${T1}')`);
+    for (const k of ['confirm', 'replace', 'retract']) {
+      fact(`fnd_${k}`);
+      obs(`fob_${k}`, `fnd_${k}`, k, ART_PAGE); // before: the page is not an upload yet
+      fact(`fnd_${k}_late`);
+      obs(`fob_${k}_late`, `fnd_${k}_late`, k, ART_UPLOAD); // after: already an upload
+    }
+    for (const k of ['confirm', 'replace', 'retract']) expect(flag(s, `fnd_${k}_late`)).toEqual({ d: 1, c: `observation:fob_${k}_late` });
+    s.db.exec(`UPDATE artifacts SET upload_derived = 1 WHERE id = '${ART_PAGE}'`);
+    for (const k of ['confirm', 'replace', 'retract']) expect(flag(s, `fnd_${k}`)).toEqual({ d: 1, c: `observation:fob_${k}` });
+  });
+
+  it('an artifact whose text duplicates an upload is upload-derived, and so are the facts citing it', () => {
+    const s = open(legacyDb());
+    s.artifacts.insert({ id: 'art_dup', workspaceId: 'ws_a', kind: 'page_snapshot', path: 'p/d', sha256: 'sha_d', mime: 'text/html', capturedAt: T1 });
+    s.artifacts.insert({ id: 'art_dup2', workspaceId: 'ws_a', kind: 'page_snapshot', path: 'p/e', sha256: 'sha_e', mime: 'text/html', capturedAt: T1 });
+    s.findings.insert({ id: 'fnd_d', workspaceId: 'ws_a', runId: 'r', taskId: 't', subject: 'Acme', claim: 'c', criteria: {}, evidence: ['art_dup'], status: 'pending', createdAt: T1 });
+    // KS-1 marks art_dup as a text duplicate of the upload (already flagged) → flagged now.
+    s.db.exec(`UPDATE artifact_texts SET status = 'ok', duplicate_of = '${ART_UPLOAD}' WHERE artifact_id = 'art_dup'`);
+    expect(one(s, `SELECT upload_derived AS d, upload_cause AS c FROM artifacts WHERE id = 'art_dup'`)).toEqual({ d: 1, c: `duplicate_of:${ART_UPLOAD}` });
+    expect(flag(s, 'fnd_d')).toEqual({ d: 1, c: 'evidence:art_dup' });
+    // art_dup2 duplicates the page, which only later becomes an upload.
+    s.findings.insert({ id: 'fnd_d2', workspaceId: 'ws_a', runId: 'r', taskId: 't', subject: 'Acme', claim: 'c2', criteria: {}, evidence: ['art_dup2'], status: 'pending', createdAt: T1 });
+    s.db.exec(`UPDATE artifact_texts SET status = 'ok', duplicate_of = '${ART_PAGE}' WHERE artifact_id = 'art_dup2'`);
+    expect(flag(s, 'fnd_d2')).toEqual({ d: 0, c: null });
+    s.db.exec(`INSERT INTO profiles (workspace_id, data) VALUES ('ws_a', '{"uploads":["${ART_PAGE}"]}')`);
+    expect(one(s, `SELECT upload_derived AS d, upload_cause AS c FROM artifacts WHERE id = 'art_dup2'`)).toEqual({ d: 1, c: `duplicate_of:${ART_PAGE}` });
+    expect(flag(s, 'fnd_d2')).toEqual({ d: 1, c: 'evidence:art_dup2' });
+  });
+
+  it('every evidence path records its cause; an observation or reference whose evidence changes later is re-checked', () => {
+    const s = open(legacyDb()); // ART_UPLOAD is an upload
+    expect(one(s, `SELECT upload_cause AS c FROM artifacts WHERE id = '${ART_UPLOAD}'`)).toEqual({ c: 'kind:upload' });
+    expect(flag(s, 'fnd_p')).toEqual({ d: 0, c: null }); // legacy row: the backfill flags it (see backfill tests)
+    s.db.exec(`
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at)
+        VALUES ('fnd_e', 'ws_a', 'r', 't', 'Acme', 'cites the upload', '{}', '["${ART_UPLOAD}"]', 'pending', '${T0}');
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at)
+        VALUES ('fnd_q', 'ws_a', 'r', 't', 'Acme', 'quotes the page', '{}', '[]', 'pending', '${T0}');
+      INSERT INTO finding_evidence (finding_id, seq, artifact_id) VALUES ('fnd_q', 0, '${ART_PAGE}');
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at)
+        VALUES ('fnd_o', 'ws_a', 'r', 't', 'Acme', 'confirmed', '{}', '[]', 'verified', '${T0}');
+      INSERT INTO fact_observations (id, workspace_id, lineage_id, finding_id, kind, evidence, status, created_at)
+        VALUES ('fob_o', 'ws_a', 'fnd_o', 'fnd_o', 'confirm', '["${ART_PAGE}"]', 'pending', '${T1}');
+    `);
+    expect(flag(s, 'fnd_e')).toEqual({ d: 1, c: `evidence:${ART_UPLOAD}` });
+    expect(flag(s, 'fnd_q')).toEqual({ d: 0, c: null });
+    s.db.exec(`UPDATE finding_evidence SET artifact_id = '${ART_UPLOAD}' WHERE finding_id = 'fnd_q'`);
+    expect(flag(s, 'fnd_q')).toEqual({ d: 1, c: `finding_evidence:${ART_UPLOAD}` });
+    s.db.exec(`UPDATE fact_observations SET evidence = '["${ART_UPLOAD}"]' WHERE id = 'fob_o'`);
+    expect(flag(s, 'fnd_o')).toEqual({ d: 1, c: 'observation:fob_o' });
+    // The first cause is kept.
+    s.db.exec(`UPDATE artifacts SET upload_derived = 1 WHERE id = '${ART_PAGE}'`);
+    expect(flag(s, 'fnd_q')).toEqual({ d: 1, c: `finding_evidence:${ART_UPLOAD}` });
+  });
+});

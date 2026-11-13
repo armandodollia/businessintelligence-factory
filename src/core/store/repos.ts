@@ -231,7 +231,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', kind: 'text', path: 'text', sha256: 'text', mime: 'text',
       sourceUrl: 'text', title: 'text', flow: 'text', step: 'int', note: 'text', capturedAt: 'text',
-      description: 'text', urlKey: 'text', uploadDerived: 'bool', // KS-0 (migration 18)
+      description: 'text', urlKey: 'text', uploadDerived: 'bool', uploadCause: 'text', // KS-0 (migration 18)
     },
   } satisfies TableSpec<Artifact>,
   findings: {
@@ -244,6 +244,7 @@ export const specs = {
       // KS-0 (migration 18)
       lineageId: 'text', version: 'int', replacesId: 'text', lifecycle: 'text', entityId: 'text', firstSeenAt: 'text',
       lastConfirmedAt: 'text', confirmCount: 'int', ttlDays: 'int', uploadDerived: 'bool', lineageConflict: 'bool',
+      uploadCause: 'text',
     },
   } satisfies TableSpec<Finding>,
   tasks: {

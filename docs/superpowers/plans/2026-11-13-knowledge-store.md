@@ -534,13 +534,34 @@ Smaller decisions taken while building KS-0 (none changes §3, §9 or §12).
     `home` row in `item_scopes`; every new artifact gets a `home` scope row and an
     `artifact_texts` row with status `pending`. So rows from any code path satisfy the invariants;
     KS-1 updates (not inserts) the text row, KS-2 replaces the scope rows for `applies_to`.
-  - `upload_derived` (§12) is maintained in SQL and is sticky (an update from 1 to 0 aborts). Set
-    on: artifacts of kind `upload`; artifacts listed in any `profiles.data.uploads` (on profile
-    insert / update); chunks of flagged artifacts; findings whose `evidence` or `finding_evidence`
-    cites a flagged artifact (at insert, on evidence update, and when the artifact is flagged later);
-    findings with a `confirm` observation citing one; later versions of a flagged lineage. A
-    rejected confirmation still flags (conservative). KS-2 may set the flag itself; it never needs
-    to clear it.
+  - `upload_derived` (§12) is maintained in SQL and is sticky (an update from 1 to 0 aborts);
+    `upload_cause` (artifacts, findings) keeps the first reason — the seam for KS-2's "why" ruling:
+    `kind:upload`, `profile:<ws>`, `duplicate_of:<artifact>` (artifacts); `evidence:<artifact>`,
+    `finding_evidence:<artifact>`, `observation:<observation>`, `lineage:<earlier version>`
+    (findings). When an artifact is flagged (at any time, including late: a profile later lists it
+    as an upload), the cascade flags its text duplicates, then re-applies the general rules for
+    every flagged artifact (chunks; findings citing one through `evidence`, `finding_evidence` or
+    a `fact_observations` row of any kind, rejected ones included), and lineage versions after a
+    flagged one follow. Insert / update triggers on `findings.evidence`, `finding_evidence`,
+    `fact_observations.evidence` and `artifact_texts.duplicate_of` cover the other ordering. The
+    startup backfill runs the same rules (`UPLOAD_PROPAGATION`), so a store written without one of
+    them is repaired at the next start.
+  - **Sweep of evidence-bearing places** (gate review): covered by triggers + backfill:
+    `findings.evidence`, `finding_evidence`, `fact_observations.evidence` (confirm, replace,
+    retract), the artifact's chunks, artifacts whose text is `duplicate_of` a flagged artifact (one
+    level: KS-1 always points at the canonical). Ruled out of materialization (no flag column):
+    `competitors.evidence`, `symptoms.evidence`, `symptom_hypotheses.evidence` (findings or
+    artifacts), persona profile field evidence, `unit_proposals.evidence`,
+    `recommendations.finding_ids` — they are resolved at check time from the current flags by
+    `itemIsUploadDerived` (`knowledge/provenance.ts`), and at export time by the export's expansion.
+    **KS-6:** the export's `evidenceOf` reads `findings.evidence` only, so a finding flagged
+    through an observation (or a record citing such a finding) is not yet excluded by the export;
+    KS-6 must make the export use the materialized finding flag (or `itemIsUploadDerived`).
+    Entity names derived from an upload-derived record are KS-3's to flag.
+  - `runIsUploadExposed` no longer trusts the stored row flag alone: `retrieval_events` is
+    append-only, so it also re-resolves every returned id with `itemIsUploadDerived` at check
+    time. KS-4 / KS-5 must therefore list in `results` every item whose text a response carried
+    (card lines included).
   - Never VACUUM without an FTS `rebuild` afterwards (VACUUM may renumber rowids). BIF never VACUUMs today.
 - **Repositories** for the new tables live in a delimited block at the end of `repos.ts` as
   `knowledgeRepos(store)` (memoized per connection, like `usageRepos` / `learningRepos`), not in
@@ -574,8 +595,9 @@ Smaller decisions taken while building KS-0 (none changes §3, §9 or §12).
   node of its tree).
 - **Retrieval log:** queries are redacted with `redactServed` and capped at 2 000 chars; the bus
   event is `{ type: 'retrieval', workspaceId, retrievalEventId, agentRunId?, taskId? }`. It is
-  not yet persisted to `bus_events` (KS-6). `runIsUploadExposed` reads only `retrieval_events`, so
-  today's unlogged `read_artifact` calls are not covered until KS-4 logs them.
+  not yet persisted to `bus_events` (KS-6). `runIsUploadExposed` reads only `retrieval_events`
+  (stored flag, then current flags of the returned ids), so today's unlogged `read_artifact` calls
+  are not covered until KS-4 logs them.
 - **Config defaults not fixed by the design:** `dedupe.similarityFloor` 0.5 on a 0–1 scale (KS-2
   defines the measure), `retention.pruneMinAgeDays` 90, `budgets.providers` empty (scale 1),
   `freshness.byEntityKind` empty. `chunkTokens > maxChunkTokens` is a config error.

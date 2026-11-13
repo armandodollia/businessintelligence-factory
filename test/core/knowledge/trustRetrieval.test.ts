@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventBus, type BusEvent } from '../../../src/core/events.js';
+import { itemIsUploadDerived } from '../../../src/core/knowledge/provenance.js';
 import { recordRetrieval, runIsUploadExposed } from '../../../src/core/knowledge/retrievalLog.js';
 import { CONTENT_TRUST, fenceEvidence, redactServed, stripFences } from '../../../src/core/knowledge/trust.js';
 import { openStore, type Store } from '../../../src/core/store/db.js';
@@ -121,5 +122,59 @@ describe('retrieval log (design §13)', () => {
     recordRetrieval({ store: s }, ctx, { ...entry, uploadDerived: true });
     expect(runIsUploadExposed(s, 'arun_1')).toBe(true);
     expect(runIsUploadExposed(s, 'arun_missing')).toBe(false);
+  });
+});
+
+describe('upload exposure resolved at check time (gate review fix)', () => {
+  const ctx = { workspaceId: 'R', agentRunId: 'arun_1', role: 'worker' as const };
+  const art = (s: Store, id: string, kind = 'page_snapshot') =>
+    s.artifacts.insert({ id, workspaceId: 'R', kind: kind as 'page_snapshot', path: id, sha256: id, mime: 'text/html', capturedAt: T0 });
+  const fnd = (s: Store, id: string, evidence: string[] = []) =>
+    s.findings.insert({ id, workspaceId: 'R', runId: 'r', taskId: 't', subject: 'Acme', claim: id, criteria: {}, evidence, status: 'verified', createdAt: T0 });
+
+  it('a run shown an artifact’s text before the artifact was classified as an upload is exposed afterwards', () => {
+    const s = trees();
+    art(s, 'art_a');
+    knowledgeRepos(s).chunks.insert({ id: 'chk_a', artifactId: 'art_a', workspaceId: 'R', seq: 0, headingPath: '', text: 't', charStart: 0, charEnd: 1, tokenEstimate: 1 });
+    recordRetrieval({ store: s }, ctx, { tool: 'expand', query: 'chk_a', scope: 'node', results: [{ id: 'chk_a', kind: 'chunk' }], tokensReturned: 5, latencyMs: 1, uploadDerived: false });
+    recordRetrieval({ store: s }, { ...ctx, agentRunId: 'arun_2' }, { tool: 'search', query: 'q', scope: 'node', results: [], tokensReturned: 1, latencyMs: 1, uploadDerived: false });
+    expect(runIsUploadExposed(s, 'arun_1')).toBe(false);
+    s.profiles.insert({ workspaceId: 'R', data: { uploads: ['art_a'] } }); // later: the bytes were an internal upload
+    expect(runIsUploadExposed(s, 'arun_1')).toBe(true);
+    expect(runIsUploadExposed(s, 'arun_2')).toBe(false);
+  });
+
+  it('itemIsUploadDerived resolves every record kind through its evidence, using current flags', () => {
+    const s = trees();
+    art(s, 'art_up', 'upload');
+    art(s, 'art_pub');
+    fnd(s, 'fnd_pub', ['art_pub']);
+    fnd(s, 'fnd_conf');
+    knowledgeRepos(s).factObservations.insert({
+      id: 'fob_1', workspaceId: 'R', lineageId: 'fnd_conf', findingId: 'fnd_conf', kind: 'confirm', evidence: ['art_up'], status: 'rejected', createdAt: T0,
+    });
+    const comparison = { pricing: 3, onboarding: 3, ux: 3, features: 3 };
+    s.competitors.insert({ id: 'cmp_up', workspaceId: 'R', name: 'G', threat: 3, directness: 3, comparison, evidence: ['art_up'], createdAt: T0, updatedAt: T0 });
+    s.competitors.insert({ id: 'cmp_pub', workspaceId: 'R', name: 'H', threat: 3, directness: 3, comparison, evidence: ['art_pub'], createdAt: T0, updatedAt: T0 });
+    s.symptoms.insert({ id: 'sym_1', workspaceId: 'R', kind: 'symptom', title: 't', detail: 'd', criteria: {}, evidence: ['fnd_conf'] });
+    s.symptomHypotheses.insert({ id: 'hyp_1', workspaceId: 'R', symptomId: 'sym_1', hypothesis: 'h', confidence: 50, evidence: ['fnd_conf'], createdAt: T0 });
+    s.personas.insert({
+      id: 'per_1', workspaceId: 'R', slug: 'p', segment: 's', agentMdPath: 'x', version: 1,
+      profile: { role: { value: 'v', confidence: 1, evidence: ['art_pub'] }, budget: { value: 'v', confidence: 1, evidence: ['art_up'] } },
+    });
+    s.recommendations.insert({
+      id: 'rec_1', workspaceId: 'R', title: 't', summary: 's', criteria: {}, findingIds: ['fnd_pub', 'fnd_conf'], personaFeedback: [], priority: 1, createdAt: T0,
+    });
+    s.unitProposals.insert({
+      id: 'unit_1', workspaceId: 'R', name: 'n', description: 'd', level: 'slice', audiences: ['internal'], evidence: ['art_up'], reasoning: 'r',
+      status: 'proposed', createdAt: T0,
+    });
+    const yes = ['art_up', 'fnd_conf', 'fob_1', 'cmp_up', 'sym_1', 'hyp_1', 'per_1', 'rec_1', 'unit_1'];
+    const no = ['art_pub', 'fnd_pub', 'cmp_pub', 'nothing'];
+    for (const id of yes) expect(itemIsUploadDerived(s, id), id).toBe(true);
+    for (const id of no) expect(itemIsUploadDerived(s, id), id).toBe(false);
+    // Cycles in evidence never loop.
+    s.symptoms.insert({ id: 'sym_loop', workspaceId: 'R', kind: 'symptom', title: 't', detail: 'd', criteria: {}, evidence: ['sym_loop'] });
+    expect(itemIsUploadDerived(s, 'sym_loop')).toBe(false);
   });
 });

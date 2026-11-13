@@ -211,6 +211,42 @@ describe('upload_derived in normal operation (design §12)', () => {
   });
 });
 
+describe('upload_derived backfill: confirmation provenance (gate review fix)', () => {
+  it('repairs a store where a confirmation’s artifact was classified as an upload without the cascade', () => {
+    const s = legacy();
+    backfillKnowledge(s);
+    // A database written by a build whose cascade ignored observations: emulate by removing it.
+    s.db.exec('DROP TRIGGER artifacts_upload_cascade');
+    s.db.exec(`
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at)
+        VALUES ('fnd_c', 'ws_a', 'r', 't', 'Acme', 'free tier', '{}', '[]', 'verified', '${T0}');
+      INSERT INTO fact_observations (id, workspace_id, lineage_id, finding_id, kind, evidence, status, created_at)
+        VALUES ('fob_c', 'ws_a', 'fnd_c', 'fnd_c', 'confirm', '["art_ftp"]', 'rejected', '${T0}');
+      INSERT INTO findings (id, workspace_id, run_id, task_id, subject, claim, criteria, evidence, status, created_at, lineage_id, version, replaces_id, lifecycle)
+        VALUES ('fnd_c2', 'ws_a', 'r', 't2', 'Acme', 'no free tier', '{}', '[]', 'pending', '${T0}', 'fnd_c', 2, 'fnd_c', 'candidate');
+      UPDATE profiles SET data = '{"uploads":["art_page","art_ftp"]}' WHERE workspace_id = 'ws_a';
+    `);
+    expect(s.artifacts.get('art_ftp')!.uploadDerived).toBe(true);
+    expect(s.findings.get('fnd_c')!.uploadDerived).toBe(false); // missed
+    const r = backfillKnowledge(s);
+    expect(r.uploadDerived.findings).toBeGreaterThanOrEqual(2);
+    expect(s.findings.get('fnd_c')).toMatchObject({ uploadDerived: true, uploadCause: 'observation:fob_c' });
+    expect(s.findings.get('fnd_c2')).toMatchObject({ uploadDerived: true, uploadCause: 'lineage:fnd_c' });
+    expect(s.findings.get('fnd_t1')).toMatchObject({ uploadDerived: true, uploadCause: 'evidence:art_ftp' }); // cites it directly
+    expect(backfillKnowledge(s).uploadDerived).toEqual({ artifacts: 0, findings: 0, chunks: 0 });
+  });
+
+  it('records the cause of every flag it sets', () => {
+    const s = legacy();
+    backfillKnowledge(s);
+    expect(s.artifacts.get('art_page')!.uploadCause).toBe('profile:ws_a');
+    expect(s.artifacts.get('art_up')!.uploadCause).toBe('kind:upload');
+    expect(s.findings.get('fnd_globex')!.uploadCause).toBe('evidence:art_page');
+    expect(s.findings.get('fnd_b')!.uploadCause).toBe('evidence:art_up');
+    expect(s.findings.list().filter((f) => !f.uploadDerived).every((f) => f.uploadCause === undefined)).toBe(true);
+  });
+});
+
 describe('entity keys (KS-0 seam for KS-3)', () => {
   it('ensureEntity: exact key or alias within the tree and kind, else create; merged entities resolve to the survivor', () => {
     const s = legacy();

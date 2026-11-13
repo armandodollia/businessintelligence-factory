@@ -5,7 +5,8 @@
  * emits a `retrieval` bus event that carries only the row id.
  *
  * A run that was shown upload-derived text is upload-exposed: `runIsUploadExposed` is what the
- * export (KS-6) uses to exclude that run's judgments by default.
+ * export (KS-6) uses to exclude that run's judgments by default. It re-resolves returned ids against
+ * current flags, so callers must list in `results` every item whose text the response carried.
  */
 import type { ModelRef } from '../config/schema.js';
 import type { EventBus } from '../events.js';
@@ -13,6 +14,7 @@ import type { Store } from '../store/db.js';
 import { knowledgeRepos, newId } from '../store/repos.js';
 import type { RetrievalEvent, RetrievalResultRef, RetrievalRole, RetrievalTool } from '../types.js';
 import { rootOf } from '../workspace/tree.js';
+import { itemIsUploadDerived } from './provenance.js';
 import { redactServed } from './trust.js';
 
 /** Who read: an agent run (a `RunContext` fits) or the user through the API (`role: 'user'`). */
@@ -86,10 +88,24 @@ export function recordRetrieval(
   return ev;
 }
 
-/** True when any logged read of the agent run returned upload-derived text. */
+/**
+ * True when the agent run was shown upload-derived text: a logged read flagged at the time, or a
+ * read whose returned items are upload-derived NOW (an artifact classified as an upload after the
+ * read — the stored flag on the append-only row cannot change, so result ids are re-resolved).
+ */
 export function runIsUploadExposed(store: Store, agentRunId: string): boolean {
-  return (
-    store.db.prepare('SELECT 1 FROM retrieval_events WHERE agent_run_id = ? AND upload_derived = 1 LIMIT 1').get(agentRunId) !==
-    undefined
-  );
+  const rows = store.db
+    .prepare('SELECT upload_derived AS d, result_ids AS r FROM retrieval_events WHERE agent_run_id = ? ORDER BY rowid')
+    .all(agentRunId) as Array<{ d: number; r: string }>;
+  if (rows.some((row) => row.d === 1)) return true;
+  const ids = new Set<string>();
+  for (const row of rows) {
+    try {
+      for (const ref of JSON.parse(row.r) as RetrievalResultRef[]) if (typeof ref?.id === 'string') ids.add(ref.id);
+    } catch {
+      // A malformed row cannot be resolved; its stored flag (0) stands.
+    }
+  }
+  for (const id of ids) if (itemIsUploadDerived(store, id)) return true;
+  return false;
 }

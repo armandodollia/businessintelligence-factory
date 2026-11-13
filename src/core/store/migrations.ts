@@ -632,7 +632,8 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE artifacts ADD COLUMN description TEXT;
   ALTER TABLE artifacts ADD COLUMN url_key TEXT;
   ALTER TABLE artifacts ADD COLUMN upload_derived INTEGER NOT NULL DEFAULT 0;
-  UPDATE artifacts SET upload_derived = 1 WHERE kind = 'upload';
+  ALTER TABLE artifacts ADD COLUMN upload_cause TEXT;
+  UPDATE artifacts SET upload_derived = 1, upload_cause = 'kind:upload' WHERE kind = 'upload';
   CREATE INDEX artifacts_ws_urlkey ON artifacts (workspace_id, url_key);
 
   CREATE TABLE artifact_captures (
@@ -701,6 +702,7 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE findings ADD COLUMN confirm_count INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE findings ADD COLUMN ttl_days INTEGER;
   ALTER TABLE findings ADD COLUMN upload_derived INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE findings ADD COLUMN upload_cause TEXT;
   ALTER TABLE findings ADD COLUMN lineage_conflict INTEGER NOT NULL DEFAULT 0;
   UPDATE findings SET lineage_id = id, first_seen_at = created_at,
     last_confirmed_at = CASE WHEN status = 'verified' THEN created_at END;
@@ -901,20 +903,34 @@ export const MIGRATIONS: readonly string[] = [
     UPDATE findings SET lineage_id = COALESCE(lineage_id, id), first_seen_at = COALESCE(first_seen_at, created_at)
       WHERE rowid = new.rowid AND (lineage_id IS NULL OR first_seen_at IS NULL);
     INSERT OR IGNORE INTO item_scopes (item_kind, item_id, workspace_id, source) VALUES ('fact', new.id, new.workspace_id, 'home');
-    UPDATE findings SET upload_derived = 1
-      WHERE rowid = new.rowid AND upload_derived = 0 AND (
-        EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
-                JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1)
-        OR EXISTS (SELECT 1 FROM findings p WHERE p.lineage_id = new.lineage_id AND p.version < new.version AND p.upload_derived = 1)
-      );
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+        SELECT 'evidence:' || a.id FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1 LIMIT 1))
+      WHERE rowid = new.rowid AND upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+        SELECT 'lineage:' || p.id FROM findings p
+        WHERE p.lineage_id = new.lineage_id AND p.version < new.version AND p.upload_derived = 1 ORDER BY p.version LIMIT 1))
+      WHERE rowid = new.rowid AND upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM findings p WHERE p.lineage_id = new.lineage_id AND p.version < new.version AND p.upload_derived = 1);
   END;
   CREATE TRIGGER artifacts_ks_insert AFTER INSERT ON artifacts BEGIN
     INSERT OR IGNORE INTO item_scopes (item_kind, item_id, workspace_id, source) VALUES ('artifact', new.id, new.workspace_id, 'home');
     INSERT OR IGNORE INTO artifact_texts (artifact_id, workspace_id, status) VALUES (new.id, new.workspace_id, 'pending');
-    UPDATE artifacts SET upload_derived = 1 WHERE rowid = new.rowid AND new.kind = 'upload' AND upload_derived = 0;
+    UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'kind:upload')
+      WHERE rowid = new.rowid AND new.kind = 'upload' AND upload_derived = 0;
   END;
 
-  -- upload_derived: sticky (never reset) and propagated.
+  -- upload_derived (design §12): sticky (never reset) and propagated. Sources of the flag:
+  --   artifacts: kind 'upload'; listed in a profile's uploads; text duplicate_of a flagged artifact.
+  --   chunks: their artifact.
+  --   findings: findings.evidence, finding_evidence, any fact_observations row (confirm / replace /
+  --   retract) citing a flagged artifact; an earlier flagged version of the lineage.
+  -- Records without a flag column (competitors, symptoms, hypotheses, personas, recommendations,
+  -- unit proposals) are resolved at read time from these flags (src/core/knowledge/provenance.ts).
+  -- upload_cause keeps the first cause: kind:upload | profile:<ws> | duplicate_of:<art> |
+  -- evidence:<art> | finding_evidence:<art> | observation:<obs> | lineage:<finding>.
   CREATE TRIGGER artifacts_upload_sticky BEFORE UPDATE OF upload_derived ON artifacts
     WHEN old.upload_derived = 1 AND new.upload_derived IS NOT 1
     BEGIN SELECT RAISE(ABORT, 'upload_derived is sticky'); END;
@@ -924,39 +940,74 @@ export const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER chunks_upload_sticky BEFORE UPDATE OF upload_derived ON chunks
     WHEN old.upload_derived = 1 AND new.upload_derived IS NOT 1
     BEGIN SELECT RAISE(ABORT, 'upload_derived is sticky'); END;
+
+  -- An artifact became upload-derived: flag its text duplicates first, then re-apply the general
+  -- rules (every dependent of every flagged artifact), so dependents of those duplicates are covered
+  -- although SQLite does not re-fire this trigger for the duplicates (recursive_triggers is off).
   CREATE TRIGGER artifacts_upload_cascade AFTER UPDATE OF upload_derived ON artifacts
     WHEN new.upload_derived = 1 AND old.upload_derived = 0
   BEGIN
-    UPDATE chunks SET upload_derived = 1 WHERE artifact_id = new.id AND upload_derived = 0;
-    UPDATE findings SET upload_derived = 1
-      WHERE upload_derived = 0 AND (
-        (instr(findings.evidence, new.id) > 0 AND EXISTS (
-          SELECT 1 FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j WHERE j.value = new.id))
-        OR EXISTS (SELECT 1 FROM finding_evidence fe WHERE fe.finding_id = findings.id AND fe.artifact_id = new.id)
-      );
-  END;
-  CREATE TRIGGER findings_upload_evidence AFTER UPDATE OF evidence ON findings
-    WHEN new.upload_derived = 0
-  BEGIN
-    UPDATE findings SET upload_derived = 1
-      WHERE rowid = new.rowid AND EXISTS (
-        SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+    UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'duplicate_of:' || new.id)
+      WHERE upload_derived = 0 AND id IN (SELECT artifact_id FROM artifact_texts WHERE duplicate_of = new.id);
+    UPDATE chunks SET upload_derived = 1
+      WHERE upload_derived = 0 AND artifact_id IN (SELECT id FROM artifacts WHERE upload_derived = 1);
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+        SELECT 'evidence:' || a.id FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1 LIMIT 1))
+      WHERE upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j
         JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+        SELECT 'finding_evidence:' || a.id FROM finding_evidence fe JOIN artifacts a ON a.id = fe.artifact_id
+        WHERE fe.finding_id = findings.id AND a.upload_derived = 1 ORDER BY fe.seq LIMIT 1))
+      WHERE upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM finding_evidence fe JOIN artifacts a ON a.id = fe.artifact_id
+        WHERE fe.finding_id = findings.id AND a.upload_derived = 1);
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+        SELECT 'observation:' || o.id FROM fact_observations o
+        JOIN json_each(CASE WHEN json_valid(o.evidence) THEN o.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value
+        WHERE o.finding_id = findings.id AND a.upload_derived = 1 ORDER BY o.rowid LIMIT 1))
+      WHERE upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM fact_observations o
+        JOIN json_each(CASE WHEN json_valid(o.evidence) THEN o.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value
+        WHERE o.finding_id = findings.id AND a.upload_derived = 1);
   END;
   CREATE TRIGGER findings_upload_lineage AFTER UPDATE OF upload_derived ON findings
     WHEN new.upload_derived = 1 AND old.upload_derived = 0
   BEGIN
-    UPDATE findings SET upload_derived = 1 WHERE lineage_id = new.lineage_id AND version > new.version AND upload_derived = 0;
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'lineage:' || new.id)
+      WHERE lineage_id = new.lineage_id AND version > new.version AND upload_derived = 0;
   END;
-  CREATE TRIGGER finding_evidence_upload AFTER INSERT ON finding_evidence BEGIN
-    UPDATE findings SET upload_derived = 1
+  CREATE TRIGGER findings_upload_evidence AFTER UPDATE OF evidence ON findings
+    WHEN new.upload_derived = 0
+  BEGIN
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, (
+        SELECT 'evidence:' || a.id FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1 LIMIT 1))
+      WHERE rowid = new.rowid AND EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
+  END;
+  CREATE TRIGGER finding_evidence_upload_insert AFTER INSERT ON finding_evidence BEGIN
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'finding_evidence:' || new.artifact_id)
       WHERE id = new.finding_id AND upload_derived = 0
         AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = new.artifact_id AND a.upload_derived = 1);
   END;
-  CREATE TRIGGER fact_observations_upload AFTER INSERT ON fact_observations
-    WHEN new.kind = 'confirm'
-  BEGIN
-    UPDATE findings SET upload_derived = 1
+  CREATE TRIGGER finding_evidence_upload_update AFTER UPDATE OF artifact_id, finding_id ON finding_evidence BEGIN
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'finding_evidence:' || new.artifact_id)
+      WHERE id = new.finding_id AND upload_derived = 0
+        AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = new.artifact_id AND a.upload_derived = 1);
+  END;
+  CREATE TRIGGER fact_observations_upload_insert AFTER INSERT ON fact_observations BEGIN
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'observation:' || new.id)
+      WHERE id = new.finding_id AND upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
+  END;
+  CREATE TRIGGER fact_observations_upload_update AFTER UPDATE OF evidence, finding_id ON fact_observations BEGIN
+    UPDATE findings SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'observation:' || new.id)
       WHERE id = new.finding_id AND upload_derived = 0 AND EXISTS (
         SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
         JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
@@ -967,15 +1018,29 @@ export const MIGRATIONS: readonly string[] = [
     UPDATE chunks SET upload_derived = 1
       WHERE rowid = new.rowid AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = new.artifact_id AND a.upload_derived = 1);
   END;
+  CREATE TRIGGER artifact_texts_upload_duplicate AFTER UPDATE OF duplicate_of ON artifact_texts
+    WHEN new.duplicate_of IS NOT NULL
+  BEGIN
+    UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'duplicate_of:' || new.duplicate_of)
+      WHERE id = new.artifact_id AND upload_derived = 0
+        AND EXISTS (SELECT 1 FROM artifacts c WHERE c.id = new.duplicate_of AND c.upload_derived = 1);
+  END;
+  CREATE TRIGGER artifact_texts_upload_duplicate_insert AFTER INSERT ON artifact_texts
+    WHEN new.duplicate_of IS NOT NULL
+  BEGIN
+    UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'duplicate_of:' || new.duplicate_of)
+      WHERE id = new.artifact_id AND upload_derived = 0
+        AND EXISTS (SELECT 1 FROM artifacts c WHERE c.id = new.duplicate_of AND c.upload_derived = 1);
+  END;
   CREATE TRIGGER profiles_uploads_insert AFTER INSERT ON profiles BEGIN
-    UPDATE artifacts SET upload_derived = 1
+    UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'profile:' || new.workspace_id)
       WHERE upload_derived = 0 AND id IN (SELECT value FROM json_each(
         CASE WHEN json_valid(new.data)
           THEN (CASE WHEN json_type(new.data, '$.uploads') = 'array' THEN json_extract(new.data, '$.uploads') ELSE '[]' END)
           ELSE '[]' END));
   END;
   CREATE TRIGGER profiles_uploads_update AFTER UPDATE OF data ON profiles BEGIN
-    UPDATE artifacts SET upload_derived = 1
+    UPDATE artifacts SET upload_derived = 1, upload_cause = COALESCE(upload_cause, 'profile:' || new.workspace_id)
       WHERE upload_derived = 0 AND id IN (SELECT value FROM json_each(
         CASE WHEN json_valid(new.data)
           THEN (CASE WHEN json_type(new.data, '$.uploads') = 'array' THEN json_extract(new.data, '$.uploads') ELSE '[]' END)
