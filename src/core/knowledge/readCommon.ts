@@ -249,7 +249,30 @@ export function cutServedText(s: string, max: number): string {
     return `${head}${capText(inner, Math.max(0, max - head.length - FENCE_CLOSE.length - 2))}\n${FENCE_CLOSE}`;
   }
   const cut = capText(s, Math.max(0, max));
-  return cut.endsWith('…') ? `${cut.slice(0, -1).replace(TRAILING_ANGLES, '')}…` : cut;
+  if (!cut.endsWith('…')) return cut;
+  return `${atTokenBoundary(s, cut.slice(0, -1)).replace(TRAILING_ANGLES, '')}…`;
+}
+
+const WORD = /[A-Za-z0-9_]/;
+/** An id-like token (`ent_01M7…`, `fnd_…`): never left half in a cut. */
+const ID_TOKEN = /^[a-z]+_[A-Za-z0-9]+$/;
+
+/**
+ * `prefix` (a cut of `s`) moved back to a token boundary (Opus finding 6): a cut never ends inside a
+ * word or an id (`[ent_…]`), and an opening bracket or separator left dangling is dropped. A plain word
+ * longer than everything kept is cut hard (there is no boundary); a lone id-like token is dropped whole.
+ */
+function atTokenBoundary(s: string, prefix: string): string {
+  let end = prefix.length;
+  if (end > 0 && end < s.length && WORD.test(s[end - 1]!) && WORD.test(s[end]!)) {
+    let start = end;
+    while (start > 0 && WORD.test(s[start - 1]!)) start--;
+    let stop = end;
+    while (stop < s.length && WORD.test(s[stop]!)) stop++;
+    const token = s.slice(start, stop);
+    if (start > 0 || ID_TOKEN.test(token)) end = start;
+  }
+  return s.slice(0, end).replace(/[\s[(,;:]+$/, '');
 }
 
 /**

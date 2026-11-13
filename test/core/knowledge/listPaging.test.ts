@@ -217,3 +217,17 @@ describe('list tool descriptions (ruling 5)', () => {
     }
   });
 });
+
+describe('shortened text never splits an id (Opus finding 6)', () => {
+  it('cuts at a token boundary: every id left in a cut line is whole', () => {
+    const ids = Array.from({ length: 6 }, (_, i) => `ent_01M7BD${'ABCDEFGHJK'.slice(i, i + 4)}QZ7537H4RHT1HW3G`);
+    const line = `competes_with ${ids.map((id, i) => `Rival company number ${i} [${id}]`).join(', ')}`;
+    for (let n = 20; n <= 120; n += 1) {
+      const s = shortenItem(line, (x) => estimateTokens(JSON.stringify(x)) <= n, { id: 'ent_card' }) as { text: string } | undefined;
+      if (!s) continue;
+      const text = s.text.replace(/…$/, '');
+      for (const m of text.matchAll(/[a-z]+_[A-Za-z0-9]*/g)) expect(ids.concat(['competes_with']), `n=${n}: ${text}`).toContain(m[0]);
+      expect(text.endsWith('[')).toBe(false);
+    }
+  });
+});
