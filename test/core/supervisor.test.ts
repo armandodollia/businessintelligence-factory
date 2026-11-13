@@ -333,8 +333,13 @@ describe('Supervisor fix round 1', () => {
     expect(store.agentRuns.list()).toHaveLength(1);
   });
 
+  // The idle watchdog starts at spawn: a window shorter than a loaded machine's node start-up kills
+  // the fake CLI before it writes child.pid / the counter (ENOENT under parallel test load). These
+  // two tests read those files, so they give the CLI a start-up margin.
+  const STARTUP_SAFE_IDLE_MS = 1500;
+
   it('reaps a SIGTERM-ignoring descendant before run() resolves', async () => {
-    const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = 300));
+    const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = STARTUP_SAFE_IDLE_MS));
     const res = await sup.run(cli({ lines: [CLAUDE_FIXTURE[0]!], sleepForever: true, stubbornChild: true }));
     expect(res).toMatchObject({ status: 'failed', reason: expect.stringMatching(/idle/) });
     const childPid = Number(readFileSync(join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd', 'child.pid'), 'utf8'));
@@ -344,11 +349,13 @@ describe('Supervisor fix round 1', () => {
   });
 
   it('idle-killed runs are not rate-limit retried', async () => {
-    const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = 200));
+    const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = STARTUP_SAFE_IDLE_MS));
     const counterFile = join(dir, 'count');
     const rejected = JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } });
     const res = await sup.run(cli({ counterFile, attempts: [{ lines: [rejected], sleepForever: true }] }));
     expect(res).toMatchObject({ status: 'failed', attempts: 1, reason: expect.stringMatching(/idle/) });
+    // Not vacuous: the rate-limit rejection was seen before the idle kill.
+    expect(res.events).toContainEqual(expect.objectContaining({ rateLimited: true }));
     expect(readFileSync(counterFile, 'utf8')).toBe('1');
   });
 
