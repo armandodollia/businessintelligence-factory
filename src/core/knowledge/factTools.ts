@@ -34,6 +34,7 @@ import {
 } from './facts.js';
 import { recordRetrieval } from './retrievalLog.js';
 import { inTree, notFound, setItemScopes, type KnowledgeScope } from './scope.js';
+import { capText, servedLine } from './texts.js';
 import { redactServed } from './trust.js';
 
 export type FactToolEnv = {
@@ -150,7 +151,7 @@ export async function verifyEvidenceRefs(
       if (!text) return { ok: false, error: `evidence_refs: artifact '${id}': ${NO_TEXT_ERROR}` };
       const q = squash(quote);
       if (!q || !squash(text.text).includes(q)) {
-        const shown = quote.length > 80 ? `${quote.slice(0, 80)}…` : quote;
+        const shown = capText(redactServed(env.store, workspaceId, quote), 80); // KS-4 gate: redact, then cut
         return { ok: false, error: `evidence_refs: quote not found in the extracted text of artifact '${id}' (whitespace-insensitive match): "${shown}"` };
       }
       row.quote = quote;
@@ -330,6 +331,9 @@ export async function saveFindingFact(
   return saveReplacement(env, ctx, task, input, relation.replaces, evidence, refs, appliesTo, opts, scope);
 }
 
+/** Longest candidate claim shown by the duplicate handshake (chars, after redaction). */
+export const CANDIDATE_CLAIM_MAX = 500;
+
 /** Candidate lines as the agent sees them (claims redacted like any served text). */
 function candidateView(store: Store, ctx: RunContext, c: FactCandidate, exact: boolean): Record<string, unknown> {
   const flags: string[] = [];
@@ -338,8 +342,9 @@ function candidateView(store: Store, ctx: RunContext, c: FactCandidate, exact: b
   if (c.uploadDerived) flags.push('upload');
   return {
     id: c.id,
-    claim: redactServed(store, ctx.workspaceId, c.claim),
-    subject: redactServed(store, ctx.workspaceId, c.subject),
+    // KS-4 gate: redacted whole, then cut (bounded like every served line).
+    claim: servedLine(store, ctx.workspaceId, c.claim, CANDIDATE_CLAIM_MAX),
+    subject: servedLine(store, ctx.workspaceId, c.subject, 200),
     last_confirmed: c.lastConfirmedAt ?? null,
     similarity: c.similarity,
     ...(c.workspaceId !== ctx.workspaceId ? { source_node: c.workspaceId } : {}),

@@ -24,6 +24,7 @@ import { scopeOf } from '../workspace/tree.js';
 import { ensureEntity, entityNameKey, findEntityByKey, survivorOf } from './entityKeys.js';
 import { entityIsUploadOnly, entityReferences } from './provenance.js';
 import { inTree, notFound, type KnowledgeScope } from './scope.js';
+import { redactServed } from './trust.js';
 
 /** An entity by id, or by kind and name (resolved or created in the caller's tree). */
 export type EntityRef = { id: string } | { kind: EntityKind; name: string };
@@ -68,6 +69,15 @@ export function cleanEntityName(name: string): string {
   return name.trim().replace(/\s+/g, ' ').slice(0, MAX_ENTITY_NAME_CHARS).trim();
 }
 
+/**
+ * KS-4 gate (redact before every cut): an agent-supplied name with the identity secrets of the tree
+ * redacted from the WHOLE text, then cleaned and cut to `MAX_ENTITY_NAME_CHARS` — a name cut first
+ * could be stored with half a secret that no later redaction recognises.
+ */
+export function cleanAgentEntityName(store: Store, rootId: string, name: string): string {
+  return cleanEntityName(redactServed(store, rootId, name));
+}
+
 const isEntityKind = (k: string): k is EntityKind => (ENTITY_KINDS as readonly string[]).includes(k);
 
 /** The entity `id` of the scope's tree, as its survivor. Unknown and out-of-tree ids: `notFound('entity', id)`. */
@@ -85,7 +95,7 @@ export function getEntity(store: Store, scope: KnowledgeScope, id: string): Enti
 export function resolveEntityDetailed(store: Store, scope: KnowledgeScope, ref: EntityRef, ctx: EntityContext = {}): EntityResolution {
   if ('id' in ref) return { entity: getEntity(store, scope, ref.id), created: false, suggestions: [] };
   if (!isEntityKind(ref.kind)) throw new Error(`unknown entity kind '${String(ref.kind)}'`);
-  const name = cleanEntityName(ref.name);
+  const name = cleanAgentEntityName(store, scope.rootId, ref.name);
   const key = entityNameKey(name);
   if (!key) throw new Error('entity name is empty');
   const found = findEntityByKey(store, scope.rootId, [ref.kind], key);
@@ -134,7 +144,7 @@ export function companyEntity(store: Store, scope: KnowledgeScope, workspaceId: 
  * entity (created on first use; the caller's own node first); else a `topic` entity.
  */
 export function subjectEntity(store: Store, scope: KnowledgeScope, subject: string, ctx: EntityContext = {}): EntityResolution {
-  const key = entityNameKey(cleanEntityName(subject));
+  const key = entityNameKey(cleanAgentEntityName(store, scope.rootId, subject));
   if (!key) throw new Error('subject is empty');
   const existing = findEntityByKey(store, scope.rootId, SUBJECT_KINDS, key);
   if (existing) return { entity: existing, created: false, suggestions: [] };
@@ -159,7 +169,7 @@ export function subjectEntity(store: Store, scope: KnowledgeScope, subject: stri
 export function lookupEntity(store: Store, scope: KnowledgeScope, ref: EntityRef): Entity | null {
   if ('id' in ref) return getEntity(store, scope, ref.id);
   if (!isEntityKind(ref.kind)) throw new Error(`unknown entity kind '${String(ref.kind)}'`);
-  const key = entityNameKey(cleanEntityName(ref.name));
+  const key = entityNameKey(cleanAgentEntityName(store, scope.rootId, ref.name));
   if (!key) throw new Error('entity name is empty');
   return findEntityByKey(store, scope.rootId, [ref.kind], key) ?? null;
 }
@@ -169,7 +179,7 @@ export function lookupEntity(store: Store, scope: KnowledgeScope, ref: EntityRef
  * entity — a node's company entity on first use, or a topic).
  */
 export function lookupSubjectEntity(store: Store, scope: KnowledgeScope, subject: string): Entity | null {
-  const key = entityNameKey(cleanEntityName(subject));
+  const key = entityNameKey(cleanAgentEntityName(store, scope.rootId, subject));
   if (!key) throw new Error('subject is empty');
   const existing = findEntityByKey(store, scope.rootId, SUBJECT_KINDS, key);
   if (existing) return existing;
@@ -426,7 +436,7 @@ export function renameEntity(
     const e = repo.get(entityId);
     if (!e || (opts.scope && e.rootWorkspaceId !== opts.scope.rootId)) throw notFound('entity', entityId);
     if (e.mergedIntoId) throw new EntityConflictError(`entity '${e.id}' was merged into '${e.mergedIntoId}'`);
-    const name = cleanEntityName(newName);
+    const name = cleanAgentEntityName(store, e.rootWorkspaceId, newName);
     const key = entityNameKey(name);
     if (!key) throw new Error('entity name is empty');
     const at = (opts.now ?? new Date()).toISOString();
