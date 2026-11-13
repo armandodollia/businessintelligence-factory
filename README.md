@@ -22,6 +22,10 @@ the agent CLIs call into, and a small React web app. Design spec:
      and workers per task type). Every role model must be listed under an enabled provider.
    - `loop`: review loop `maxRounds` / `passThreshold`, globally and per task type.
    - `limits`, `browser`, `identity`, `actionPolicy`, `scoring`, `server.port`, `dataDir`.
+   - `budgets` (optional): token / cost caps per workspace and per research pipeline, e.g.
+     `"budgets": { "workspace": { "maxCostUsd": 50 }, "pipeline": { "maxTokens": 20000000 } }`. Past a
+     cap no new agent run starts; a "Waiting on you" request asks to extend it by one more cap (deny
+     to stop; raising the cap in config lifts a denial). Without `budgets` there are no caps.
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -168,6 +172,20 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   priority overrides (never auto-applied). The Decision log page proposes prompt patches per role from
   your disagreements; you edit and approve them before they are written. Weight changes and patches
   are logged as decisions. The decision log plus ratings export as JSONL.
+- **Usage, cost and prompts.** Every agent run's token usage (input, output, cache read/write) is
+  stored with its cost, computed from the dated price table `src/core/harness/pricing.json` (USD per
+  1M tokens, editable — bump its `version` / `effectiveDate` when you change a price; the codex model
+  price is a marked placeholder) next to the cost the CLI itself reports. Runs also record attempts,
+  rate-limit back-offs, round, task type and why they failed. Every prompt version hash resolves to
+  its full text. The **Usage & prompts** page shows costs per role / model / prompt version / task,
+  budget status, a per-prompt-version trend (rating agreement, mean delta, review pass and
+  first-round pass rate), the calibration history of each role (revert to any earlier version; the
+  revert is logged as a decision) and every agent run with a paged event viewer. API:
+  `GET /api/costs[?workspaceId=]`, `GET /api/runs/:id`, `GET /api/runs/:id/events?offset=&limit=`,
+  `GET /api/prompts/:hash`, `GET /api/workspaces/:id/agent-runs`,
+  `GET /api/workspaces/:id/metrics/prompt-versions[?role=]`,
+  `GET /api/workspaces/:id/calibration/versions[?role=]`,
+  `POST /api/workspaces/:id/calibration/versions/:versionId/revert`.
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is
   diffed against the previous run of the same phase (new findings, subjects no longer found, changed
   screenshots), shown on the Research page.
@@ -181,8 +199,8 @@ Under `dataDir` (default `./data`, gitignored):
 | `data/bif.db` | SQLite: workspaces, interview, tasks, runs, findings, decisions, ratings, schedules, ... |
 | `data/<workspaceId>/artifacts/` | screenshots, page snapshots, documents and uploads (content-addressed by sha256) |
 | `data/<workspaceId>/personas/<persona>.md` | compiled persona prompt (latest version; `<persona>.v<N>.md` keeps each version) |
-| `data/<workspaceId>/runs/<agentRunId>/` | per-run working directory (`cwd/`) and event log (`events.jsonl`) |
-| `data/<rootWorkspaceId>/calibration/<role>.md` | approved prompt calibration patches of one business tree |
+| `data/<workspaceId>/runs/<agentRunId>/` | per-run working directory (`cwd/`), event log (`events.jsonl`) and the full prompt (`prompt.md`; `prompt.attemptN.md` per rate-limit retry) |
+| `data/<rootWorkspaceId>/calibration/<role>.md` | current approved prompt calibration of one business tree (every earlier version is kept in the database, `calibration_versions`) |
 | `data/browser-profile/` | the research browser profile (`browser.profileDir`) |
 
 Approved prompt patches are per business: they are merged (appended, deduplicated) into
