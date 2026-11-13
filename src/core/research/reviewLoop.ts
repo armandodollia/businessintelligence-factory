@@ -15,6 +15,9 @@ import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
 import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
+import { defaultConfig } from '../config/schema.js'; // KS-2
+import { reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
+import { recordRetrieval } from '../knowledge/retrievalLog.js'; // KS-2
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -45,6 +48,8 @@ export type ReviewContext = {
   evidence: string[];
   /** Prompt section with the content of the task's submitted outputs (empty when it has none). */
   outputs: string;
+  /** Knowledge store KS-2: prior claims, confirmations / retractions and quotes shown (logged as a read). */
+  knowledge?: ReviewFactContext;
 };
 
 /**
@@ -54,7 +59,7 @@ export type ReviewContext = {
  * recommendations, and the evidence artifact ids reachable from all of these. Nothing else of the
  * workspace is included.
  */
-export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): ReviewContext {
+export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): ReviewContext {
   const { store } = deps;
   const outputs = taskOutputs(store, task);
   const current = currentOutputIds(store, task, outputs);
@@ -140,7 +145,16 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): Re
         .join('\n')}`,
     );
   }
-  return { evidence: [...ids], outputs: sections.length ? `## Submitted outputs\n${sections.join('\n\n')}` : '' };
+  // --- knowledge store KS-2: lifecycle of the outputs, confirmations / retractions, verified quotes ---
+  const knowledge = reviewFactContext(store, deps.config ?? defaultConfig, task, findings);
+  for (const a of knowledge.evidence) ids.add(a);
+  if (knowledge.section) sections.push(knowledge.section);
+  // --- end KS-2 ---
+  return {
+    evidence: [...ids],
+    outputs: sections.length ? `## Submitted outputs\n${sections.join('\n\n')}` : '',
+    ...(knowledge.results.length ? { knowledge } : {}),
+  };
 }
 
 /** Evidence artifact ids of a task (see `reviewContext`). */
@@ -353,6 +367,17 @@ async function reviewStep(
     prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))), systemPrompt: system,
     model, needsBrowser: false, promptVersion: version,
   });
+  // Knowledge store KS-2: the prior claims and quotes in the reviewer's prompt are a read (design §12).
+  if (context.knowledge) {
+    recordRetrieval(
+      { store, events: deps.events },
+      { workspaceId: task.workspaceId, agentRunId: res.agentRunId, taskId: task.id, role: 'reviewer', model, promptVersion: version },
+      {
+        tool: 'prompt_context', query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: context.knowledge.results,
+        tokensReturned: context.knowledge.tokens, truncated: context.knowledge.truncated, latencyMs: 0, uploadDerived: context.knowledge.uploadDerived,
+      },
+    );
+  }
   throwIfAborted(deps.signal);
   const review = getRunOutputs(store, res.agentRunId).review;
   // A review counts only if the reviewer run itself finished successfully.
