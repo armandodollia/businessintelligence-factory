@@ -7,6 +7,7 @@ import { DecisionLog } from './DecisionLog.js';
 import { Findings } from './Findings.js';
 import { Interview } from './Interview.js';
 import { Knowledge } from './Knowledge.js'; // knowledge store KS-7
+import { Experiments } from './Experiments.js'; // learning loop WP-F
 import { PendingRequests } from './PendingRequests.js';
 import { Personas } from './Personas.js';
 import { Research } from './Research.js';
@@ -95,5 +96,7 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Usage wsId={wsId} />;
     case 'knowledge': // knowledge store KS-7
       return <Knowledge wsId={wsId} />;
+    case 'experiments': // learning loop WP-F
+      return <Experiments wsId={wsId} />;
   }
 }

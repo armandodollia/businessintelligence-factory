@@ -344,3 +344,25 @@ export interface RevertedCalibration {
 // learning loop WP-C: decision outcomes report (`GET .../outcomes`)
 
 export type { OutcomeLabel, OutcomeReport, OutcomeReportRow } from '../../../src/core/learning/types.js';
+
+// --- learning loop WP-F: reviewer audits and experiments --------------------------------------
+export type {
+  ArmResult,
+  AuditMiss,
+  AuditSchedule,
+  AuditSummary,
+  AuditVerdict,
+  Experiment,
+  ExperimentComparison,
+  ReviewerAudit,
+} from '../../../src/core/learning/wpfTypes.js';
+/** `GET /api/workspaces/:id/audits`: the business tree's audits (newest first), summary and schedules. */
+export type AuditsView = {
+  rootWorkspaceId: string;
+  summary: import('../../../src/core/learning/wpfTypes.js').AuditSummary;
+  audits: import('../../../src/core/learning/wpfTypes.js').ReviewerAudit[];
+  schedules: import('../../../src/core/learning/wpfTypes.js').AuditSchedule[];
+};
+export type ExperimentArmInput = { model?: import('../../../src/core/config/schema.js').ModelRef; promptVersion?: string; promptText?: string };
+export type NewExperiment = { taskId: string; name?: string; repeats?: number; arms: [ExperimentArmInput, ExperimentArmInput] };
+// --- end WP-F ---------------------------------------------------------------------------------
