@@ -11,6 +11,7 @@ import { resolveTarget } from './ratings.js';
 // Learning loop WP-A: feedback signals (include overrides, unit proposal decisions) count in calibration.
 import { ratingsWithSignals, signalDelta } from '../feedback/signals.js';
 import { lessonsAppendix, type LessonsTarget } from '../learning/lessons/appendix.js'; // learning loop WP-E
+import { experimentTaskIds, isTaggedDecision, taggedRunIds } from '../learning/runTags.js'; // ruling R3
 
 export type CalibrationRow = { targetType: TargetType; criterion: string; n: number; agreeRate: number; meanDelta: number };
 /**
@@ -65,9 +66,9 @@ const round = (v: number, d = 3) => Math.round(v * 10 ** d) / 10 ** d;
  * mean of `normalizedDelta` (user − agent as a signed fraction of the criterion's scale span: 1-5 →
  * /4, pct → fraction points, trend → /2, range → relative) over comparable ratings; an agree is 0.
  */
-export function calibrationReport(workspaceId: string, deps: { store: Store }): CalibrationReport {
+export function calibrationReport(workspaceId: string, deps: { store: Store }, opts: CalibrationOptions = {}): CalibrationReport {
   const { store } = deps;
-  const ratings = ratingsWithSignals(store, workspaceId);
+  const ratings = calibrationRatings(store, workspaceId, opts);
   const byCriterion = groupRows(ratings, (r) => `${r.targetType}\u0000${r.criterion}`).map(({ first, rows }) =>
     summarize(first.targetType, first.criterion, rows),
   );
@@ -132,6 +133,48 @@ function summarize(targetType: TargetType, criterion: string, ratings: Rating[])
     meanDelta: deltas.length ? round(deltas.reduce((a, b) => a + b, 0) / deltas.length) : 0,
   };
 }
+
+// --- ruling R3 (wave 2): experiment and audit judgments stay out of calibration -------------------
+export type CalibrationOptions = {
+  /** Count ratings of experiment and reviewer-audit judgments too (default false). */
+  includeExperiments?: boolean;
+};
+
+/**
+ * The ratings calibration learns from (`ratingsWithSignals`), without ratings of experiment and
+ * reviewer-audit judgments unless `includeExperiments` (ruling R3). A rating is such a judgment's when
+ * the run it rated is tagged (WP-F `taggedRunIds`), when it rates a tagged decision, when the item it
+ * rates was first judged by a tagged run, or when the item belongs to an experiment arm task. The
+ * experiment's own arm comparison (`compareExperiment`) reads ratings directly and still counts them.
+ */
+export function calibrationRatings(store: Store, workspaceId: string, opts: CalibrationOptions = {}): Rating[] {
+  const ratings = ratingsWithSignals(store, workspaceId);
+  if (opts.includeExperiments) return ratings;
+  const tagged = taggedRunIds(store);
+  const armTasks = experimentTaskIds(store);
+  if (!tagged.size && !armTasks.size) return ratings;
+  const judgedBy = judgingRuns(store, workspaceId);
+  const runTask = (runId: string | undefined) => (runId ? store.agentRuns.get(runId)?.taskId : undefined);
+  const itemTask = (r: Rating): string | undefined => {
+    switch (r.targetType) {
+      case 'finding':
+        return store.findings.get(r.targetId)?.taskId;
+      case 'decision':
+        return runTask(store.decisions.get(r.targetId)?.agentRunId);
+      default:
+        return runTask(judgedBy.get(r.targetId));
+    }
+  };
+  return ratings.filter((r) => {
+    if (r.agentRunId && tagged.has(r.agentRunId)) return false;
+    if (r.targetType === 'decision' && isTaggedDecision(store, r.targetId)) return false;
+    const judge = judgedBy.get(r.targetId);
+    if (judge && tagged.has(judge)) return false;
+    const task = itemTask(r);
+    return !(task && armTasks.has(task));
+  });
+}
+// --- end ruling R3 ---------------------------------------------------------------------------------
 
 const SUBJECT_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
 
@@ -332,13 +375,13 @@ const fmt = (v: unknown) => (v === undefined || v === null ? '(none)' : typeof v
  * role produced (deltas normalized per scale so criteria are comparable), formatted as a few-shot
  * "Calibration examples" block. `patchText` is '' when there is nothing to calibrate.
  */
-export function proposePromptPatch(workspaceId: string, role: Role, deps: { store: Store }): PromptPatch {
+export function proposePromptPatch(workspaceId: string, role: Role, deps: { store: Store }, opts: CalibrationOptions = {}): PromptPatch {
   const { store } = deps;
   // The user's current view only: the latest rating per (target, criterion); if that is an agree,
   // the earlier disagreement no longer stands. `priority` is computed by the harness from weights,
   // not judged by the agent, so it is never a prompt example (it feeds proposeWeights instead).
   const latest = new Map<string, Rating>();
-  for (const r of ratingsWithSignals(store, workspaceId)) {
+  for (const r of calibrationRatings(store, workspaceId, opts)) {
     if (r.targetType === 'recommendation' && r.criterion === 'priority') continue;
     const key = `${r.targetType}\u0000${r.targetId}\u0000${r.criterion}`;
     latest.delete(key);
