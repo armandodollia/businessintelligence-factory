@@ -11,6 +11,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { addRelation } from '../../../src/core/knowledge/relations.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
+import { orchestratorBriefing } from '../../../src/core/knowledge/briefing.js';
+import { crossNodeCausalEdges } from '../../../src/core/knowledge/readCommon.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { ks4 } from './ks4fixture.js';
 
@@ -146,5 +148,37 @@ describe('search: "elsewhere in the business" count', () => {
     expect(r.hits.length).toBeGreaterThan(0);
     // The first page carries the line when it fits beside the hits; later pages do not repeat it.
     expect((r.notes ?? []).some((n) => n.includes('elsewhere'))).toBe(true);
+  });
+});
+
+describe('integration: KS-5 briefings and KS-7 cards share one causal-edge rule', () => {
+  it('the company briefing lists exactly the causal edges a symptom / cause card lists tree-wide, with the same logging', async () => {
+    const w = world();
+    const sc = scopeFor(w.t.store, 'ws_a');
+    // A causal type between two non-causal kinds across nodes: no card shows it in node scope, so no briefing may either.
+    const topicFact = w.t.fact('ws_d', 'Freeze addresses budget', { entityId: w.topic.id });
+    const budget = resolveEntity(w.t.store, sc, { kind: 'topic', name: 'Budget overrun' }, { workspaceId: 'ws_c' });
+    const nonCausal = addRelation(w.t.store, sc, { from: w.topic.id, type: 'addresses', to: budget.id, sourceKind: 'fact', sourceId: topicFact.id });
+    const edges = crossNodeCausalEdges(w.t.store, sc);
+    expect(edges.map((e) => e.relation.id)).toEqual([w.causes.id, w.addresses.id]);
+    expect(edges.map((e) => e.relation.id)).not.toContain(nonCausal.id);
+
+    const env = { store: w.t.store, config: w.t.config, now: new Date() };
+    const b = orchestratorBriefing(env, { workspaceId: 'ws_a', phase: 'deep_dives' });
+    // KS-5 label kept: endpoints, type, source node and the asserting record.
+    expect(b.section).toContain(`Slow HR approvals [${w.cause.id}] causes Checkout abandonment [${w.symptom.id}] (source ws_d: fact ${w.hrCause.id})`);
+    expect(b.section).not.toMatch(/Hiring freeze \[ent_[^\]]+\] addresses Budget overrun/);
+    // Logging: both ends, the edge and the record asserting it (as the card logs them).
+    const ids = b.results.map((r) => r.id);
+    expect(ids).toEqual(expect.arrayContaining([w.cause.id, w.symptom.id, w.causes.id, w.hrCause.id, w.addresses.id]));
+    expect(ids).not.toContain(nonCausal.id);
+
+    // Every edge in the briefing is listed on the symptom's node-scoped card from the symptom's own node.
+    const card = await w.t.call<Card>(w.t.ctx('ws_c'), 'get_card', { entity_id: w.symptom.id });
+    const text = card.lines.join('\n');
+    for (const e of edges) {
+      const other = e.to.id === w.symptom.id ? e.from : e.to;
+      expect(text).toContain(`${other.name} [${other.id}] (source ${e.sourceWorkspaceId})`);
+    }
   });
 });

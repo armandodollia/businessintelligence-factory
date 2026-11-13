@@ -33,11 +33,13 @@ import { getEntity, lookupSubjectEntity } from './entities.js';
 import { factFreshness, factScope, recordStaleOutcome, type Freshness } from './facts.js';
 import type { PromptRead } from './promptReads.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
-import { anyUploadDerived, artifactVisibleSql, day, factVisibleSql, recordVisibleSql, uniqueRefs, visParams, type ReadEnv } from './readCommon.js';
+import {
+  anyUploadDerived, artifactVisibleSql, crossNodeCausalEdges, day, factVisibleSql, recordVisibleSql, uniqueRefs, visParams, type ReadEnv,
+} from './readCommon.js';
 import type { KnowledgeScope } from './scope.js';
 import { servedLine } from './texts.js';
 import { fenceEvidence } from './trust.js';
-import { factUsableSql, outputUsableSql, SOURCE_TABLES, sourceUsableSql } from './usable.js';
+import { factUsableSql, outputUsableSql } from './usable.js';
 
 // ---------------------------------------------------------------------------
 // fitting (the degrade ladder)
@@ -400,43 +402,8 @@ function changeLines(env: ReadEnv, since: string, max: number): BriefLine[] {
   return lines;
 }
 
-// --- KS-5 local helper (user ruling): cross-node causal edges. KS-7 adds the `causes` / `addresses`
-// tree-wide exception to `aroundVisible`; integration may replace this helper with that query. -------
-export type CausalEdge = { type: 'causes' | 'addresses'; from: Entity; to: Entity; sourceKind: string; sourceId: string; sourceWorkspaceId: string };
-
-/**
- * Live `causes` / `addresses` edges of the scope's WHOLE tree that span more than one node (the two
- * entities' home nodes and the asserting record's node are not all the same), oldest first. Tree-wide
- * on purpose (user ruling: nothing in a tree is confidential from other nodes of the same tree).
- */
-export function crossNodeCausalEdges(store: Store, scope: KnowledgeScope, max = 50): CausalEdge[] {
-  const rows = store.db
-    .prepare(
-      `SELECT r.from_entity_id AS f, r.to_entity_id AS t, r.type AS type, r.source_kind AS sk, r.source_id AS sid FROM relations r
-       WHERE r.root_workspace_id = ? AND r.type IN ('causes', 'addresses') AND ${sourceUsableSql('r.source_kind', 'r.source_id')} = 1
-       ORDER BY r.rowid`,
-    )
-    .all(scope.rootId) as Array<{ f: string; t: string; type: 'causes' | 'addresses'; sk: string; sid: string }>;
-  const out: CausalEdge[] = [];
-  for (const r of rows) {
-    const table = SOURCE_TABLES[r.sk as keyof typeof SOURCE_TABLES];
-    const src = table ? (store.db.prepare(`SELECT workspace_id AS w FROM ${table} WHERE id = ?`).get(r.sid) as { w: string } | undefined) : undefined;
-    if (!src || !scope.treeIds.includes(src.w)) continue;
-    let from: Entity;
-    let to: Entity;
-    try {
-      from = getEntity(store, scope, r.f);
-      to = getEntity(store, scope, r.t);
-    } catch {
-      continue;
-    }
-    if (new Set([from.workspaceId, to.workspaceId, src.w]).size < 2) continue;
-    out.push({ type: r.type, from, to, sourceKind: r.sk, sourceId: r.sid, sourceWorkspaceId: src.w });
-    if (out.length >= max) break;
-  }
-  return out;
-}
-// --- end KS-5 local helper ----------------------------------------------------------------------
+// Cross-node causal edges (KS-5 user ruling) come from `crossNodeCausalEdges` (readCommon.ts), the same
+// rule KS-7's cards apply through `aroundVisible` (`causalEdgeShown`).
 
 const REF_KIND: Record<string, string> = { fact: 'fact', artifact: 'artifact' };
 
@@ -446,7 +413,11 @@ function causalLines(env: ReadEnv, max: number): BriefLine[] {
     const upload = entityIsUploadOnly(env.store, e.from.id) || entityIsUploadOnly(env.store, e.to.id) || itemIsUploadDerived(env.store, e.sourceId);
     return {
       text: `- ${servedLine(env.store, ws, e.from.name, 120)} [${e.from.id}] ${e.type} ${servedLine(env.store, ws, e.to.name, 120)} [${e.to.id}] (source ${e.sourceWorkspaceId}: ${e.sourceKind} ${e.sourceId})${upload ? ' [upload]' : ''}`,
-      refs: [{ id: e.from.id, kind: 'entity' }, { id: e.to.id, kind: 'entity' }, { id: e.sourceId, kind: REF_KIND[e.sourceKind] ?? 'record' }],
+      // Logged like a card's causal edge (KS-7): both ends, the edge and the record asserting it.
+      refs: [
+        { id: e.from.id, kind: 'entity' }, { id: e.to.id, kind: 'entity' }, { id: e.relation.id, kind: 'relation' },
+        { id: e.sourceId, kind: REF_KIND[e.sourceKind] ?? 'record' },
+      ],
       upload,
     };
   });

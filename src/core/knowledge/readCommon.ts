@@ -18,8 +18,9 @@ import { encodeCursor, decodeCursor, estimateTokens, fitToBudget } from './budge
 import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { artifactVisible, canonicalArtifactId } from './texts.js';
-import type { Entity, EntityKind, Relation, RelationType } from '../types.js';
-import { sourceVisibleSql } from './usable.js';
+import type { Entity, EntityKind, Relation, RelationSourceKind, RelationType } from '../types.js';
+import { getEntity } from './entities.js';
+import { SOURCE_TABLES, sourceUsableSql, sourceVisibleSql } from './usable.js';
 
 /** Who reads and with what limits. */
 export type ReadEnv = {
@@ -301,6 +302,73 @@ export function isCrossNodeCausal(relation: Pick<Relation, 'type'>, anchor: Pick
   return CAUSAL_RELATION_TYPES.includes(relation.type) && CAUSAL_ANCHOR_KINDS.includes(anchor.kind);
 }
 
+/**
+ * Whether a relation is shown around `anchor` by the named causal case (decision 15): a causal type
+ * around a symptom / cause entity, asserted by a record anywhere in the tree. The ONE rule for causal
+ * edges: `aroundVisible` (cards, `expand`) and `crossNodeCausalEdges` (KS-5 briefings) both call it.
+ */
+export function causalEdgeShown(store: Store, scope: KnowledgeScope, relation: Relation, anchor: Pick<Entity, 'kind'>): boolean {
+  return relation.rootWorkspaceId === scope.rootId && isCrossNodeCausal(relation, anchor) && relationSourceVisible(store, scope, 'tree', relation);
+}
+
+/** Node of the record asserting an edge (its "source node", used for every `source` label of an edge). */
+export function relationSourceNode(store: Store, r: Pick<Relation, 'sourceKind' | 'sourceId'>): string | undefined {
+  const table = SOURCE_TABLES[r.sourceKind as keyof typeof SOURCE_TABLES];
+  if (!table) return undefined;
+  const row = store.db.prepare(`SELECT workspace_id AS w FROM ${table} WHERE id = ?`).get(r.sourceId) as { w: string } | undefined;
+  return row?.w;
+}
+
+/** A causal edge listed tree-wide: its endpoints (survivors) and the node of the record asserting it. */
+export type CausalEdge = {
+  relation: Relation;
+  type: RelationType;
+  from: Entity;
+  to: Entity;
+  sourceKind: RelationSourceKind;
+  sourceId: string;
+  sourceWorkspaceId: string;
+};
+
+/**
+ * Live causal edges of the scope's WHOLE tree that span more than one node (the two entities' home
+ * nodes and the asserting record's node are not all the same), oldest first — for the company-level
+ * briefing (KS-5 user ruling). An edge is kept only when `causalEdgeShown` holds around one of its
+ * ends, so the briefing lists exactly what the cards of those entities list in node scope (KS-7).
+ */
+export function crossNodeCausalEdges(store: Store, scope: KnowledgeScope, max = 50): CausalEdge[] {
+  const rows = store.db
+    .prepare(
+      `SELECT r.id, r.root_workspace_id AS root, r.from_entity_id AS f, r.to_entity_id AS t, r.type, r.source_kind AS sk,
+              r.source_id AS sid, r.created_at AS at
+       FROM relations r
+       WHERE r.root_workspace_id = ? AND r.type IN (SELECT value FROM json_each(?)) AND ${sourceUsableSql('r.source_kind', 'r.source_id')} = 1
+       ORDER BY r.rowid`,
+    )
+    .all(scope.rootId, JSON.stringify(CAUSAL_RELATION_TYPES)) as Array<Record<string, string>>;
+  const out: CausalEdge[] = [];
+  for (const r of rows) {
+    const relation: Relation = {
+      id: r.id!, rootWorkspaceId: r.root!, fromEntityId: r.f!, type: r.type as RelationType, toEntityId: r.t!,
+      sourceKind: r.sk as RelationSourceKind, sourceId: r.sid!, createdAt: r.at!,
+    };
+    let from: Entity;
+    let to: Entity;
+    try {
+      from = getEntity(store, scope, relation.fromEntityId);
+      to = getEntity(store, scope, relation.toEntityId);
+    } catch {
+      continue;
+    }
+    if (!causalEdgeShown(store, scope, relation, from) && !causalEdgeShown(store, scope, relation, to)) continue;
+    const src = relationSourceNode(store, relation);
+    if (!src || new Set([from.workspaceId, to.workspaceId, src]).size < 2) continue;
+    out.push({ relation, type: relation.type, from, to, sourceKind: relation.sourceKind, sourceId: relation.sourceId, sourceWorkspaceId: src });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 /** Whether the record asserting an edge is visible from the active ids of `mode` (design §7.1). */
 function relationSourceVisible(store: Store, scope: KnowledgeScope, mode: ScopeMode, r: Relation): boolean {
   const row = store.db
@@ -331,10 +399,10 @@ export function aroundVisible(env: ReadEnv, item: AroundItem): boolean {
     case 'entity':
       return entityVisibleIn(store, scope, mode, item.entity);
     case 'relation':
-      // Same tree always; then the named case: causal edges around a symptom / cause cross nodes.
+      // Same tree always; then the named case (`causalEdgeShown`): causal edges around a symptom / cause cross nodes.
       if (item.relation.rootWorkspaceId !== scope.rootId) return false;
-      if (mode === 'tree' || isCrossNodeCausal(item.relation, item.anchor)) return relationSourceVisible(store, scope, 'tree', item.relation);
-      return relationSourceVisible(store, scope, mode, item.relation);
+      if (mode === 'tree') return relationSourceVisible(store, scope, 'tree', item.relation);
+      return causalEdgeShown(store, scope, item.relation, item.anchor) || relationSourceVisible(store, scope, mode, item.relation);
   }
 }
 

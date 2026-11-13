@@ -22,9 +22,10 @@ import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { entityNames, getEntity } from './entities.js';
 import { factFreshness } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
-import { aroundVisible, artifactVisibleSql, day, factVisibleSql, isCrossNodeCausal, recordVisibleSql, visParams, type ReadEnv } from './readCommon.js';
+import {
+  aroundVisible, artifactVisibleSql, day, factVisibleSql, isCrossNodeCausal, recordVisibleSql, relationSourceNode, visParams, type ReadEnv,
+} from './readCommon.js';
 import { neighbours, type Edge } from './relations.js';
-import { SOURCE_TABLES } from './usable.js';
 import type { KnowledgeScope, ScopeMode } from './scope.js';
 import { servedLine } from './texts.js';
 import { factUsableSql, outputUsableSql } from './usable.js';
@@ -160,12 +161,6 @@ function changeLines(store: Store, view: KnowledgeScope, mode: ScopeMode, group:
   }));
 }
 
-/** Home node of the record asserting an edge (its "source node"). */
-function edgeSourceNode(store: Store, e: Edge): string | undefined {
-  const row = store.db.prepare(`SELECT workspace_id AS w FROM ${SOURCE_TABLES[e.sourceKind]} WHERE id = ?`).get(e.sourceId) as { w: string } | undefined;
-  return row?.w;
-}
-
 /**
  * Relation lines of an entity card. Which edges are listed is decided by `aroundVisible` (the request's
  * scope; its named causal case lists `causes` / `addresses` around a symptom or cause entity
@@ -192,7 +187,7 @@ function relationLines(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, surv
     for (const { other, edge } of others.slice(0, CARD_MAX_NAMES_PER_TYPE)) {
       const n = otherName(env, other);
       if (!n) continue;
-      const src = edgeSourceNode(env.store, edge);
+      const src = relationSourceNode(env.store, edge);
       const label = src && src !== env.scope.workspaceId ? ` (source ${src})` : '';
       const causal = isCrossNodeCausal(edge, survivor);
       names.push({

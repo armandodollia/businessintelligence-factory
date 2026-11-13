@@ -6,10 +6,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { estimateTokens } from '../../../src/core/knowledge/budget.js';
 import {
-  crossNodeCausalEdges, fitBriefing, orchestratorBriefing, synthesisBriefing, TREE_WIDE_CAUSES, UNTRUSTED_RULE, workerBriefing,
+  fitBriefing, orchestratorBriefing, synthesisBriefing, TREE_WIDE_CAUSES, UNTRUSTED_RULE, workerBriefing,
   type BriefLine,
 } from '../../../src/core/knowledge/briefing.js';
 import { resolveEntity } from '../../../src/core/knowledge/entities.js';
+import { crossNodeCausalEdges } from '../../../src/core/knowledge/readCommon.js';
 import { addRelation } from '../../../src/core/knowledge/relations.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import { listOutcomes } from '../../../src/core/learning/outcomes.js';
