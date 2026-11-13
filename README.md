@@ -189,6 +189,14 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.
+- **Evidence text (knowledge store).** Every save of an artifact (and every upload) is recorded as a
+  capture (who, which run and task, URL, flow step), even when the bytes are identical to an earlier
+  save. Text is extracted in-process from HTML, PDF, docx, pptx, xlsx, csv, markdown, JSON and text
+  (small files at once, larger ones on a background queue that resumes after a restart), with
+  identity passwords redacted, and split into searchable passages. A document with the same text as
+  an earlier one of the business tree points at it instead of being indexed twice. Screenshots and
+  images saved by agents need a `description` (≥ `knowledge.captions.minChars`, default 20
+  characters); images without one (e.g. uploads) can be described later with `describe_artifact`.
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.

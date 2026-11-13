@@ -102,6 +102,10 @@ Start with Claude Code and Codex; OpenCode third. Every raw event stream is pers
 ### 6.2 Harness MCP server (tools every agent gets)
 - `log_decision({ what, why, alternatives[], signals_positive[], signals_negative[], confidence })`
 - `save_artifact({ kind: screenshot|page_snapshot|document|text, ... }) → artifactId`
+  (knowledge store KS-1: also `description` — required for screenshots and images —, `entity`, `applies_to`;
+  returns `{ artifactId, sha256, captureId, extraction }`; every save records a capture; see
+  `2026-11-13-knowledge-store-design.md` §8.1)
+- `describe_artifact({ artifact_id, description })` (knowledge store KS-1)
 - `save_finding({ claim, subject, criteria{...}, evidence: artifactId[] })` — **rejected if `evidence` is empty or references unknown artifacts**
 - `propose_tasks([...])` — orchestrator only (§7)
 - `submit_result({...})` — worker deliverable

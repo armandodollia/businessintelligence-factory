@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { modelRefSchema, taskTypeSchema } from '../../config/schema.js';
+import { entityKindSchema, modelRefSchema, taskTypeSchema } from '../../config/schema.js';
 import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
 import type { Role } from '../../types.js';
 
@@ -26,6 +26,8 @@ export const TOOL_NAMES = [
   'save_hypothesis',
   // WP-D
   'submit_escalation',
+  // Knowledge store KS-1
+  'describe_artifact',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -51,6 +53,10 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   // WP-D: the escalation agent only reads evidence and asks the user multiple-choice questions.
   escalation: ['log_decision', 'read_artifact', 'submit_escalation'],
 };
+
+// --- Knowledge store KS-1: describe_artifact (design §9) ------------------------------------------
+for (const role of ['worker', 'orchestrator', 'interviewer', 'synthesizer'] as const) ROLE_TOOLS[role].push('describe_artifact');
+// --- end KS-1 ------------------------------------------------------------------------------------
 
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
 export type IssueClass = (typeof ISSUE_CLASSES)[number];
@@ -97,6 +103,23 @@ export const toolInputSchemas = {
       flow: z.string().optional().describe('Flow name for walkthroughs, e.g. signup'),
       step: z.number().int().min(0).optional().describe('Step index within the flow'),
       note: z.string().optional(),
+      // Knowledge store KS-1 (design §8.1, §9)
+      description: z
+        .string()
+        .optional()
+        .describe(
+          'What is on it that matters: page purpose, visible prices, plan names, button labels, error text. ' +
+            'Required for screenshots and images (at least 20 characters)',
+        ),
+      entity: z
+        .union([id, z.object({ kind: entityKindSchema, name: z.string().min(1) })])
+        .optional()
+        .describe('What the artifact is about: an entity id, or { kind, name } (found or created in this business tree)'),
+      applies_to: z
+        .array(id)
+        .min(1)
+        .optional()
+        .describe('Workspace ids of this business tree the artifact is about, when not your own node (replaces the default label)'),
     })
     .refine(
       (v) => [v.content, v.content_base64, v.file_path].filter((x) => x !== undefined).length === 1,
@@ -245,13 +268,23 @@ export const toolInputSchemas = {
       .max(3)
       .describe('0–3 questions; an empty list when the user cannot help'),
   }),
+  // Knowledge store KS-1 (design §8.1, §9)
+  describe_artifact: z.object({
+    artifact_id: id,
+    description: z
+      .string()
+      .min(1)
+      .describe('What is on it that matters: page purpose, visible prices, plan names, button labels, error text (at least 20 characters)'),
+  }),
 } satisfies Record<ToolName, z.ZodType>;
 
 export type ToolInput<N extends ToolName> = z.output<(typeof toolInputSchemas)[N]>;
 
 export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   log_decision: 'Record a judgment call (what, why, alternatives, signals, confidence) in the decision log.',
-  save_artifact: 'Store evidence (screenshot, page snapshot, document or text). Returns artifactId.',
+  save_artifact:
+    'Store evidence (screenshot, page snapshot, document or text). Screenshots and images need a description. ' +
+    'Returns artifactId, captureId and the text extraction status.',
   read_artifact: 'Read a stored evidence artifact by id (text content, or the image for screenshots).',
   save_finding:
     'Save a finding. Rejected unless evidence lists at least one artifact saved in this workspace.',
@@ -279,6 +312,9 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Save a hypothesis about the cause of an interview symptom (confidence 0–100, evidence); the interviewer asks the user about it.',
   submit_escalation:
     'Ask the user 0–3 multiple-choice questions (2–4 options each, one recommended) about a task that ended unverified or failed. Call once.',
+  // Knowledge store KS-1
+  describe_artifact:
+    'Add a description to an artifact that has none (e.g. an uploaded image), or replace the description of one you saved in this run.',
 };
 
 /** JSON Schema of a tool's input as agents should send it (defaults shown as optional). */

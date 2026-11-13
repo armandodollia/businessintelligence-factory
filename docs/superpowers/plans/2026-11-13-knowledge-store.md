@@ -672,3 +672,69 @@ KS-0 passed its gate (Sol 9/10) at 68c744f.
    reference makes it publicly attested. Route entity ids through it in exposure
    checks. On merge, an alias taken from an upload-only entity keeps that status
    (representation is the builder's call). Merge suggestions follow the same rule.
+
+## KS-1 builder notes
+
+Smaller decisions taken while building KS-1 (none changes §3, §9 or §12). No migration added.
+
+- **Files:** `knowledge/ingest.ts` (pipeline, `Ingestor`, `ingestorFor`), `knowledge/texts.ts`
+  (serve-side helpers for KS-2 / KS-4), `knowledge/artifactTools.ts` (knowledge parts of
+  `save_artifact` / `describe_artifact`; `handlers.ts` keeps file handling and calls them).
+- **Captures:** `ArtifactStore.capture` / `captureFromPath` return `{ artifact, captureId, created }`;
+  `save` / `saveFromPath` keep returning the artifact. The sha lookup, artifact row and capture row
+  are one `BEGIN IMMEDIATE` transaction. Only `description` is filled on a later save (as the plan
+  says); `url_key`, title, flow etc. stay first-save on the artifact and per-save on the capture.
+- **Index-time sanitizing of labels:** title, note, flow and description are redacted
+  (`redactServed`, the whole tree's secrets) and fence-stripped before they are stored, so
+  `artifacts_fts` never indexes a secret; `source_url` is only redacted.
+- **Ingest:** blocks are redacted, fence-stripped and re-normalized *before* hashing and chunking, so
+  `content_sha256`, chunk text and chunk offsets all refer to the same sanitized text. `ok` with no
+  text left after sanitizing becomes `empty`. Only `pending` rows are ingested (no re-extraction path
+  in v1; an extractor version bump needs one, and must re-point duplicates of a canonical whose hash
+  changes). The duplicate check runs inside the write transaction (concurrent ingests of equal text
+  cannot both become canonical), considers only canonical rows (`duplicate_of IS NULL`, status
+  `ok`/`too_large`) of the same tree, picks the oldest (`artifacts.rowid`), and an artifact that is
+  already someone's target never becomes a duplicate. Chunk ids `chk_…`.
+- **Upload flag on duplicates:** the migration-18 triggers flag a duplicate whose canonical is (or
+  later becomes) upload-derived; a duplicate that is itself an upload is flagged by its kind while a
+  public canonical stays public. Served text for artifact X therefore carries X's flag OR the
+  chunk's (`servedTextState.uploadDerived`). **KS-4:** list the artifact asked for in `result_ids`,
+  not only the canonical's chunk ids; capture rows have no flag — serve a capture's description
+  under its artifact's flag (an agent saving bytes identical to an upload captures onto the upload).
+- **Errors:** stored one line, redacted, fence-stripped, capped at `SERVED_ERROR_MAX_CHARS` (300);
+  served only by `servedTextState(store, scope, id, mode)` after the artifact's scope check, through
+  `serveEvidenceText` (redact again with current identities → cap → fence) with `contentTrust`.
+  Known limit: KS-1a cuts its message at 300 chars and `extract` cuts text at `maxTextChars` before
+  redaction runs, so a secret straddling either cut could leave a prefix (extremely unlikely).
+  Snippet builders must redact before cutting (`serveEvidenceText` does).
+- **Truncation flag:** no column needed: `textTruncated(row)` = `status = 'too_large' AND char_count > 0`
+  (`truncated` in `ExtractionSummary` and `ServedTextState`).
+- **Queue:** inline when the file is ≤ `inlineMaxBytes` (awaited by `save_artifact`), else queued
+  (`concurrency` applies to the queue; inline runs are not counted). Settings are read on every use
+  (the runtime config is mutated in place by `PUT /api/config`). One ingestor per `ArtifactStore`
+  (`ingestorFor`, bound to the runtime config in `createRuntime`); `boot` re-queues `pending` rows and
+  `close` stops the queue before the store closes. `uploadInternal` stays synchronous and submits the
+  upload (fire and forget; the promise never rejects); `ingestorFor(deps).idle()` awaits it.
+- **save_artifact:** caption rule counts the trimmed description; images = `kind: screenshot` or an
+  `image/*` mime; `captions.required: false` turns it off. `entity` = entity id or `{ kind, name }`;
+  `applies_to` replaces the home label of a *new* artifact (source `agent`); on identical bytes saved
+  earlier it only adds labels (never narrows what other nodes saw). An `applies_to` is logged as a
+  `decision` Decision (refs = artifact). Response `extraction` = `{ status, chunks, truncated?,
+  duplicateOf?, queued?, uploadDerived? }` (no error text: that is served by KS-4 through the scope
+  check). The browser note now asks for a `description` with screenshots.
+- **describe_artifact:** "the caller's run saved it" = a capture with the caller's `agent_run_id`. Not
+  a judgment, so no Decision row. Out-of-tree and unknown ids: same "artifact '<id>' not found".
+  Role access added in a delimited block after `ROLE_TOOLS` (push), not in the literal.
+- **KS-3 seam:** `resolveArtifactEntity` (`artifactTools.ts`, delimited) uses KS-0's `ensureEntity`;
+  at merge its body becomes `resolveEntity(store, scopeFor(store, ctx.workspaceId), typeof ref ===
+  'string' ? { id: ref } : ref, ctx)`. The automatic `has_flow` edge (artifact with flow + entity) is
+  KS-3's: captures carry `entity_id` and `flow`.
+- **For KS-2:** quote checks use `artifactText(store, id)` (rebuilt from chunks; chunk offsets index
+  it; duplicates resolve to the canonical). For "run extraction inline first" call
+  `ingestArtifact({ store, artifacts, config }, id)` directly (`Ingestor.submit` would queue a large
+  file).
+- **For KS-4:** `canonicalArtifactId`, `artifactChunks`, `chunkCount`, `artifactVisible`,
+  `servedTextState` (status, `truncated`, canonical, flag, fenced error), `serveEvidenceText`.
+- **Pre-existing, not changed:** `boot({ port: 0 })` falls back to the configured port (0 is falsy),
+  so two boot tests in parallel files collide on 4317; the KS-1 boot test picks a free port.
+  `read_artifact` still serves raw text unfenced until KS-4 replaces it.

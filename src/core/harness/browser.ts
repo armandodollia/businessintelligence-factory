@@ -89,7 +89,7 @@ export function browserPromptNote(cfg: BrowserCfg): string {
   }
   const files =
     'To keep a screenshot as evidence, save it with `save_artifact` (file_path = the absolute path the browser ' +
-    'tool reports, or content_base64).';
+    'tool reports, or content_base64) and a `description` of what is on screen that matters.';
   return `## Browser\nUse the browser MCP tools for all browsing. ${common}\n${files}`;
 }
 
