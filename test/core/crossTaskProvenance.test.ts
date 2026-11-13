@@ -107,6 +107,36 @@ describe('cross-task provenance', () => {
   });
 });
 
+describe('reuse records in the export', () => {
+  it('a rating after an unchanged reuse attaches to the original score decision; reuse records are deduped and not exported', async () => {
+    const t = setup();
+    const pub = t.artifacts.save({ workspaceId: 'ws_a', kind: 'text', mime: 'text/plain', bytes: 'public pricing page' });
+    const first = addTask(t.store, { workspaceId: 'ws_a', type: 'discover_competitors', phase: 'competitor_discovery' });
+    await t.handle(ctx({ taskId: first.id }), 'save_competitor', competitor([pub.id]));
+    const cmp = t.store.competitors.list()[0]!;
+    t.store.competitors.update(cmp.id, { status: 'verified' });
+    const original = t.store.decisions.list({ workspaceId: 'ws_a', kind: 'score' })[0]!;
+
+    const second = addTask(t.store, { workspaceId: 'ws_a', type: 'flow_walkthrough', phase: 'deep_dives' });
+    const reuser = ctx({ taskId: second.id });
+    await t.handle(reuser, 'save_competitor', competitor([pub.id]));
+    await t.handle(reuser, 'save_competitor', competitor([pub.id])); // replay in the same run
+    const reuse = t.store.decisions.list({ agentRunId: reuser.agentRunId });
+    expect(reuse).toHaveLength(1);
+    expect(reuse[0]!.payload).toMatchObject({ reused: true, competitorId: cmp.id });
+
+    // Rated after the reuse record was written.
+    await new Promise((r) => setTimeout(r, 5));
+    t.store.ratings.insert({
+      id: newId('rat'), workspaceId: 'ws_a', targetType: 'competitor', targetId: cmp.id, criterion: 'threat', agentValue: 4,
+      verdict: 'disagree', userValue: 2, createdAt: new Date().toISOString(),
+    });
+    const rows = exportTrainingData('ws_a', t).trim().split('\n').map((l) => JSON.parse(l) as { decision: { id: string }; ratings: unknown[] });
+    expect(rows.find((r) => r.decision.id === original.id)!.ratings).toHaveLength(1);
+    expect(rows.some((r) => r.decision.id === reuse[0]!.id)).toBe(false);
+  });
+});
+
 describe('hypotheses without an owning task', () => {
   it('are unverified with no round, on create and on correction', async () => {
     const t = setup();

@@ -89,7 +89,7 @@ const ITEM_ID = /\b(?:art|fnd|sym|rec|per|tsk|cmp|hyp)_[0-9A-Z]{26}\b/g;
  * deliverable and brief). So a decision whose result was derived from an internal upload counts as
  * upload-linked even when the upload id appears only in the task's outputs.
  */
-function expandedRefs(store: Store, d: Decision): string[] {
+function expandedRefs(store: Store, d: Decision, taskEvidenceOf: (id: string) => string[] = (id) => taskEvidence(store, id)): string[] {
   const out = new Set(d.refs);
   const subject = primarySubject(d);
   if (subject) out.add(subject);
@@ -98,9 +98,18 @@ function expandedRefs(store: Store, d: Decision): string[] {
   if (runTask) out.add(runTask);
   for (const id of [...out]) {
     for (const e of evidenceOf(store, id)) out.add(e);
-    for (const e of taskEvidence(store, id)) out.add(e);
+    for (const e of taskEvidenceOf(id)) out.add(e);
   }
   return [...out];
+}
+
+/**
+ * A reuse record (`payload.reused: true`, e.g. an unchanged re-save of another task's competitor):
+ * not a judgment. It only ties the reusing run to the item for provenance filtering, so it is never
+ * the item's judgment for ratings and is not exported as a line of its own.
+ */
+function isReuseRecord(d: Decision): boolean {
+  return (d.payload as { reused?: unknown } | null)?.reused === true;
 }
 
 /**
@@ -129,7 +138,8 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  * - any other decision joins ratings of its refs.
  * Decisions referencing an internal upload — directly or via the evidence of a referenced item
  * (`expandedRefs`) — are excluded unless `includeUploads`. Decisions whose primary subject was
- * superseded (replaced in a later review round) are excluded.
+ * superseded (replaced in a later review round) are excluded. Reuse records (`isReuseRecord`) are
+ * neither judgments nor lines: they only feed provenance filtering (via the task's decisions).
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   const { store } = deps;
@@ -139,14 +149,26 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
 
   const judgments = new Map<string, Decision[]>();
   for (const d of decisions) {
-    if (d.kind === 'persona_feedback') continue;
+    if (d.kind === 'persona_feedback' || isReuseRecord(d)) continue;
     const s = primarySubject(d);
     if (s) judgments.set(s, [...(judgments.get(s) ?? []), d]);
   }
 
+  // Per-task evidence is the same for every decision of the task's runs: compute it once.
+  const taskEvidenceCache = new Map<string, string[]>();
+  const taskEvidenceOf = (id: string): string[] => {
+    let ev = taskEvidenceCache.get(id);
+    if (!ev) {
+      ev = taskEvidence(store, id);
+      taskEvidenceCache.set(id, ev);
+    }
+    return ev;
+  };
+
   const lines: string[] = [];
   for (const decision of decisions) {
-    if (uploads && expandedRefs(store, decision).some((id) => uploads.has(id))) continue;
+    if (isReuseRecord(decision)) continue;
+    if (uploads && expandedRefs(store, decision, taskEvidenceOf).some((id) => uploads.has(id))) continue;
     if (isSuperseded(store, primarySubject(decision))) continue;
     // save_hypothesis decisions name their symptom as primary subject; the hypothesis itself decides.
     const hypothesisId = (decision.payload as { hypothesisId?: unknown } | null)?.hypothesisId;

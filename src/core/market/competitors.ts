@@ -26,7 +26,10 @@ export function competitorCriteria(c: Competitor): Record<string, number> {
 /**
  * `save_competitor` (worker; spec §9): creates or updates (same workspace + normalized name) a rated
  * competitor and logs a `score` Decision (`competitorId`, ratings, evidence) atomically. Evidence
- * must be artifacts of this business tree. A replay with unchanged values logs nothing new.
+ * must be artifacts of this business tree. An unchanged re-save logs no new judgment: by the owning
+ * task it just marks the round (superseded tracking); when the competitor stays with another task
+ * (verified there) or the run has no task, a `decision`-kind reuse record (`reused: true`, once per
+ * run + competitor) ties the run to it for provenance / export filtering only.
  */
 export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) => {
   const input = raw as ToolInput<'save_competitor'>;
@@ -61,7 +64,13 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
         const competitor = keep ? prior : store.competitors.update(prior.id, { ...tracking, taskId: owner.id });
         // Reuse record: ties this run (and its task) to the competitor for provenance / export
         // filtering even when ownership stays with another task.
-        const reuse = keep ? record(store, ctx, prior, input.evidence, { reused: true, unchanged: true }, 'decision') : undefined;
+        const recorded = store.decisions
+          .list({ agentRunId: ctx.agentRunId })
+          .some((d) => {
+            const p = d.payload as { tool?: string; competitorId?: string; reused?: boolean } | null;
+            return p?.tool === 'save_competitor' && p.competitorId === prior.id && p.reused === true;
+          });
+        const reuse = keep && !recorded ? record(store, ctx, prior, input.evidence, { reused: true, unchanged: true }, 'decision') : undefined;
         return { competitor, decision: reuse, duplicate: true };
       }
       const patch: Partial<Competitor> = { ...values, evidence, updatedAt: now, ...tracking };
