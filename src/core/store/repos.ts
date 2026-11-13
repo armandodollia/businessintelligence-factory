@@ -41,7 +41,8 @@ export function newId(prefix: string): string {
 // generic repository
 
 /**
- * Column encodings. `json` → TEXT via JSON.stringify; `bool` → INTEGER 0/1;
+ * Column encodings. `json` → TEXT via JSON.stringify (`null` → `'null'`, `undefined` → SQL NULL);
+ * `bool` → INTEGER 0/1;
  * `any` → untyped column preserving number vs string.
  */
 export type ColType = 'text' | 'int' | 'real' | 'bool' | 'json' | 'any';
@@ -93,9 +94,14 @@ export class Repo<T, K extends keyof T & string> {
     return s;
   }
 
+  /**
+   * `undefined` → SQL NULL (property omitted on read). For `json` columns, `null` is a real
+   * value: it is stored as the text `'null'` and reads back as `null`.
+   */
   private encode(field: string, value: unknown): SQLInputValue {
-    if (value === undefined || value === null) return null;
+    if (value === undefined) return null;
     const spec = this.spec.fields[field as keyof T];
+    if (value === null) return colType(spec) === 'json' ? 'null' : null;
     switch (colType(spec)) {
       case 'json':
         return JSON.stringify(value);

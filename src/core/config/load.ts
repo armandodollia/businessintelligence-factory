@@ -56,6 +56,9 @@ export function parseConfig(raw: unknown, source?: string): BifConfig {
  * Loads config. With no `path`, returns the validated defaults. With a `path`, reads the
  * JSON file, deep-merges it over `defaultConfig` and validates; any problem (missing file,
  * bad JSON, schema violations) throws `ConfigError` listing the offending paths.
+ *
+ * Callers must pass the config path explicitly (e.g. `bif.config.json` when it exists):
+ * this function never looks in the working directory on its own.
  */
 export function loadConfig(path?: string): BifConfig {
   if (path === undefined) return parseConfig(structuredClone(defaultConfig), 'defaults');

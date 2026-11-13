@@ -235,4 +235,33 @@ describe('store', () => {
     expect(store.tasks.update(task.id, { subject: undefined }).subject).toBeUndefined();
     expect(store.profiles.update(ws, { data: { x: 1 } })).toEqual({ workspaceId: ws, data: { x: 1 } });
   });
+
+  it('roundtrips JSON null (Decision.payload, Task.result) distinct from undefined', () => {
+    const store = open(tmpDb());
+    const ws = 'ws_null';
+    const model = { provider: 'claude' as const, model: 'opus' };
+    const decision: Decision = {
+      id: newId('dec'), workspaceId: ws, agentRunId: 'arun_1', role: 'worker', model, kind: 'decision',
+      payload: null, refs: [], promptVersion: 'v1', createdAt: now(),
+    };
+    store.decisions.insert(decision);
+    const gotDecision = store.decisions.get(decision.id)!;
+    expect(gotDecision.payload).toBeNull();
+    expect('payload' in gotDecision).toBe(true);
+
+    const task: Task = {
+      id: newId('tsk'), workspaceId: ws, runId: 'run_1', phase: 'deep_dives', type: 'news_scan',
+      brief: 'b', model, needsBrowser: false, acceptanceCriteria: [], status: 'queued', round: 0,
+      result: null, createdAt: now(),
+    };
+    store.tasks.insert(task);
+    const gotTask = store.tasks.get(task.id)!;
+    expect(gotTask.result).toBeNull();
+    expect('result' in gotTask).toBe(true);
+
+    // undefined still clears (SQL NULL → omitted).
+    const cleared = store.tasks.update(task.id, { result: undefined });
+    expect('result' in cleared).toBe(false);
+    expect(store.tasks.update(task.id, { result: null }).result).toBeNull();
+  });
 });

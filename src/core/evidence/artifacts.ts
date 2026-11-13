@@ -78,6 +78,12 @@ export class ArtifactStore {
     private readonly dataDir: string,
   ) {}
 
+  /**
+   * Stores bytes and registers an `Artifact`. Dedupes per workspace on sha256: if identical
+   * bytes were already saved, the FIRST save's artifact (and its metadata — flow, step, title,
+   * note, sourceUrl) is returned unchanged and the new metadata is dropped. Consequently a
+   * flow's step order must not be read from `Artifact.step`; it lives in `Finding.evidence` order.
+   */
   save(input: SaveArtifactInput): Artifact {
     const { bytes, ...meta } = input;
     const buf = typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -85,6 +91,7 @@ export class ArtifactStore {
     return this.persist(meta, buf, extFor(meta.mime));
   }
 
+  /** Like `save`, reading the bytes from `filePath`; same first-save-wins dedupe. */
   saveFromPath(input: SaveArtifactFromPathInput): Artifact {
     const { filePath, ...meta } = input;
     const size = statSync(filePath).size;
