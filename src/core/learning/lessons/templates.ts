@@ -48,6 +48,15 @@ function instruction(category: string, role: Role): string {
         default:
           return `avoid the outcome "${a ?? 'unknown'}" that keeps recurring`;
       }
+    case 'audit': // wave-2 integration: WP-F reviewer-audit misses (role reviewer)
+      switch (a) {
+        case 'blocking':
+          return 'before you pass work, check every acceptance criterion and each cited artifact; independent re-reviews found blocking problems in work you passed';
+        case 'substantive':
+          return 'before you pass work, check that each claim is supported by the evidence it cites; independent re-reviews found unsupported claims in work you passed';
+        default:
+          return `before you pass work, look for the ${a ?? 'kind of'} issues that independent re-reviews keep finding in work you passed`;
+      }
     case 'failure':
       return a === 'timeout'
         ? 'keep making progress and call your submit tool before you stop; long silent pauses end the run'
@@ -102,6 +111,8 @@ function evidencePhrase(category: string, tasks: number): string {
       return `reviewers raised this in ${n}`;
     case 'outcome':
       return `this outcome occurred in ${n}`;
+    case 'audit':
+      return `an audit on another model failed work you passed in ${n}`;
     case 'failure':
       return `runs failed this way in ${n}`;
     case 'policy':
@@ -130,6 +141,8 @@ export function categoryLabel(category: string): string {
       return `review issues: ${a}${b ? ` (${b})` : ''}`;
     case 'outcome':
       return `outcome: ${a}`;
+    case 'audit':
+      return `reviewer audit misses: ${a}`;
     case 'failure':
       return `run failures: ${a}`;
     case 'policy':

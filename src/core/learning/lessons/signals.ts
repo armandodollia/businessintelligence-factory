@@ -15,7 +15,11 @@
  *   `feedback:proposal_reject`, `feedback:proposal_edit`, `feedback:hypothesis_correction`,
  *   `feedback:fact_retract`; rating disagreements: `rating:<targetType>:<criterion>`;
  * - knowledge signals (`knowledgeSignals`): `knowledge:<kind>` (rate kinds only at a rate ≥ 0.5);
- * - signals recorded by other packages (`recordLessonSignal`, e.g. WP-F reviewer-audit misses).
+ * - WP-F reviewer-audit misses (`auditMisses`, read directly — the only path they take into lessons):
+ *   `audit:<class>` for the reviewer, one signal per (class, audited task) however often that task's
+ *   review was audited; the `weak-review` outcome an audit miss writes is left out of the outcome
+ *   signals so the same miss is not counted twice;
+ * - signals recorded by other packages (`recordLessonSignal`).
  *
  * Nothing crosses trees: every query is bounded to the tree's workspaces.
  */
@@ -30,12 +34,13 @@ import { usageRepos } from '../../store/usageRepos.js';
 import type { AgentRun, Role } from '../../types.js';
 import { descendants, rootOf } from '../../workspace/tree.js';
 import { listOutcomes } from '../outcomes.js';
+import { auditMisses } from '../reviewerAudit.js'; // wave-2 integration: audit misses feed lessons
 import { issueRecurrence, listReviewIssues } from '../reviewIssues.js';
 import type { OutcomeLabel } from '../types.js';
 import { lessonRepos } from './store.js';
 import type { LessonSignalRecord } from './types.js';
 
-export type LessonSignalSource = 'review_issue' | 'outcome' | 'failure' | 'policy' | 'feedback' | 'rating' | 'knowledge' | 'recorded';
+export type LessonSignalSource = 'review_issue' | 'outcome' | 'failure' | 'policy' | 'feedback' | 'rating' | 'knowledge' | 'audit' | 'recorded';
 
 export type LessonSignal = {
   role: Role;
@@ -147,6 +152,7 @@ export function collectLessonSignals(
   // Decision outcomes (negative labels) of the judged role.
   for (const o of listOutcomes(store, { workspaceIds: ids, ...(window.since ? { since: window.since } : {}) })) {
     if (!LESSON_OUTCOME_LABELS.has(o.label) || !o.role || !inWindow(o.createdAt, window)) continue;
+    if (o.source === 'reviewer_audit') continue; // counted once, as an audit signal (below)
     push({
       role: o.role, category: `outcome:${o.label}`, source: 'outcome', refId: o.id, createdAt: o.createdAt,
       ...(o.taskId ? { taskId: o.taskId } : {}),
@@ -237,6 +243,23 @@ export function collectLessonSignals(
       push({
         role: k.role, category: `knowledge:${k.kind}`, taskId, source: 'knowledge', refId: k.examples[0] ?? taskId,
         ...(k.promptVersion ? { promptVersion: k.promptVersion } : {}),
+      });
+    }
+  }
+
+  // WP-F reviewer-audit misses: one signal per (issue class, audited task), so auditing the same
+  // review again (or reading the misses again) never adds a count.
+  const auditSeen = new Set<string>();
+  for (const m of auditMisses(store, { rootWorkspaceId, ...(window.since ? { since: window.since } : {}) })) {
+    if (!inWindow(m.createdAt, window)) continue;
+    for (const cls of m.classes.length ? m.classes : ['unclassified']) {
+      const category = `audit:${safePart(cls).toLowerCase()}`;
+      const key = `${category}\u0000${m.taskId}`;
+      if (auditSeen.has(key)) continue;
+      auditSeen.add(key);
+      push({
+        role: m.role, category, taskId: m.taskId, source: 'audit', refId: m.auditId, createdAt: m.createdAt,
+        ...(m.promptVersion ? { promptVersion: m.promptVersion } : {}),
       });
     }
   }

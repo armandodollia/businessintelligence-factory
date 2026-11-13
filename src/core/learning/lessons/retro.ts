@@ -154,7 +154,7 @@ export function retroDigest(
   const privacy = new LessonPrivacy(store);
   const SOURCE_TITLES: Record<LessonSignal['source'], string> = {
     outcome: '# Decision outcomes', review_issue: '# Review issues', feedback: '# User feedback on agent output', rating: '# Rating disagreements',
-    failure: '# Run failures', policy: '# Policy denials', knowledge: '# Knowledge-store signals', recorded: '# Recorded signals (audits, ...)',
+    failure: '# Run failures', policy: '# Policy denials', knowledge: '# Knowledge-store signals', audit: '# Reviewer audit misses', recorded: '# Recorded signals',
   };
   for (const source of Object.keys(SOURCE_TITLES) as Array<LessonSignal['source']>) {
     const mine = signals.filter((s) => s.source === source);
