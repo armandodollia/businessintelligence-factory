@@ -316,3 +316,20 @@ describe('outcome report', () => {
     expect(outcomeReport(s.store, ['ws_other']).rows).toEqual([]);
   });
 });
+
+describe('task end outcomes after a repeated review', () => {
+  it('only the latest reviewer run of the final round labels an unverified task', async () => {
+    const s = researchSetup(opened, {
+      config: (c) => (c.loop.maxRounds = 1),
+      pick: (r) => (r.kind === 'work' ? submitWork() : review(5, [{ class: 'scope_expansion', description: 'also cover Europe' }])),
+    });
+    const task = addTask(s.store);
+    // A crashed earlier review of the same round left a blocking issue behind.
+    learningRepos(s.store).reviewIssues.insert({
+      id: newId('rvi'), workspaceId: 'ws_a', taskId: task.id, round: 1, issueId: 'I9', class: 'blocking', text: 'stale crash row',
+      evidence: [], status: 'open', synthetic: false, reviewerRunId: 'run_crashed', createdAt: new Date().toISOString(),
+    });
+    await runTaskWithReview(task, s.deps);
+    expect(outcomesOf(s.store).map((o) => [o.outcome, o.label])).toEqual([['unverified', 'over-scoped']]);
+  });
+});

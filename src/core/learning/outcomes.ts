@@ -173,9 +173,11 @@ export function recordTaskEndOutcomes(store: Store, task: Task): DecisionOutcome
   if (status !== 'verified' && status !== 'unverified' && status !== 'failed') return out;
   const review = taskLastReviewDecision(store, task);
   const rp = (review?.payload ?? {}) as { score?: unknown; issues?: unknown; event?: string };
-  const finalIssues = learningRepos(store)
+  const roundRows = learningRepos(store)
     .reviewIssues.list({ taskId: task.id, round: task.round })
     .filter((r) => r.workspaceId === task.workspaceId);
+  // A review repeated after a restart replaces the earlier one: only its latest reviewer run counts.
+  const finalIssues = roundRows.filter((r) => r.reviewerRunId === roundRows.at(-1)?.reviewerRunId);
   const deliverable = taskDeliverableDecision(store, task);
   if (deliverable) {
     const label: OutcomeLabel =

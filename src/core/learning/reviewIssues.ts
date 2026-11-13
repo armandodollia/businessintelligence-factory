@@ -325,6 +325,7 @@ export function issueRecurrence(
     if (!taskCache.has(r.taskId)) taskCache.set(r.taskId, store.tasks.get(r.taskId));
     const task = taskCache.get(r.taskId);
     if (!task) continue;
+    // Same rule as `roleForTask` (research/reviewLoop.ts, which imports this module).
     const role: Role = task.type === 'synthesize_recommendations' ? 'synthesizer' : 'worker';
     const taskType: TaskType = task.type;
     const pv = opts.byPromptVersion ? r.workerPromptVersion : undefined;
