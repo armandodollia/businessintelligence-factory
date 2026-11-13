@@ -18,3 +18,6 @@ Rounds 1–2 substantive issues all fixed (2e8a273, 16bed89). Round 3 remaining 
 
 ## Section D — NOT PASSED after 3 rounds (Sol 6/7/7, Opus 8/8/9)
 Rounds 1–2 substantive issues fixed (fa6bf6d, 311c632). Round 3 remaining (recommendation revisions not logged as new decisions; weight fit ignoring persona term) + Opus nits → fixed post-cap (commit "fix: section D post-cap"), covered by final review.
+
+## Section E — NOT PASSED after 3 rounds (Sol 7/7/8, Opus 8/9/7)
+Rounds 1–2 substantive issues fixed (35fd436, ac6e7fb). Round 3 remaining → fixed post-cap (commit "fix: section E post-cap"): artifact serving security headers (archived third-party HTML could run on the app origin and reach PUT /api/config), Host/Origin guard against DNS rebinding, workspace-switch state leak in calibration UI, schedule-specific "what changed" baseline.
