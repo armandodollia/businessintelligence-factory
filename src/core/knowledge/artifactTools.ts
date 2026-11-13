@@ -19,14 +19,16 @@ import type { ArtifactStore, CaptureResult } from '../evidence/artifacts.js';
 import type { RunContext } from '../harness/tokens.js';
 import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
-import type { Entity, EntityKind } from '../types.js';
+import type { Entity } from '../types.js';
 import { rootOf, sameTree } from '../workspace/tree.js';
 import { knowledgeSettings } from './config.js';
-import { ensureEntity, survivorOf } from './entityKeys.js';
+import { resolveEntity, type EntityRef as KsEntityRef } from './entities.js';
+import { linkArtifactEntity } from './entityLinks.js';
 import { ingestorFor, type ExtractionSummary } from './ingest.js';
 import { inTree, KnowledgeNotFoundError, notFound, scopeFor, setItemScopes } from './scope.js';
 
-export type EntityRef = string | { kind: EntityKind; name: string };
+/** `save_artifact` `entity`: an entity id, `{ id }` or `{ kind, name }`. */
+export type EntityRef = string | KsEntityRef;
 
 type Deps = { store: Store; artifacts: ArtifactStore; config: Pick<BifConfig, 'knowledge'> };
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -39,28 +41,39 @@ export function needsCaption(kind: string, mime: string): boolean {
 }
 
 // --- KS-3 seam: entity resolution for save_artifact ---------------------------------------------
-// KS-1 resolves with KS-0's `ensureEntity` (exact key / alias in the tree, else create). KS-3's
-// `resolveEntity` (merge suggestions, upload-only names) replaces the body of `resolveArtifactEntity`
-// at merge; the validation (`checkEntityRef`) stays.
+// Resolution is KS-3's `resolveEntity` (exact key / alias in the tree following merges, else create
+// with merge suggestions); `linkArtifactEntity` adds the automatic `has_flow` edge once the
+// artifact row exists. The validation (`checkEntityRef`) runs before anything is written.
+
+/** KS-1's plain id string or KS-3's `{ id }` / `{ kind, name }`, as KS-3's `EntityRef`. */
+const entityRefOf = (ref: EntityRef): KsEntityRef => (typeof ref === 'string' ? { id: ref } : ref);
 
 /** Validates an entity reference without writing: an id must name an entity of the caller's tree. */
 function checkEntityRef(store: Store, workspaceId: string, ref: EntityRef): void {
-  if (typeof ref !== 'string') return;
-  const e = knowledgeRepos(store).entities.get(ref);
-  if (!e || e.rootWorkspaceId !== rootOf(store, workspaceId)) throw notFound('entity', ref);
+  const r = entityRefOf(ref);
+  if (!('id' in r)) return;
+  const e = knowledgeRepos(store).entities.get(r.id);
+  if (!e || e.rootWorkspaceId !== rootOf(store, workspaceId)) throw notFound('entity', r.id);
 }
 
 /** Resolves (or creates) the entity an artifact save names; merged entities resolve to the survivor. */
 export function resolveArtifactEntity(store: Store, ctx: Pick<RunContext, 'workspaceId' | 'agentRunId'>, ref: EntityRef): Entity {
-  checkEntityRef(store, ctx.workspaceId, ref);
-  if (typeof ref === 'string') return survivorOf(store, knowledgeRepos(store).entities.get(ref)!);
-  return ensureEntity(store, {
-    rootWorkspaceId: rootOf(store, ctx.workspaceId),
-    workspaceId: ctx.workspaceId,
-    kind: ref.kind,
-    name: ref.name,
-    createdByRun: ctx.agentRunId,
-  }).entity;
+  return resolveEntity(store, scopeFor(store, ctx.workspaceId), entityRefOf(ref), { workspaceId: ctx.workspaceId, agentRunId: ctx.agentRunId });
+}
+
+/**
+ * After the capture row is written (same transaction): the `has_flow` edge from the capture's entity
+ * to the flow it walked (source: the artifact). Nothing without an entity or a flow.
+ */
+export function linkArtifactCapture(
+  store: Store,
+  ctx: Pick<RunContext, 'workspaceId' | 'agentRunId'>,
+  saved: CaptureResult,
+  entityId: string | undefined,
+  flow: string | undefined,
+): void {
+  if (!entityId || !flow?.trim()) return;
+  linkArtifactEntity(store, { id: saved.artifact.id, workspaceId: ctx.workspaceId, flow }, { id: entityId }, { agentRunId: ctx.agentRunId });
 }
 // --- end KS-3 seam -------------------------------------------------------------------------------
 

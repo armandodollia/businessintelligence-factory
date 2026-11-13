@@ -130,9 +130,9 @@ export const toolInputSchemas = {
             'Required for screenshots and images (at least 20 characters)',
         ),
       entity: z
-        .union([id, z.object({ kind: entityKindSchema, name: z.string().min(1) })])
+        .union([id, entityRefInput])
         .optional()
-        .describe('What the artifact is about: an entity id, or { kind, name } (found or created in this business tree)'),
+        .describe('What the artifact is about: an entity id, { id } or { kind, name } (found or created in this business tree)'),
       applies_to: z
         .array(id)
         .min(1)

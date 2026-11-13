@@ -14,7 +14,7 @@ import { isAllowedRunFile } from '../paths.js';
 import { taskOutputEvidence } from '../../research/outputs.js';
 import { findReplay } from './idempotency.js';
 // Knowledge store KS-1: captures, captions, entity / applies_to, extraction, describe_artifact.
-import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave } from '../../knowledge/artifactTools.js';
+import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave, linkArtifactCapture } from '../../knowledge/artifactTools.js';
 import type { CaptureResult } from '../../evidence/artifacts.js';
 import { ingestorFor } from '../../knowledge/ingest.js';
 import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
@@ -264,11 +264,15 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       // Every save records a capture (KS-1); the entity is resolved in the same transaction.
       const saved: CaptureResult = store.transaction(() => {
         const full = { ...meta, ...captureMeta(deps, ctx, extras) };
-        if (input.file_path !== undefined) return artifacts.captureFromPath({ ...full, filePath: input.file_path });
-        if (input.content_base64 !== undefined) {
-          return artifacts.capture({ ...full, bytes: new Uint8Array(Buffer.from(input.content_base64, 'base64')) });
-        }
-        return artifacts.capture({ ...full, bytes: input.content ?? '' });
+        const r =
+          input.file_path !== undefined
+            ? artifacts.captureFromPath({ ...full, filePath: input.file_path })
+            : input.content_base64 !== undefined
+              ? artifacts.capture({ ...full, bytes: new Uint8Array(Buffer.from(input.content_base64, 'base64')) })
+              : artifacts.capture({ ...full, bytes: input.content ?? '' });
+        // KS-3: automatic `has_flow` edge from the capture's entity (design §7.4).
+        linkArtifactCapture(store, ctx, r, full.entityId, input.flow);
+        return r;
       });
       const data = await finishArtifactSave(deps, ctx, saved, extras, (payload, refs) => {
         const d = recordDecision(ctx, 'decision', payload, refs);

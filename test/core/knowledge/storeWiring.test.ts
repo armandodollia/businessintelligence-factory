@@ -7,7 +7,10 @@ import { EventBus } from '../../../src/core/events.js';
 import { ArtifactStore } from '../../../src/core/evidence/artifacts.js';
 import type { RunContext } from '../../../src/core/harness/tokens.js';
 import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js';
+import { mergeEntities, resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { ingestorFor } from '../../../src/core/knowledge/ingest.js';
+import { neighbours } from '../../../src/core/knowledge/relations.js';
+import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import { openStore, type Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
 import type { Finding, Task } from '../../../src/core/types.js';
@@ -134,5 +137,55 @@ describe('KS-1 × KS-2: captures written by save_artifact carry the task (design
     expect(env.k.findingEvidence.list({ findingId: r.findingId })).toMatchObject([
       { artifactId: a.artifactId, chunkId: chunks[0]!.id, quote: 'The Pro plan costs 12 dollars per seat' },
     ]);
+  });
+});
+
+describe('KS-1 × KS-3: save_artifact resolves its entity with resolveEntity and links it (design §7.4)', () => {
+  it('a near-match name is created with a merge suggestion; an alias resolves to the survivor', async () => {
+    const env = setup();
+    const c = ctxFor(task(env.store));
+    const scope = scopeFor(env.store, 'R');
+    const globex = resolveEntity(env.store, scope, { kind: 'competitor', name: 'Globex' });
+    const a = await saveText(env, c, 'globex corp homepage', { entity: { kind: 'competitor', name: 'Globex Corp' } });
+    const created = env.k.artifactCaptures.get(a.captureId)!.entityId!;
+    expect(created).not.toBe(globex.id);
+    expect(env.k.entities.get(created)).toMatchObject({ kind: 'competitor', name: 'Globex Corp', createdByRun: c.agentRunId });
+    expect(env.k.entityMergeSuggestions.list({ rootWorkspaceId: 'R' })).toMatchObject([{ status: 'open' }]);
+    // After a merge, the loser's name (now an alias) and its id resolve to the survivor.
+    mergeEntities(env.store, globex.id, created, 'user');
+    const byName = await saveText(env, c, 'globex corp blog', { entity: { kind: 'competitor', name: 'globex corp' } });
+    const byOldId = await saveText(env, c, 'globex corp docs', { entity: { id: created } });
+    const byString = await saveText(env, c, 'globex corp careers', { entity: created });
+    for (const s of [byName, byOldId, byString]) expect(env.k.artifactCaptures.get(s.captureId)!.entityId).toBe(globex.id);
+  });
+
+  it('an artifact with a flow and an entity gets the has_flow edge (source: the artifact)', async () => {
+    const env = setup();
+    const c = ctxFor(task(env.store, 'D'));
+    const a = await saveText(env, c, 'signup step one', { entity: { kind: 'product', name: 'Widget' }, flow: 'Signup', step: 1 });
+    const widget = env.k.artifactCaptures.get(a.captureId)!.entityId!;
+    const edges = neighbours(env.store, scopeFor(env.store, 'D'), widget, { depth: 1, usableOnly: true });
+    expect(edges).toMatchObject([{ type: 'has_flow', fromEntityId: widget, sourceKind: 'artifact', sourceId: a.artifactId }]);
+    expect(env.k.entities.get(edges[0]!.toEntityId)).toMatchObject({ kind: 'flow', name: 'Signup', workspaceId: 'D' });
+    // Saving the same step again adds no second edge; without an entity there is no edge.
+    await saveText(env, c, 'signup step one', { entity: { id: widget }, flow: 'Signup', step: 1 });
+    await saveText(env, c, 'signup step two', { flow: 'Signup', step: 2 });
+    expect(env.k.relations.list({ rootWorkspaceId: 'R' })).toHaveLength(1);
+  });
+
+  it('another tree’s entity id fails like an unknown one, in either form, and writes nothing', async () => {
+    const env = setup();
+    const foreign = resolveEntity(env.store, scopeFor(env.store, 'Q'), { kind: 'product', name: 'Secret' });
+    const c = ctxFor(task(env.store));
+    const before = env.store.artifacts.list().length;
+    for (const entity of [foreign.id, { id: foreign.id }]) {
+      expect(await env.handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', content: 'x', entity })).toEqual({
+        ok: false, error: `entity '${foreign.id}' not found`,
+      });
+    }
+    expect(await env.handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', content: 'x', entity: { id: 'ent_nope' } })).toEqual({
+      ok: false, error: `entity 'ent_nope' not found`,
+    });
+    expect(env.store.artifacts.list()).toHaveLength(before);
   });
 });
