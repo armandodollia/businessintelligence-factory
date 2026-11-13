@@ -5,9 +5,11 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { defaultConfig } from '../../../src/core/config/schema.js';
-import { mergeEntitiesAsUser, renameEntityAsUser, setIncludeOverride } from '../../../src/core/feedback/actions.js';
-import { FEEDBACK_KINDS, actorOf, listFeedback, recordFeedback } from '../../../src/core/feedback/events.js';
-import { resolveEntity } from '../../../src/core/knowledge/entities.js';
+import {
+  mergeEntitiesAsUser, pruneArtifactsAsUser, rejectMergeSuggestionAsUser, renameEntityAsUser, setIncludeOverride,
+} from '../../../src/core/feedback/actions.js';
+import { FEEDBACK_KINDS, actorOf, listFeedback } from '../../../src/core/feedback/events.js';
+import { resolveEntity, resolveEntityDetailed } from '../../../src/core/knowledge/entities.js';
 import { retractFactByUser, setFactScopes } from '../../../src/core/knowledge/facts.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import { rateCriterion } from '../../../src/core/scoring/ratings.js';
@@ -22,7 +24,7 @@ afterEach(() => {
 });
 
 describe('human knowledge actions write feedback events with the configured actor (KS-6)', () => {
-  it('fact scope change, retraction, accepted update, entity merge and rename, artifact prune — one row each', async () => {
+  it('fact scope change, retraction, accepted update, entity merge, rename and merge rejection, artifact prune — one row each', async () => {
     const t = ks4(opened);
     const config = structuredClone(defaultConfig);
     config.user = { id: 'alice' };
@@ -49,10 +51,27 @@ describe('human knowledge actions write feedback events with the configured acto
     t.fact('ws_a', 'Globex Inc is a competitor', { entityId: b.id });
     mergeEntitiesAsUser(t.store, a.id, b.id, { actor });
     renameEntityAsUser(t.store, a.id, 'Globex Corp', { actor });
+    // KS-7 × KS-6: the user rejects a merge suggestion (`entity_merge_reject`) and prunes a stored file
+    // (`artifact_prune`), both through the real actions.
+    resolveEntity(t.store, scope, { kind: 'competitor', name: 'Initech' });
+    const [suggested] = resolveEntityDetailed(t.store, scope, { kind: 'competitor', name: 'Initech Corp' }).suggestions;
+    expect(suggested).toBeDefined();
+    rejectMergeSuggestionAsUser(t.store, suggested!.id, { actor, workspaceId: 'ws_a' });
     const page = await t.page('ws_a', 'old page');
-    recordFeedback(t.store, { workspaceId: 'ws_a', actor, kind: 'artifact_prune', targetType: 'artifact', targetId: page.id, beforeJson: { file: true }, afterJson: { file: false } });
+    const old = new Date(Date.now() - 400 * 86_400_000).toISOString();
+    t.store.db.prepare('UPDATE artifacts SET captured_at = ? WHERE id = ?').run(old, page.id);
+    t.store.db.prepare('UPDATE artifact_captures SET captured_at = ? WHERE artifact_id = ?').run(old, page.id);
+    pruneArtifactsAsUser({ store: t.store, files: t.artifacts, config: t.config }, 'ws_a', [page.id], { actor });
 
-    const kinds = ['fact_scope_change', 'fact_retract', 'fact_replacement_accept', 'entity_merge', 'entity_rename', 'artifact_prune'] as const;
+    const kinds = [
+      'fact_scope_change', 'fact_retract', 'fact_replacement_accept', 'entity_merge', 'entity_rename', 'entity_merge_reject', 'artifact_prune',
+    ] as const;
+    // Every knowledge-store feedback kind is covered here (wave-1 kinds have their own tests).
+    const wave1 = [
+      'include_override', 'profile_edit', 'proposal_accept', 'proposal_edit', 'proposal_reject', 'hypothesis_correction', 'request_answer',
+      'weights_change', 'prompt_patch_apply', 'prompt_patch_revert',
+    ];
+    expect(FEEDBACK_KINDS.filter((k) => !wave1.includes(k)).sort()).toEqual([...kinds].sort());
     for (const kind of kinds) {
       expect(FEEDBACK_KINDS).toContain(kind);
       const rows = listFeedback(t.store, { kind });
