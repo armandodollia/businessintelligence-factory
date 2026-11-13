@@ -240,6 +240,8 @@ export interface LastReview {
   issues: Array<{ id?: string; class?: string; description?: string; evidence?: string[] }>;
   decisionId: string;
   at: string;
+  /** Harness-recorded score 0 because the reviewer run failed or returned no valid review. */
+  synthetic?: boolean;
 }
 
 export type FindingView = Finding & { lastReview?: LastReview };

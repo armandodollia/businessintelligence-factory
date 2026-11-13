@@ -149,6 +149,8 @@ export interface ResearchRun {
   status: 'running' | 'done' | 'failed';
   startedAt: string;
   endedAt?: string;
+  /** Schedule that started this run (migration 10); unset for manual runs. */
+  scheduleId?: string;
 }
 
 export interface AgentRun {

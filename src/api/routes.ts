@@ -8,6 +8,7 @@ import { ROLES, type BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
 import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
 import { setIncludeInSynthesis } from '../core/evidence/synthesis.js';
+import { isPipelineLocked } from '../core/research/lock.js';
 import { resolveUserRequest } from '../core/harness/tools/handlers.js';
 import { uploadInternal } from '../core/internal/uploads.js';
 import { interviewCoverage, sendInterviewMessage, type InterviewerFake } from '../core/interview/interview.js';
@@ -81,7 +82,7 @@ const schemas = {
     name: z.string().trim().min(1),
     sector: z.string().trim().min(1),
     scope: z.object({ level: scopeLevel.optional(), name: z.string().optional(), description: z.string().optional() }).optional(),
-    audiences: z.array(audience).optional(),
+    audiences: z.array(audience).min(1, 'select at least one audience').optional(),
     parentWorkspaceId: z.string().min(1).optional(),
   }),
   interview: z.object({ text: z.string().refine((s) => s.trim().length > 0, 'text must not be empty') }),
@@ -154,6 +155,31 @@ function replaceConfig(target: BifConfig, next: BifConfig): void {
   }
 }
 
+const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+/** True for `127.0.0.1`, `localhost` or `[::1]`, with or without a port. */
+export function isLocalHost(host: string | undefined): boolean {
+  if (!host) return false;
+  const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(host.trim().toLowerCase());
+  return !!m && LOCAL_HOSTNAMES.has(m[1]!);
+}
+
+/** True when `origin` is an http(s) origin on a local host (any port; covers the Vite dev server). */
+export function isLocalOrigin(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && isLocalHost(u.host);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Artifact mime types a browser would render as an active document (scripts, same-origin access):
+ * served as downloads. Everything else is still sandboxed by CSP.
+ */
+const ACTIVE_MIME = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml|multipart\/related|text\/xml|application\/xml)\b/i;
+
 /**
  * Builds the HTTP app (JSON API, SSE, optional MCP and static web). Separate from `listen` so tests
  * use `app.request`. Errors render as `{ error }` with 400 (validation, RatingError), 404 (unknown
@@ -162,6 +188,25 @@ function replaceConfig(target: BifConfig, next: BifConfig): void {
 export function createApp(deps: AppDeps): Hono {
   const { store, artifacts, events, config, research } = deps;
   const app = new Hono();
+
+  // Local-only guard (DNS rebinding / cross-site requests). Every request must address a local
+  // host; state-changing requests must be JSON (or multipart for uploads) and, when a browser
+  // sends an Origin, come from a local origin. MCP clients (agent CLIs) send JSON and no Origin.
+  app.use('*', async (c, next) => {
+    const host = c.req.header('host') ?? new URL(c.req.url).host;
+    if (!isLocalHost(host)) return c.json({ error: 'forbidden host' }, 403);
+    const method = c.req.method.toUpperCase();
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return next();
+    const origin = c.req.header('origin');
+    if (origin !== undefined && !isLocalOrigin(origin)) return c.json({ error: 'forbidden origin' }, 403);
+    const path = c.req.path;
+    if (path.startsWith('/mcp/') && method === 'DELETE') return next(); // MCP session close has no body
+    const type = (c.req.header('content-type') ?? '').toLowerCase();
+    const isJson = type.startsWith('application/json');
+    const isUpload = /^\/api\/workspaces\/[^/]+\/uploads$/.test(path) && type.startsWith('multipart/form-data');
+    if (!isJson && !isUpload) return c.json({ error: 'content-type must be application/json' }, 415);
+    return next();
+  });
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.message, ...err.extra }, err.status);
@@ -281,7 +326,9 @@ export function createApp(deps: AppDeps): Hono {
     const { phases } = await body(c, schemas.research);
     const running = currentResearchRun(store, id);
     if (running) throw new HttpError(409, `a research run is already running (${running.id}, ${running.phase})`, { run: running });
-    // runPipeline inserts the first ResearchRun synchronously, then continues in the background.
+    // Shared with the scheduler: covers the gaps between phases of a pipeline already in progress.
+    if (isPipelineLocked(store, id)) throw new HttpError(409, 'a research pipeline is already running for this workspace');
+    // runPipeline takes the lock and inserts the first ResearchRun synchronously, then continues in the background.
     runPipeline(id, phases ?? ALL_PHASES, research).catch((e) =>
       console.error(`[bif] research pipeline for ${id} failed: ${(e as Error).message}`),
     );
@@ -296,20 +343,29 @@ export function createApp(deps: AppDeps): Hono {
 
   // --- results --------------------------------------------------------------------------------
   /**
-   * Findings plus `lastReview` (spec §7.2): the latest reviewer verdict on the finding's task
-   * (`score`, `issues`, `decisionId`, `at`), so unverified findings can show the objections.
+   * Findings plus `lastReview` (spec §7.2): the latest effective reviewer verdict on the finding's
+   * task (`score`, `issues`, `decisionId`, `at`, `synthetic`), so unverified findings can show the
+   * objections. Reviews from reviewer runs that did not finish are ignored; synthetic reviews count.
    */
   app.get('/api/workspaces/:id/findings', (c) => {
     const id = workspace(c.req.param('id')).id;
-    const lastReview = new Map<string, { score: number; issues: unknown[]; decisionId: string; at: string }>();
-    for (const d of store.decisions.list({ workspaceId: id, kind: 'review' })) {
-      const p = (d.payload ?? {}) as { tool?: string; score?: unknown; issues?: unknown };
-      if (p.tool !== 'submit_review' || typeof p.score !== 'number') continue;
+    type LastReview = { score: number; issues: unknown[]; decisionId: string; at: string; synthetic: boolean };
+    const lastReview = new Map<string, LastReview>();
+    // Same rule as the review loop: a submitted review counts only when its reviewer run finished
+    // `done`; otherwise the loop recorded a synthetic (score 0) review, which counts instead.
+    const reviews = store.decisions
+      .list({ workspaceId: id, kind: 'review' })
+      .map((d, i) => ({ d, i }))
+      .sort((a, b) => a.d.createdAt.localeCompare(b.d.createdAt) || a.i - b.i)
+      .map(({ d }) => d);
+    for (const d of reviews) {
+      const p = (d.payload ?? {}) as { tool?: string; event?: string; score?: unknown; issues?: unknown };
+      const synthetic = p.event === 'synthetic_review';
+      if (!synthetic && p.tool !== 'submit_review') continue;
+      if (typeof p.score !== 'number') continue;
+      if (!synthetic && store.agentRuns.get(d.agentRunId)?.status !== 'done') continue;
       for (const taskId of d.refs) {
-        const prev = lastReview.get(taskId);
-        if (!prev || prev.at <= d.createdAt) {
-          lastReview.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt });
-        }
+        lastReview.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt, synthetic });
       }
     }
     return c.json(
@@ -366,8 +422,18 @@ export function createApp(deps: AppDeps): Hono {
   // --- artifacts ------------------------------------------------------------------------------
   app.get('/api/artifacts/:id', (c) => {
     const { artifact, bytes } = artifacts.read(c.req.param('id'));
-    const headers: Record<string, string> = { 'content-type': artifact.mime, 'cache-control': 'private, max-age=31536000, immutable' };
-    if (artifact.kind === 'upload' && artifact.title) {
+    // Artifacts come from third-party sites and uploads: never let them run as our origin.
+    const headers: Record<string, string> = {
+      'content-type': artifact.mime,
+      'cache-control': 'private, max-age=31536000, immutable',
+      'content-security-policy': 'sandbox',
+      'x-content-type-options': 'nosniff',
+    };
+    const active = ACTIVE_MIME.test(artifact.mime);
+    const name = artifact.title ?? `${artifact.id}`;
+    if (active) {
+      headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
+    } else if (artifact.kind === 'upload' && artifact.title) {
       headers['content-disposition'] = `inline; filename*=UTF-8''${encodeURIComponent(artifact.title)}`;
     }
     return c.body(new Uint8Array(bytes), 200, headers);

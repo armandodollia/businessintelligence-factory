@@ -34,7 +34,7 @@ export function App() {
       <main>
         {route.name === 'workspaces' && <Workspaces />}
         {route.name === 'settings' && <Settings />}
-        {route.name === 'workspace' && <WorkspaceShell wsId={route.wsId} page={route.page} />}
+        {route.name === 'workspace' && <WorkspaceShell key={route.wsId} wsId={route.wsId} page={route.page} />}
       </main>
     </div>
   );

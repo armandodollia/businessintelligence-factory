@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { diffRuns } from '../../src/core/scheduler/diff.js';
+import { tryLockPipeline } from '../../src/core/research/lock.js';
 import { nextDue, startScheduler } from '../../src/core/scheduler/scheduler.js';
 import type { Store } from '../../src/core/store/db.js';
 import { newId } from '../../src/core/store/repos.js';
@@ -151,6 +152,21 @@ describe('scheduler', () => {
     expect(ran.filter((id) => id === b.id)).toHaveLength(2);
   });
 
+  it('a workspace whose pipeline lock is held (manual run between phases) stays due and runs later', async () => {
+    const t = setup();
+    const now = Date.now();
+    addSchedule(t.store, t.ws.id, { lastRunAt: new Date(now - 3 * DAY).toISOString() });
+    const release = tryLockPipeline(t.store, t.ws.id)!;
+    const sched = startScheduler(t.deps, () => now);
+    await sched.idle();
+    expect(t.calls).toEqual([]);
+    release();
+    await sched.tick();
+    await sched.idle();
+    sched.stop();
+    expect(t.calls).toEqual([t.ws.id]);
+  });
+
   it('skips a workspace that already has a running research run', async () => {
     const t = setup();
     const now = Date.now();
@@ -164,24 +180,37 @@ describe('scheduler', () => {
     expect(t.calls).toEqual([]);
   });
 
-  it('records what changed against the previous run of the same phase', async () => {
+  it('records what changed against the previous run of the same schedule + phase (ignores manual / other schedules)', async () => {
     const t = setup();
     const now = Date.now();
+    const s = addSchedule(t.store, t.ws.id, { lastRunAt: new Date(now - 3 * DAY).toISOString() });
     const prev = t.store.researchRuns.insert({
-      id: newId('rrun'), workspaceId: t.ws.id, phase: 'scoring', status: 'done',
+      id: newId('rrun'), workspaceId: t.ws.id, phase: 'scoring', status: 'done', scheduleId: s.id,
       startedAt: new Date(now - 5 * DAY).toISOString(), endedAt: new Date(now - 5 * DAY).toISOString(),
     });
     addFinding(t.store, t.ws.id, prev.id, 'Acme', 'Acme Pro costs $10/mo', []);
+    // Interleaved later runs of the same phase: a manual run and another schedule's run.
+    const manual = t.store.researchRuns.insert({
+      id: newId('rrun'), workspaceId: t.ws.id, phase: 'scoring', status: 'done',
+      startedAt: new Date(now - 2 * DAY).toISOString(), endedAt: new Date(now - 2 * DAY).toISOString(),
+    });
+    addFinding(t.store, t.ws.id, manual.id, 'Acme', 'Acme Pro costs $12/mo', []);
+    const other = t.store.researchRuns.insert({
+      id: newId('rrun'), workspaceId: t.ws.id, phase: 'scoring', status: 'done', scheduleId: 'sch_other',
+      startedAt: new Date(now - DAY).toISOString(), endedAt: new Date(now - DAY).toISOString(),
+    });
+    addFinding(t.store, t.ws.id, other.id, 'Acme', 'Acme Pro costs $12/mo', []);
     t.deps.phaseRunners = {
       scoring: async (workspaceId, deps) => {
         const rr = deps.store.researchRuns.list({ workspaceId, status: 'running' })[0]!;
         addFinding(deps.store, workspaceId, rr.id, 'Acme', 'Acme Pro costs $12/mo', []);
       },
     };
-    addSchedule(t.store, t.ws.id, { lastRunAt: new Date(now - 3 * DAY).toISOString() });
     const sched = startScheduler(t.deps, () => now);
     await sched.idle();
     sched.stop();
+    const own = t.store.researchRuns.list({ workspaceId: t.ws.id, scheduleId: s.id });
+    expect(own).toHaveLength(2); // the new run is tagged with its schedule
     const changes = t.store.decisions.list({ workspaceId: t.ws.id }).filter((d) => (d.payload as { event?: string }).event === 'what_changed');
     expect(changes).toHaveLength(1);
     const p = changes[0]!.payload as { prevRunId: string; newFindings: string[] };

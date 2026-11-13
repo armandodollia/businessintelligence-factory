@@ -164,7 +164,11 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
 - **"What changed" only compares artifacts that findings cite.**
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with
   `payload.actor` telling them apart.
-- **Local only, no authentication.**
+- **Local only, no authentication.** The server rejects requests whose `Host` is not
+  `127.0.0.1`/`localhost` (DNS rebinding), requires JSON (or multipart uploads) on state-changing
+  requests and refuses non-local `Origin`s. Artifacts are served with `Content-Security-Policy:
+  sandbox` and `nosniff`; HTML/SVG snapshots download instead of rendering. Any other program on your
+  machine can still call the API.
 - Review-gate history and open items per section: [docs/superpowers/verify-log.md](docs/superpowers/verify-log.md).
 
 Created in [T3 Code](https://t3.codes).

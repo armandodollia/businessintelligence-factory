@@ -152,17 +152,30 @@ describe('findings synthesis override', () => {
       id: 'fnd_v', workspaceId: t.ws.id, runId: 'r', taskId: 'tsk_2', subject: 's', claim: 'c2', criteria: {}, evidence: [],
       status: 'verified', createdAt: '',
     });
-    const review = (score: number, at: string, issues: unknown[]) =>
+    const model = { provider: 'codex' as const, model: 'x' };
+    const run = (status: 'done' | 'failed') =>
+      t.store.agentRuns.insert({
+        id: newId('arun'), workspaceId: t.ws.id, taskId: 'tsk_1', role: 'reviewer', model, token: newId('tok'), status, startedAt: '',
+      }).id;
+    const review = (agentRunId: string, payload: Record<string, unknown>, at: string) =>
       t.store.decisions.insert({
-        id: newId('dec'), workspaceId: t.ws.id, agentRunId: newId('arun'), role: 'reviewer', model: { provider: 'codex', model: 'x' },
-        promptVersion: 'v1', kind: 'review', payload: { tool: 'submit_review', score, issues }, refs: ['tsk_1'], createdAt: at,
+        id: newId('dec'), workspaceId: t.ws.id, agentRunId, role: 'reviewer', model,
+        promptVersion: 'v1', kind: 'review', payload, refs: ['tsk_1'], createdAt: at,
       });
-    review(4, '2026-11-12T00:00:00.000Z', [{ id: 'I1', class: 'blocking', description: 'no source' }]);
-    const last = review(6, '2026-11-12T01:00:00.000Z', [{ id: 'I1', class: 'substantive', description: 'pricing outdated' }]);
+    // Inserted out of order: the latest by createdAt wins.
+    const last = review(run('done'), { tool: 'submit_review', score: 6, issues: [{ id: 'I1', class: 'substantive', description: 'pricing outdated' }] }, '2026-11-12T01:00:00.000Z');
+    review(run('done'), { tool: 'submit_review', score: 4, issues: [{ id: 'I1', class: 'blocking', description: 'no source' }] }, '2026-11-12T00:00:00.000Z');
     const r = await t.json('GET', `/api/workspaces/${t.ws.id}/findings`);
     const u = r.body.find((f: { id: string }) => f.id === 'fnd_u');
-    expect(u.lastReview).toMatchObject({ score: 6, decisionId: last.id, issues: [{ class: 'substantive', description: 'pricing outdated' }] });
+    expect(u.lastReview).toMatchObject({ score: 6, decisionId: last.id, synthetic: false, issues: [{ class: 'substantive', description: 'pricing outdated' }] });
     expect(r.body.find((f: { id: string }) => f.id === 'fnd_v').lastReview).toBeUndefined();
+
+    // A later reviewer run that failed: its submitted review is ignored, the synthetic one counts.
+    const failed = run('failed');
+    review(failed, { tool: 'submit_review', score: 9, issues: [] }, '2026-11-12T02:00:00.000Z');
+    const synth = review(failed, { tool: 'harness', event: 'synthetic_review', score: 0, issues: [{ id: 'I1', class: 'blocking', description: 'malformed' }] }, '2026-11-12T02:00:01.000Z');
+    const r2 = await t.json('GET', `/api/workspaces/${t.ws.id}/findings`);
+    expect(r2.body.find((f: { id: string }) => f.id === 'fnd_u').lastReview).toMatchObject({ score: 0, synthetic: true, decisionId: synth.id });
   });
 });
 

@@ -3,6 +3,7 @@ import type { ResearchDeps } from '../research/deps.js';
 import { currentResearchRun, runPipeline } from '../research/orchestrator.js';
 import { recordSystemDecision } from '../systemDecision.js';
 import type { ResearchRun, Schedule } from '../types.js';
+import { isPipelineLocked } from '../research/lock.js';
 import { diffRuns } from './diff.js';
 
 /** How often schedules are checked (spec: every 60 s). */
@@ -45,17 +46,22 @@ export function scheduleBaseline(s: Pick<Schedule, 'lastRunAt' | 'activatedAt'>,
   return times.length ? Math.max(...times) : startedAt;
 }
 
-/** The latest finished (`done`) run of the same workspace + phase that started before `rr`. */
-function previousRun(deps: ResearchDeps, rr: ResearchRun): ResearchRun | undefined {
+/**
+ * The latest finished (`done`) run of the same schedule + phase that started before `rr`. Manual
+ * runs and other schedules' runs are never the baseline, so "what changed" compares like with like.
+ */
+export function previousRun(deps: Pick<ResearchDeps, 'store'>, rr: ResearchRun): ResearchRun | undefined {
+  if (!rr.scheduleId) return undefined;
   return deps.store.researchRuns
-    .list({ workspaceId: rr.workspaceId, phase: rr.phase, status: 'done' })
+    .list({ workspaceId: rr.workspaceId, phase: rr.phase, status: 'done', scheduleId: rr.scheduleId })
     .filter((r) => r.id !== rr.id && r.startedAt <= rr.startedAt)
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
     .at(-1);
 }
 
 /** Runs one schedule's pipeline and records a "what changed" Decision per phase that has a predecessor. */
 async function runSchedule(schedule: Schedule, deps: ResearchDeps): Promise<void> {
-  const runs = await runPipeline(schedule.workspaceId, schedule.phases, deps);
+  const runs = await runPipeline(schedule.workspaceId, schedule.phases, deps, { scheduleId: schedule.id });
   for (const rr of runs) {
     if (rr.status !== 'done') continue;
     const prev = previousRun(deps, rr);
@@ -113,6 +119,8 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
       if (busy.has(s.workspaceId)) continue;
       if (!deps.store.workspaces.get(s.workspaceId)) continue;
       if (currentResearchRun(deps.store, s.workspaceId)) continue;
+      // Held by a manual run (API) or resumed run: keep the schedule due and try on a later tick.
+      if (isPipelineLocked(deps.store, s.workspaceId)) continue;
       busy.add(s.workspaceId);
       deps.store.schedules.update(s.id, { lastRunAt: new Date(t).toISOString() });
       const job = runSchedule(s, deps)

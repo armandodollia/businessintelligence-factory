@@ -623,42 +623,47 @@ export function useCalibration(wsId: string | null | undefined) {
  */
 export function usePromptPatch(wsId: string | null | undefined) {
   const [role, setRoleState] = useState<PatchRole>('worker');
-  const [proposal, setProposal] = useState<PromptPatch | null>(null);
-  const [text, setText] = useState('');
-  const [applied, setApplied] = useState<AppliedPromptPatch | null>(null);
+  // Every piece of state is tagged with the workspace it belongs to; state of another workspace
+  // (after switching, or a response that arrives after switching) is never shown or applied.
+  const [draft, setDraft] = useState<{ wsId: string; patch: PromptPatch; text: string } | null>(null);
+  const [appliedState, setAppliedState] = useState<{ wsId: string; result: AppliedPromptPatch } | null>(null);
   const action = useAction();
+
+  const current = draft && draft.wsId === wsId ? draft : null;
+  const proposal = current?.patch ?? null;
+  const text = current?.text ?? '';
+  const applied = appliedState && appliedState.wsId === wsId ? appliedState.result : null;
+
+  const setText = useCallback(
+    (t: string) => setDraft((d) => (d && d.wsId === wsId ? { ...d, text: t } : d)),
+    [wsId],
+  );
 
   const setRole = useCallback((r: PatchRole) => {
     setRoleState(r);
-    setProposal(null);
-    setApplied(null);
-    setText('');
+    setDraft(null);
+    setAppliedState(null);
   }, []);
 
   const propose = useCallback(async () => {
     if (!wsId) return;
-    setApplied(null);
-    const p = await action.run(() => api.proposePromptPatch(wsId, role));
-    if (p) {
-      setProposal(p);
-      setText(p.patchText);
-    }
+    const owner = wsId;
+    setAppliedState(null);
+    const p = await action.run(() => api.proposePromptPatch(owner, role));
+    if (p) setDraft({ wsId: owner, patch: p, text: p.patchText });
   }, [wsId, role, action.run]);
 
   const apply = useCallback(async () => {
-    if (!wsId || !proposal) return;
-    const r = await action.run(() => api.applyPromptPatch(wsId, { ...proposal, patchText: text }));
+    if (!wsId || !current) return;
+    const owner = current.wsId;
+    const r = await action.run(() => api.applyPromptPatch(owner, { ...current.patch, patchText: current.text }));
     if (r) {
-      setApplied(r);
-      setProposal(null);
-      setText('');
+      setAppliedState({ wsId: owner, result: r });
+      setDraft(null);
     }
-  }, [wsId, proposal, text, action.run]);
+  }, [wsId, current, action.run]);
 
-  const discard = useCallback(() => {
-    setProposal(null);
-    setText('');
-  }, []);
+  const discard = useCallback(() => setDraft(null), []);
 
   return {
     roles: PATCH_ROLES,
@@ -831,6 +836,9 @@ export function useExistingRating(wsId: string, targetType: RatingTargetType, ta
   const [, bump] = useState(0);
   useEffect(() => {
     const fn = () => bump((n) => n + 1);
+    // First subscriber after every control unmounted (page change / remount): ratings may have
+    // changed elsewhere (review queue, another tab), so refetch instead of trusting the cache.
+    if (idx.listeners.size === 0 && !idx.loading) idx.loaded = false;
     idx.listeners.add(fn);
     if (!idx.loaded && !idx.loading) {
       idx.loading = api
@@ -999,10 +1007,20 @@ export function useRequests(wsId: string | null | undefined) {
 
   const resolve = useCallback(
     async (id: string, status: 'resolved' | 'denied', response?: string) => {
-      const ok = await action.run(() => api.resolveRequest(id, status, response));
-      if (ok !== undefined) res.mutate((list) => list?.filter((r) => r.id !== id));
+      try {
+        await api.resolveRequest(id, status, response);
+        res.mutate((list) => list?.filter((r) => r.id !== id));
+      } catch (e) {
+        // 404 (gone) / 409 (already decided, e.g. in another tab): it is no longer pending here.
+        if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
+          res.mutate((list) => list?.filter((r) => r.id !== id));
+          await res.reload();
+          return;
+        }
+        await action.run(() => Promise.reject(e));
+      }
     },
-    [action.run, res.mutate],
+    [action.run, res.mutate, res.reload],
   );
 
   return {

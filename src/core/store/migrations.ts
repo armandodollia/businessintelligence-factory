@@ -286,4 +286,8 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE schedules ADD COLUMN activated_at TEXT;
   `,
+  // 10: Section E post-cap — schedule that started a research run (diff baseline per schedule).
+  `
+  ALTER TABLE research_runs ADD COLUMN schedule_id TEXT;
+  `,
 ];

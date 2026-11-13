@@ -14,6 +14,7 @@ import type { Decision, ModelRef, Phase, ResearchRun, Task, Workspace } from '..
 import { treeContext } from '../workspace/businessMap.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
+import { PipelineBusyError, tryLockPipeline } from './lock.js';
 import { failureReason, runTaskWithReview } from './reviewLoop.js';
 
 /** At most this many orchestrator runs per phase (initial plan + one follow-up round). */
@@ -405,7 +406,12 @@ async function executePhase(deps: ResearchDeps, rr: ResearchRun): Promise<Resear
  * (`done` or `failed`). Rejects if the workspace already has a running research run, or with
  * `AbortError` when `deps.signal` aborts.
  */
-export async function startPhase(workspaceId: string, phase: Phase, deps: ResearchDeps): Promise<ResearchRun> {
+export async function startPhase(
+  workspaceId: string,
+  phase: Phase,
+  deps: ResearchDeps,
+  opts: { scheduleId?: string } = {},
+): Promise<ResearchRun> {
   const { store } = deps;
   const running = currentResearchRun(store, workspaceId);
   if (running) throw new Error(`workspace '${workspaceId}' already has a running research run (${running.id}, ${running.phase})`);
@@ -415,24 +421,36 @@ export async function startPhase(workspaceId: string, phase: Phase, deps: Resear
     phase,
     status: 'running',
     startedAt: new Date().toISOString(),
+    ...(opts.scheduleId ? { scheduleId: opts.scheduleId } : {}),
   };
   store.researchRuns.insert(rr);
   return executePhase(deps, rr);
 }
 
-/** Runs phases sequentially in pipeline order; stops after a phase that fails. */
+/**
+ * Runs phases sequentially in pipeline order; stops after a phase that fails. Holds the
+ * workspace's pipeline lock for the whole pipeline (taken synchronously, before the first await),
+ * and rejects with `PipelineBusyError` when another pipeline holds it. `scheduleId` tags the runs.
+ */
 export async function runPipeline(
   workspaceId: string,
   phases: Phase[] = ALL_PHASES,
   deps: ResearchDeps,
+  opts: { scheduleId?: string } = {},
 ): Promise<ResearchRun[]> {
-  const out: ResearchRun[] = [];
-  for (const phase of orderPhases(phases)) {
-    const rr = await startPhase(workspaceId, phase, deps);
-    out.push(rr);
-    if (rr.status === 'failed') break;
+  const release = tryLockPipeline(deps.store, workspaceId);
+  if (!release) throw new PipelineBusyError(workspaceId);
+  try {
+    const out: ResearchRun[] = [];
+    for (const phase of orderPhases(phases)) {
+      const rr = await startPhase(workspaceId, phase, deps, opts);
+      out.push(rr);
+      if (rr.status === 'failed') break;
+    }
+    return out;
+  } finally {
+    release();
   }
-  return out;
 }
 
 export type ResumeReport = {
@@ -511,9 +529,13 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
   }
   const runs = store.researchRuns.list({ status: 'running' });
   // Continue on a later tick so callers (server boot) can finish their own setup first.
-  const done = new Promise<void>((r) => setImmediate(r)).then(() =>
-    Promise.all(runs.map((rr) => executePhase(deps, rr))),
-  );
+  // Continued runs hold their workspace's pipeline lock until they finish.
+  const releases = runs.map((rr) => tryLockPipeline(store, rr.workspaceId));
+  const done = new Promise<void>((r) => setImmediate(r))
+    .then(() => Promise.all(runs.map((rr) => executePhase(deps, rr))))
+    .finally(() => {
+      for (const r of releases) r?.();
+    });
   done.catch(() => {});
   return { failedRuns, requeuedTasks, waitingTasks, abandonedTasks, continuedRuns: runs.map((r) => r.id), done };
 }

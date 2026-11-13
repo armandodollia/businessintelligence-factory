@@ -237,7 +237,7 @@ export const specs = {
     table: 'research_runs',
     key: 'id',
     fields: {
-      id: 'text', workspaceId: 'text', phase: 'text', status: 'text', startedAt: 'text', endedAt: 'text',
+      id: 'text', workspaceId: 'text', phase: 'text', status: 'text', startedAt: 'text', endedAt: 'text', scheduleId: 'text',
     },
   } satisfies TableSpec<ResearchRun>,
   agentRuns: {

@@ -14,7 +14,7 @@ describe('boot', () => {
       const res = await fetch(`http://127.0.0.1:${port}/api/workspaces`);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual([]);
-      const mcp = await fetch(`http://127.0.0.1:${port}/mcp/tok_bogus`, { method: 'POST', body: '{}' });
+      const mcp = await fetch(`http://127.0.0.1:${port}/mcp/tok_bogus`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
       expect(mcp.status).toBe(401);
       expect(Object.keys(b.runtime.research.phaseRunners ?? {}).sort()).toEqual(['persona_panel', 'scoring']);
       expect(b.runtime.dataDir).toBe(join(dir, 'data'));
