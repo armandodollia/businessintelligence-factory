@@ -30,16 +30,26 @@ export function slugify(s: string): string {
     .replace(/-+$/, '');
 }
 
-/** Absolute agent.md path of a persona. */
+/** Absolute agent.md path of a persona (always the latest version). */
 export function agentMdPath(dataDir: string, workspaceId: string, slug: string): string {
   return join(resolve(dataDir), workspaceId, 'personas', `${slug}.md`);
 }
 
-/** Compiles the persona's agent.md (framed to its workspace scope) and writes it to `persona.agentMdPath`. */
+/** Versioned agent.md path next to the latest one: `<slug>.v<N>.md`. */
+export function versionedAgentMdPath(latestPath: string, version: number): string {
+  return latestPath.replace(/\.md$/, '') + `.v${version}.md`;
+}
+
+/**
+ * Compiles the persona's agent.md (framed to its workspace scope) and writes it as
+ * `<slug>.v<version>.md` (kept per version, spec §8b.3) and as `persona.agentMdPath` (`<slug>.md`,
+ * a copy of the latest version, so CLIs always load one stable path).
+ */
 export function writeAgentMd(store: Store, persona: Persona): string {
   const ws = store.workspaces.get(persona.workspaceId);
   const md = compileAgentMd(persona, ws ? { scopeName: scopeOf(ws).name } : {});
   mkdirSync(dirname(persona.agentMdPath), { recursive: true });
+  writeFileSync(versionedAgentMdPath(persona.agentMdPath, persona.version), md);
   writeFileSync(persona.agentMdPath, md);
   return md;
 }
@@ -85,6 +95,8 @@ export function savePersonaHandler(opts: MarketToolOptions): ExtraToolHandler {
 
     const { persona, decision } = store.transaction(() => {
       const existing = store.personas.list({ workspaceId: ctx.workspaceId, slug })[0];
+      const task = ctx.taskId ? store.tasks.get(ctx.taskId) : undefined;
+      const owner = task && task.workspaceId === ctx.workspaceId ? task : undefined;
       const persona: Persona = {
         id: existing?.id ?? newId('per'),
         workspaceId: ctx.workspaceId,
@@ -94,6 +106,10 @@ export function savePersonaHandler(opts: MarketToolOptions): ExtraToolHandler {
         agentMdPath: agentMdPath(opts.dataDir, ctx.workspaceId, slug),
         version: (existing?.version ?? 0) + 1,
         audience: input.audience,
+        // Review tracking (migration 11): this save is pending until its task's review loop ends.
+        status: 'pending',
+        taskId: owner?.id,
+        taskRound: owner?.round,
       };
       if (existing) store.personas.update(persona.id, persona);
       else store.personas.insert(persona);

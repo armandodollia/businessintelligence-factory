@@ -104,6 +104,7 @@ textarea.code { width: 100%; font-family: ui-monospace, monospace; font-size: 12
 .status.failed, .status.unverified { color: var(--error); }
 .status.verified, .status.done { color: #1d7a35; }
 .status.waiting_user { color: #a06800; font-weight: 600; }
+.status.superseded { color: var(--muted); text-decoration: line-through; }
 
 @media (max-width: 800px) {
   .split, .split.even { grid-template-columns: 1fr; }

@@ -1,11 +1,13 @@
 import { formatValue } from '../logic/format.js';
 import { useFindingIndex, useRecommendations, useScoringWeights } from '../logic/hooks.js';
-import type { FindingView, PersonaFeedback } from '../logic/types.js';
+import type { PersonaFeedback, RecommendationView, TreeFindingView } from '../logic/types.js';
 import { CriteriaRatings, CriterionRating } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
+import { LastReviewNote } from './LastReviewNote.js';
 
 export function Strategy({ wsId }: { wsId: string }) {
-  const { recommendations, loading, error, reload } = useRecommendations(wsId);
+  const recs = useRecommendations(wsId);
+  const { recommendations, loading, error, reload } = recs;
   const index = useFindingIndex(wsId);
   return (
     <div>
@@ -15,7 +17,14 @@ export function Strategy({ wsId }: { wsId: string }) {
         does not affect priority.
       </p>
       {error && <div className="error">{error}</div>}
+      {recs.actionError && <div className="error">{recs.actionError}</div>}
       {loading && <div className="muted">loading…</div>}
+      {recs.hiddenCount > 0 && (
+        <p className="muted small">
+          {recs.hiddenCount} recommendation{recs.hiddenCount === 1 ? '' : 's'} hidden (failed review or superseded by a later
+          revision).
+        </p>
+      )}
       <table className="strategy">
         <thead>
           <tr>
@@ -31,9 +40,16 @@ export function Strategy({ wsId }: { wsId: string }) {
             <tr key={r.id}>
               <td>{i + 1}</td>
               <td>
-                <b>{r.title}</b>
+                <b>{r.title}</b> {r.status && <span className={`status ${r.status}`}>{r.status}</span>}
                 <p>{r.summary}</p>
-                <LinkedFindings ids={r.findingIds} resolve={index.resolve} />
+                {recs.needsReviewFlag(r) && r.lastReview && <LastReviewNote review={r.lastReview} />}
+                <PanelToggle
+                  rec={r}
+                  used={recs.usedInPanel(r)}
+                  saving={recs.saving}
+                  onChange={(include) => void recs.setInclude(r.id, include)}
+                />
+                <LinkedFindings ids={r.findingIds} resolve={index.resolve} wsId={wsId} />
               </td>
               <td>
                 <CriterionRating
@@ -164,13 +180,52 @@ function PersonaFeedbackCell({ wsId, recId, feedback }: { wsId: string; recId: s
   );
 }
 
-/** Recommendation → findings → artifacts (spec §7.3): each cited finding expands to its evidence. */
+/** Whether the recommendation goes to the persona panel (verified by default; user override). */
+function PanelToggle({
+  rec,
+  used,
+  saving,
+  onChange,
+}: {
+  rec: RecommendationView;
+  used: boolean;
+  saving: boolean;
+  onChange: (include: boolean | null) => void;
+}) {
+  return (
+    <div className="small">
+      <label className="muted">
+        <input
+          type="checkbox"
+          aria-label={`use ${rec.id} in persona panel`}
+          checked={used}
+          disabled={saving}
+          onChange={(e) => onChange(e.currentTarget.checked)}
+        />{' '}
+        Use in persona panel
+        {rec.includeOverride !== undefined ? ' (your override)' : rec.status && rec.status !== 'verified' ? ' (excluded: not verified)' : ''}
+      </label>{' '}
+      {rec.includeOverride !== undefined && (
+        <button className="link" disabled={saving} onClick={() => onChange(null)}>
+          reset to default
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Recommendation → findings → artifacts (spec §7.3): each cited finding expands to its evidence.
+ * Findings of other nodes of the business tree are tagged with their source node.
+ */
 function LinkedFindings({
   ids,
   resolve,
+  wsId,
 }: {
   ids: string[];
-  resolve: (ids: string[]) => { found: FindingView[]; missing: string[] };
+  resolve: (ids: string[]) => { found: TreeFindingView[]; missing: string[] };
+  wsId: string;
 }) {
   const { found, missing } = resolve(ids);
   if (ids.length === 0) return <div className="muted">no findings cited</div>;
@@ -185,6 +240,9 @@ function LinkedFindings({
             <details>
               <summary>
                 <b>{f.subject}</b>: {f.claim} <span className={`status ${f.status}`}>{f.status}</span>
+                {f.sourceWorkspaceId && f.sourceWorkspaceId !== wsId && (
+                  <span className="tag">from {f.sourceWorkspaceId}</span>
+                )}
               </summary>
               <EvidenceList ids={f.evidence} />
             </details>

@@ -132,7 +132,9 @@ export const toolInputSchemas = {
           type: taskTypeSchema,
           brief: z.string().min(1),
           subject: z.string().optional(),
-          model: modelRefSchema,
+          model: modelRefSchema
+            .optional()
+            .describe('Omit to use the configured default for the task type (listed in your prompt); set only to override it'),
           needs_browser: z.boolean(),
           acceptance_criteria: z.array(z.string().min(1)).min(1),
         }),

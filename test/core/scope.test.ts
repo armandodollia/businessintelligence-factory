@@ -390,7 +390,7 @@ describe('scope and audiences', () => {
     const { store } = setup();
     const persona: Persona = {
       id: newId('per'), workspaceId: 'ws_a', slug: 'it-ivan', segment: 'IT staff', profile: {}, agentMdPath: 'x.md',
-      version: 1, audience: 'internal',
+      version: 1, audience: 'internal', status: 'pending',
     };
     store.personas.insert(persona);
     expect(store.personas.get(persona.id)).toEqual(persona);

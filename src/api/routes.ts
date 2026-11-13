@@ -7,7 +7,8 @@ import { ConfigError, parseConfig } from '../core/config/load.js';
 import { ROLES, type BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
 import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
-import { setIncludeInSynthesis } from '../core/evidence/synthesis.js';
+import { setIncludeInSynthesis, treeWorkspaceIds } from '../core/evidence/synthesis.js';
+import { lastReviewsByTask, setOutputInclude, withLastReview } from '../core/research/outputs.js';
 import { isPipelineLocked } from '../core/research/lock.js';
 import { resolveUserRequest } from '../core/harness/tools/handlers.js';
 import { uploadInternal } from '../core/internal/uploads.js';
@@ -125,7 +126,7 @@ const schemas = {
     patchText: z.string(),
     examples: z.array(z.unknown()).optional(),
   }),
-  /** `null` clears the override (back to the default: verified only). */
+  /** `null` clears the override (back to the default: verified only). Findings, recommendations, personas. */
   includeFinding: z.object({ include: z.boolean().nullable() }),
   scoringWeights: z.object({
     weights: z.partialRecord(z.enum(RECOMMENDATION_KEYS), z.number().min(0)).optional(),
@@ -346,34 +347,15 @@ export function createApp(deps: AppDeps): Hono {
    * Findings plus `lastReview` (spec §7.2): the latest effective reviewer verdict on the finding's
    * task (`score`, `issues`, `decisionId`, `at`, `synthetic`), so unverified findings can show the
    * objections. Reviews from reviewer runs that did not finish are ignored; synthetic reviews count.
+   * `?scope=tree`: findings of every node of the business tree, tagged with `sourceWorkspaceId`
+   * (recommendations may cite same-tree findings; Strategy resolves them).
    */
   app.get('/api/workspaces/:id/findings', (c) => {
     const id = workspace(c.req.param('id')).id;
-    type LastReview = { score: number; issues: unknown[]; decisionId: string; at: string; synthetic: boolean };
-    const lastReview = new Map<string, LastReview>();
-    // Same rule as the review loop: a submitted review counts only when its reviewer run finished
-    // `done`; otherwise the loop recorded a synthetic (score 0) review, which counts instead.
-    const reviews = store.decisions
-      .list({ workspaceId: id, kind: 'review' })
-      .map((d, i) => ({ d, i }))
-      .sort((a, b) => a.d.createdAt.localeCompare(b.d.createdAt) || a.i - b.i)
-      .map(({ d }) => d);
-    for (const d of reviews) {
-      const p = (d.payload ?? {}) as { tool?: string; event?: string; score?: unknown; issues?: unknown };
-      const synthetic = p.event === 'synthetic_review';
-      if (!synthetic && p.tool !== 'submit_review') continue;
-      if (typeof p.score !== 'number') continue;
-      if (!synthetic && store.agentRuns.get(d.agentRunId)?.status !== 'done') continue;
-      for (const taskId of d.refs) {
-        lastReview.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt, synthetic });
-      }
-    }
-    return c.json(
-      store.findings.list({ workspaceId: id }).map((f) => {
-        const review = lastReview.get(f.taskId);
-        return review ? { ...f, lastReview: review } : f;
-      }),
-    );
+    const ids = c.req.query('scope') === 'tree' ? treeWorkspaceIds(store, id) : [id];
+    const reviews = lastReviewsByTask(store, ids);
+    const findings = ids.flatMap((wsId) => store.findings.list({ workspaceId: wsId }).map((f) => ({ ...f, sourceWorkspaceId: wsId })));
+    return c.json(withLastReview(findings, reviews));
   });
   // User override (spec §7.2): include an unverified finding in synthesis, or exclude a verified one.
   app.post('/api/findings/:id/include', async (c) => {
@@ -382,11 +364,35 @@ export function createApp(deps: AppDeps): Hono {
     if (!store.findings.get(id)) throw new HttpError(404, `finding '${id}' not found`);
     return c.json(setIncludeInSynthesis(store, id, include));
   });
+  // User override for the persona panel / Strategy: include an unverified (or failed) recommendation
+  // or persona, or exclude a verified one. `null` resets to the default (verified only).
+  app.post('/api/recommendations/:id/include', async (c) => {
+    const id = c.req.param('id');
+    const { include } = await body(c, schemas.includeFinding);
+    if (!store.recommendations.get(id)) throw new HttpError(404, `recommendation '${id}' not found`);
+    return c.json(setOutputInclude(store, 'recommendation', id, include));
+  });
+  app.post('/api/personas/:id/include', async (c) => {
+    const id = c.req.param('id');
+    const { include } = await body(c, schemas.includeFinding);
+    if (!store.personas.get(id)) throw new HttpError(404, `persona '${id}' not found`);
+    return c.json(setOutputInclude(store, 'persona', id, include));
+  });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
-  app.get('/api/workspaces/:id/personas', (c) => c.json(store.personas.list({ workspaceId: workspace(c.req.param('id')).id })));
-  app.get('/api/workspaces/:id/recommendations', (c) =>
-    c.json(store.recommendations.list({ workspaceId: workspace(c.req.param('id')).id }).sort((a, b) => b.priority - a.priority)),
-  );
+  /** Personas with review `status` and `lastReview` of the task that last saved them. */
+  app.get('/api/workspaces/:id/personas', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json(withLastReview(store.personas.list({ workspaceId: id }), lastReviewsByTask(store, [id])));
+  });
+  /**
+   * Recommendations by priority, with review `status` and `lastReview` of the task that saved them
+   * (all statuses: the web app hides superseded and failed ones and flags unverified ones).
+   */
+  app.get('/api/workspaces/:id/recommendations', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const recs = store.recommendations.list({ workspaceId: id }).sort((a, b) => b.priority - a.priority);
+    return c.json(withLastReview(recs, lastReviewsByTask(store, [id])));
+  });
   app.get('/api/workspaces/:id/decisions', (c) => {
     const id = workspace(c.req.param('id')).id;
     const kind = c.req.query('kind');

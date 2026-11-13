@@ -1,10 +1,8 @@
 import { CronExpressionParser } from 'cron-parser';
 import type { ResearchDeps } from '../research/deps.js';
 import { currentResearchRun, runPipeline } from '../research/orchestrator.js';
-import { recordSystemDecision } from '../systemDecision.js';
-import type { ResearchRun, Schedule } from '../types.js';
+import type { Schedule } from '../types.js';
 import { isPipelineLocked } from '../research/lock.js';
-import { diffRuns } from './diff.js';
 
 /** How often schedules are checked (spec: every 60 s). */
 export const SCHEDULER_INTERVAL_MS = 60_000;
@@ -46,43 +44,14 @@ export function scheduleBaseline(s: Pick<Schedule, 'lastRunAt' | 'activatedAt'>,
   return times.length ? Math.max(...times) : startedAt;
 }
 
-/**
- * The latest finished (`done`) run of the same schedule + phase that started before `rr`. Manual
- * runs and other schedules' runs are never the baseline, so "what changed" compares like with like.
- */
-export function previousRun(deps: Pick<ResearchDeps, 'store'>, rr: ResearchRun): ResearchRun | undefined {
-  if (!rr.scheduleId) return undefined;
-  return deps.store.researchRuns
-    .list({ workspaceId: rr.workspaceId, phase: rr.phase, status: 'done', scheduleId: rr.scheduleId })
-    .filter((r) => r.id !== rr.id && r.startedAt <= rr.startedAt)
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-    .at(-1);
-}
+export { previousRun } from './whatChanged.js';
 
-/** Runs one schedule's pipeline and records a "what changed" Decision per phase that has a predecessor. */
+/**
+ * Runs one schedule's pipeline. `runPipeline` records the "what changed" Decision per phase that has
+ * a predecessor when the scheduled pipeline finishes (also after a resume; see `recordWhatChanged`).
+ */
 async function runSchedule(schedule: Schedule, deps: ResearchDeps): Promise<void> {
-  const runs = await runPipeline(schedule.workspaceId, schedule.phases, deps, { scheduleId: schedule.id });
-  for (const rr of runs) {
-    if (rr.status !== 'done') continue;
-    const prev = previousRun(deps, rr);
-    if (!prev) continue;
-    const diff = diffRuns(prev.id, rr.id, deps);
-    recordSystemDecision(deps, {
-      workspaceId: rr.workspaceId,
-      actor: 'scheduler',
-      payload: {
-        tool: 'scheduler',
-        event: 'what_changed',
-        scheduleId: schedule.id,
-        scheduleName: schedule.name,
-        phase: rr.phase,
-        prevRunId: prev.id,
-        nextRunId: rr.id,
-        ...diff,
-      },
-      refs: [rr.id, prev.id, ...diff.newFindings, ...diff.changedArtifacts.map((c) => c.next)],
-    });
-  }
+  await runPipeline(schedule.workspaceId, schedule.phases, deps, { scheduleId: schedule.id });
 }
 
 /**

@@ -245,3 +245,14 @@ export interface LastReview {
 }
 
 export type FindingView = Finding & { lastReview?: LastReview };
+
+export type { OutputStatus } from '../../../src/core/types.js';
+
+/** A finding as listed by the API; `sourceWorkspaceId` names its node (`?scope=tree` lists the whole tree). */
+export type TreeFindingView = FindingView & { sourceWorkspaceId?: string };
+
+/** Recommendation with the last review of the task that saved it (`GET .../recommendations`). */
+export type RecommendationView = Recommendation & { lastReview?: LastReview };
+
+/** Persona with the last review of the task that last saved it (`GET .../personas`). */
+export type PersonaView = PersonaNode & { lastReview?: LastReview };

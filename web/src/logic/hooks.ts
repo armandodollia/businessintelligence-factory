@@ -10,9 +10,10 @@ import {
   WEIGHT_KEYS,
   type AppliedPromptPatch,
   type ChangeEntry,
-  type FindingView,
+  type OutputStatus,
   type PatchRole,
   type PromptPatch,
+  type TreeFindingView,
   type WeightKey,
   type WhatChangedPayload,
 } from './types.js';
@@ -466,10 +467,37 @@ export function useResearch(wsId: string | null | undefined) {
 
 /**
  * Mirrors `isSynthesisEligible` in src/core/evidence/synthesis.ts: verified findings feed
- * recommendation synthesis unless the user overrides per finding (`includeInSynthesis`).
+ * recommendation synthesis unless the user overrides per finding (`includeInSynthesis`);
+ * superseded findings never do.
  */
 export function usedInSynthesis(f: Pick<Finding, 'status' | 'includeInSynthesis'>): boolean {
+  if (f.status === 'superseded') return false;
   return f.includeInSynthesis ?? f.status === 'verified';
+}
+
+type ReviewedOutput = { status?: OutputStatus | undefined; includeOverride?: boolean | undefined };
+
+/**
+ * Mirrors `isOutputUsable` in src/core/research/outputs.ts: recommendations / personas go to the
+ * persona panel when verified, unless the user overrides; superseded ones never do.
+ */
+export function usedInPanel(x: ReviewedOutput): boolean {
+  if (x.status === 'superseded') return false;
+  return x.includeOverride ?? (x.status ?? 'pending') === 'verified';
+}
+
+/**
+ * Mirrors `isRecommendationShown`: Strategy hides superseded recommendations, and failed ones unless
+ * the user included them.
+ */
+export function shownInStrategy(r: ReviewedOutput): boolean {
+  if (r.status === 'superseded') return false;
+  return r.status !== 'failed' || r.includeOverride === true;
+}
+
+/** True when an output's review did not pass (shown flagged with the last reviewer's objections). */
+export function needsReviewFlag(x: ReviewedOutput): boolean {
+  return x.status !== undefined && x.status !== 'verified';
 }
 
 export function useFindings(wsId: string | null | undefined) {
@@ -502,15 +530,16 @@ export function useFindings(wsId: string | null | undefined) {
 }
 
 /**
- * Findings of a workspace by id, for recommendation → findings → artifacts traversal (spec §7.3).
+ * Findings of the workspace's business tree by id, for recommendation → findings → artifacts
+ * traversal (spec §7.3; recommendations may cite findings of other nodes of the same tree).
  * `resolve(ids)` returns the findings in citation order plus ids that could not be found.
  */
 export function useFindingIndex(wsId: string | null | undefined) {
-  const res = useResource(`findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId) : null);
+  const res = useResource(`tree-findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId, { tree: true }) : null);
   const byId = useMemo(() => new Map((res.data ?? []).map((f) => [f.id, f])), [res.data]);
   const resolve = useCallback(
     (ids: string[]) => {
-      const found: FindingView[] = [];
+      const found: TreeFindingView[] = [];
       const missing: string[] = [];
       for (const id of ids) {
         const f = byId.get(id);
@@ -577,16 +606,57 @@ export function useEvidence(artifactIds: string[]) {
 
 export function usePersonas(wsId: string | null | undefined) {
   const res = useResource(`personas:${wsId ?? ''}`, wsId ? () => api.listPersonas(wsId) : null);
-  return { personas: res.data ?? [], loading: res.loading, error: res.error, reload: res.reload };
+  const action = useAction();
+  /** Persona-panel override; `null` resets to the default (verified personas only). */
+  const setInclude = useCallback(
+    async (personaId: string, include: boolean | null) => {
+      await action.run(() => api.setPersonaInclude(personaId, include));
+      await res.reload();
+    },
+    [action.run, res.reload],
+  );
+  return {
+    personas: res.data ?? [],
+    usedInPanel,
+    needsReviewFlag,
+    setInclude,
+    saving: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
 }
 
+/**
+ * Recommendations for Strategy, by priority. Superseded ones are never listed; failed ones only when
+ * the user included them (`hiddenCount` counts the rest). Unverified ones are listed and flagged.
+ */
 export function useRecommendations(wsId: string | null | undefined) {
   const res = useResource(`recs:${wsId ?? ''}`, wsId ? () => api.listRecommendations(wsId) : null);
-  const recommendations = useMemo(
-    () => [...(res.data ?? [])].sort((a, b) => b.priority - a.priority),
-    [res.data],
+  const action = useAction();
+  const all = useMemo(() => [...(res.data ?? [])].sort((a, b) => b.priority - a.priority), [res.data]);
+  const recommendations = useMemo(() => all.filter(shownInStrategy), [all]);
+  /** Persona-panel / Strategy override; `null` resets to the default (verified only). */
+  const setInclude = useCallback(
+    async (recId: string, include: boolean | null) => {
+      await action.run(() => api.setRecommendationInclude(recId, include));
+      await res.reload();
+    },
+    [action.run, res.reload],
   );
-  return { recommendations, loading: res.loading, error: res.error, reload: res.reload };
+  return {
+    recommendations,
+    hiddenCount: all.length - recommendations.length,
+    usedInPanel,
+    needsReviewFlag,
+    setInclude,
+    saving: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
 }
 
 export function useDecisions(wsId: string | null | undefined, kind?: Decision['kind']) {

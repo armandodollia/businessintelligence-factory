@@ -55,7 +55,7 @@ function personaInput(evidence: string[], extra: Record<string, unknown> = {}) {
 function rec(id: string): Recommendation {
   return {
     id, workspaceId: 'ws_a', title: `Rec ${id}`, summary: `Do ${id}`, criteria: { upside: 4 }, findingIds: [],
-    personaFeedback: [], priority: 0, createdAt: new Date().toISOString(),
+    personaFeedback: [], priority: 0, createdAt: new Date().toISOString(), status: 'verified',
   };
 }
 
@@ -74,6 +74,7 @@ async function panelSeeded() {
   for (const [segment, audience] of [['SMB finance lead', 'external'], ['Payments ops analyst', 'internal']] as const) {
     expect((await t.handle(ctx(), 'save_persona', personaInput([t.art], { segment, audience }))).ok).toBe(true);
   }
+  for (const p of t.store.personas.list({ workspaceId: 'ws_a' })) t.store.personas.update(p.id, { status: 'verified' });
   t.store.recommendations.insert(rec('rec_1'));
   t.state.pick = (req) =>
     req.role === 'persona' ? feedbackScript(req.prompt, req.systemPrompt.includes('name: smb-finance-lead') ? 5 : 1) : undefined;

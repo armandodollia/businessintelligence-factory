@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import type { ToolInput } from '../harness/tools/registry.js';
 import { loadPrompt, promptVersion, renderTemplate, withCalibration } from '../prompts/index.js';
+import { isOutputUsable } from '../research/outputs.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type ResearchDeps } from '../research/deps.js';
 import { PERSONA_FEEDBACK_KEYS } from '../scoring/criteria.js';
 import type { Decision, Persona, PersonaFeedback, Recommendation } from '../types.js';
@@ -135,7 +136,8 @@ function attach(deps: ResearchDeps, recId: string, fb: PersonaFeedback): void {
 }
 
 /**
- * Persona panel (spec §8b.4): every recommendation of the workspace is put to each persona
+ * Persona panel (spec §8b.4): every usable recommendation of the workspace (verified, or included by
+ * the user; never superseded) is put to each usable persona (same rule)
  * independently — one `persona` run per pair, system prompt = the persona's agent.md, user prompt =
  * `persona_panel.md`. The run must call `submit_persona_feedback` (the dispatcher logs the
  * `persona_feedback` Decision); its feedback is attached to `Recommendation.personaFeedback` with
@@ -147,8 +149,9 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
   const report: PanelReport = { feedback: 0, missing: [] };
   const ws = store.workspaces.get(workspaceId);
   const scope = ws ? scopeOf(ws).name : workspaceId;
-  const personas = store.personas.list({ workspaceId });
-  const recs = store.recommendations.list({ workspaceId });
+  // Only reviewed outputs go to the panel (spec §7.2): verified, or included by the user.
+  const personas = store.personas.list({ workspaceId }).filter(isOutputUsable);
+  const recs = store.recommendations.list({ workspaceId }).filter(isOutputUsable);
   if (!personas.length || !recs.length) return report;
   const template = loadPrompt('persona_panel');
   const model = config.roles.persona;

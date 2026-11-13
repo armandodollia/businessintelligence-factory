@@ -270,15 +270,17 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         .find((f) => f.workspaceId === ctx.workspaceId);
       if (dup) {
         // Same (task, claim): update the mutable fields in place (keeping the id) and log a new
-        // score Decision when the judgment (criteria / subject) changed.
+        // score Decision when the judgment (criteria / subject) changed. Re-saving marks the finding
+        // as re-submitted in the task's current round (superseded tracking, reviewLoop).
         const evidence = [...new Set([...dup.evidence, ...input.evidence])];
         const judgmentChanged =
           JSON.stringify(dup.criteria) !== JSON.stringify(input.criteria) || dup.subject !== input.subject;
         if (!judgmentChanged && evidence.length === dup.evidence.length) {
+          if (dup.taskRound !== task.round) store.findings.update(dup.id, { taskRound: task.round });
           return okData({ findingId: dup.id, duplicate: true });
         }
         const d = store.transaction(() => {
-          store.findings.update(dup.id, { evidence, criteria: input.criteria, subject: input.subject });
+          store.findings.update(dup.id, { evidence, criteria: input.criteria, subject: input.subject, taskRound: task.round });
           if (!judgmentChanged) return undefined;
           return recordDecision(
             ctx,
@@ -301,6 +303,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         evidence: input.evidence,
         status: 'pending',
         createdAt: new Date().toISOString(),
+        taskRound: task.round,
       };
       const d = store.transaction(() => {
         store.findings.insert(finding);
