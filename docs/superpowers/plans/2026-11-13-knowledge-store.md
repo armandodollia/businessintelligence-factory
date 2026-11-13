@@ -648,3 +648,27 @@ Binding for the packages named; recorded by the orchestrator from the design thr
   3. `promptStoreGaps` (`src/core/prompts/store.ts`) lists columns by hand: KS-4 adds
      `retrieval_events.prompt_version`; KS-5 ensures `prompt_context` retrieval rows
      carry the same prompt hash the run records.
+
+## Design-thread rulings after the KS-0 gate (2026-11-13)
+
+KS-0 passed its gate (Sol 9/10) at 68c744f.
+
+1. Retractions citing an upload also flag the retracted fact: accepted.
+2. **KS-1:** `duplicate_of` is followed one level; test the invariant that
+   `duplicate_of` always points at an artifact whose own `duplicate_of` is NULL.
+3. **KS-2 (moved from KS-6):** the package that starts writing observations closes the
+   export read path in the same merge. `export.ts` excludes any finding with the
+   stored `upload_derived` flag and any record `itemIsUploadDerived` resolves as
+   derived, with a test. KS-6 keeps only `runIsUploadExposed` and the new export lines.
+4. **Hard requirement, KS-2/KS-4/KS-5:** every response or prompt section that carries
+   store text writes a `retrieval_events` row listing every item whose text it
+   carried: search hits (snippets included) and card lines (KS-4); the duplicate
+   handshake candidates in `save_finding` and the reviewer context quotes / prior
+   claim (KS-2); KS-5 briefings; `read_workspace`. Existing prompt sections that list
+   findings stay unlogged until KS-5 replaces them.
+5. **KS-3 entity names:** no sticky column. Add `entityIsUploadOnly` beside
+   `itemIsUploadDerived`: an entity is upload-only while every record referencing it
+   (facts, typed records, captures) is upload-derived; one non-derived usable
+   reference makes it publicly attested. Route entity ids through it in exposure
+   checks. On merge, an alias taken from an upload-only entity keeps that status
+   (representation is the builder's call). Merge suggestions follow the same rule.
