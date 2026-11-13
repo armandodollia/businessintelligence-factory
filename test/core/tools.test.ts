@@ -69,7 +69,7 @@ describe('role scope table', () => {
     );
     expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks']));
     expect(new Set(ROLE_TOOLS.synthesizer)).toEqual(
-      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result']),
+      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review']),
     );
     for (const tools of Object.values(ROLE_TOOLS)) for (const t of tools) expect(TOOL_NAMES).toContain(t);
   });

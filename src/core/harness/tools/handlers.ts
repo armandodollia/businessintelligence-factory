@@ -229,6 +229,16 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       if (missing.length) {
         return fail(`evidence references unknown artifacts (not in this workspace): ${missing.join(', ')}`);
       }
+      // Idempotent per (task, claim): a rate-limit retry restarts the agent on the same run and may
+      // replay save_finding. The existing finding is kept and the new evidence merged into it.
+      const dup = store.findings
+        .list({ taskId: task.id, claim: input.claim })
+        .find((f) => f.workspaceId === ctx.workspaceId);
+      if (dup) {
+        const evidence = [...new Set([...dup.evidence, ...input.evidence])];
+        if (evidence.length !== dup.evidence.length) store.findings.update(dup.id, { evidence });
+        return okData({ findingId: dup.id, duplicate: true });
+      }
       const finding: Finding = {
         id: newId('fnd'),
         workspaceId: ctx.workspaceId,

@@ -31,7 +31,7 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   reviewer: ['log_decision', 'submit_review', 'read_artifact'],
   persona: ['log_decision', 'submit_persona_feedback'],
   interviewer: ['log_decision', 'update_profile', 'save_symptom'],
-  synthesizer: [...BASE, 'save_recommendation', 'save_finding', 'submit_result'],
+  synthesizer: [...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review'],
 };
 
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
