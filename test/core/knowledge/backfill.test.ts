@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ArtifactStore } from '../../../src/core/evidence/artifacts.js';
+import { uploadInternal } from '../../../src/core/internal/uploads.js';
 import { backfillKnowledge } from '../../../src/core/knowledge/backfill.js';
 import { ensureEntity, entityNameKey, findEntityByKey } from '../../../src/core/knowledge/entityKeys.js';
 import { evidenceIncludesUpload, internalUploadIds } from '../../../src/core/scoring/export.js';
@@ -171,6 +173,41 @@ describe('knowledge backfill (KS-0)', () => {
     backfillKnowledge(s);
     expect(k.entities.list()).toHaveLength(n);
     expect(s.findings.get('fnd_new')!.entityId).toBe(globexId); // resolved to the survivor
+  });
+});
+
+describe('upload_derived in normal operation (design §12)', () => {
+  it('triggers keep the flag equal to the export expansion when an upload dedupes onto a cited page', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bif-kup-'));
+    const s = openStore(join(dir, 'bif.db'));
+    opened.push(s);
+    const artifacts = new ArtifactStore(s, dir);
+    s.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: T0 });
+    const page = artifacts.save({ workspaceId: 'ws_a', kind: 'page_snapshot', mime: 'text/html', bytes: '<p>KPI table</p>' });
+    const other = artifacts.save({ workspaceId: 'ws_a', kind: 'page_snapshot', mime: 'text/html', bytes: '<p>public</p>' });
+    const cite = (id: string, evidence: string[]) =>
+      s.findings.insert({ id, workspaceId: 'ws_a', runId: 'r', taskId: 't', subject: 'Acme', claim: id, criteria: {}, evidence, status: 'verified', createdAt: T0 });
+    cite('fnd_page', [page.id]);
+    cite('fnd_other', [other.id]);
+    s.findings.insert({
+      id: 'fnd_page_v2', workspaceId: 'ws_a', runId: 'r', taskId: 't2', subject: 'Acme', claim: 'v2', criteria: {}, evidence: [other.id],
+      status: 'pending', createdAt: T0, lineageId: 'fnd_page', version: 2, replacesId: 'fnd_page', lifecycle: 'candidate',
+    });
+    const agree = () => {
+      const uploads = internalUploadIds(s);
+      for (const a of s.artifacts.list()) expect(a.uploadDerived, a.id).toBe(uploads.has(a.id));
+      for (const f of s.findings.list().filter((x) => x.version === 1)) expect(f.uploadDerived, f.id).toBe(evidenceIncludesUpload(s, f.id, uploads));
+    };
+    agree();
+    expect(s.findings.list().some((f) => f.uploadDerived)).toBe(false);
+    // The user uploads the same bytes: the existing page artifact is now an internal upload.
+    const up = uploadInternal('ws_a', { name: 'kpi.html', bytes: new TextEncoder().encode('<p>KPI table</p>'), mime: 'text/html' }, { store: s, artifacts });
+    expect(up.id).toBe(page.id);
+    agree();
+    expect(s.findings.get('fnd_page')!.uploadDerived).toBe(true);
+    expect(s.findings.get('fnd_page_v2')!.uploadDerived).toBe(true); // sticky along the lineage
+    expect(s.findings.get('fnd_other')!.uploadDerived).toBe(false);
+    expect(backfillKnowledge(s).uploadDerived).toEqual({ artifacts: 0, findings: 0, chunks: 0 }); // nothing left to do
   });
 });
 

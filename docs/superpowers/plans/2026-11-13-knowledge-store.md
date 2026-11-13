@@ -519,3 +519,76 @@ Smaller decisions taken while building KS-1a (none changes §3, §9 or §12).
   sequences (that is `trust.ts` / ingest); `error` is one line ≤ 300 chars but may
   quote a fragment of the input, so treat it like the artifact's text (same tree,
   upload-derived for uploads).
+
+## KS-0 builder notes
+
+Smaller decisions taken while building KS-0 (none changes §3, §9 or §12).
+
+- **Migration 18** follows the plan's table and column list exactly. Additions beyond the draft:
+  index `artifact_texts_status`, index `entity_merge_suggestions_root (root, status)`, FTS
+  update triggers limited to the indexed columns (`AFTER UPDATE OF subject, claim`, …), legacy
+  capture ids `cap_<artifact id without 'art_'>` (`cap_<id>` for other prefixes), and these
+  triggers:
+  - `retrieval_events` refuses UPDATE / DELETE (append-only, §13).
+  - Every new finding gets `lineage_id = id` and `first_seen_at = created_at` when not given, and a
+    `home` row in `item_scopes`; every new artifact gets a `home` scope row and an
+    `artifact_texts` row with status `pending`. So rows from any code path satisfy the invariants;
+    KS-1 updates (not inserts) the text row, KS-2 replaces the scope rows for `applies_to`.
+  - `upload_derived` (§12) is maintained in SQL and is sticky (an update from 1 to 0 aborts). Set
+    on: artifacts of kind `upload`; artifacts listed in any `profiles.data.uploads` (on profile
+    insert / update); chunks of flagged artifacts; findings whose `evidence` or `finding_evidence`
+    cites a flagged artifact (at insert, on evidence update, and when the artifact is flagged later);
+    findings with a `confirm` observation citing one; later versions of a flagged lineage. A
+    rejected confirmation still flags (conservative). KS-2 may set the flag itself; it never needs
+    to clear it.
+  - Never VACUUM without an FTS `rebuild` afterwards (VACUUM may renumber rowids). BIF never VACUUMs today.
+- **Repositories** for the new tables live in a delimited block at the end of `repos.ts` as
+  `knowledgeRepos(store)` (memoized per connection, like `usageRepos` / `learningRepos`), not in
+  `createRepos`, so `Store` and its hot block are untouched. Composite-key tables
+  (`finding_evidence`, `item_scopes`, `retrieval_uses`) use `LinkRepo` (insert, insertIgnore, list,
+  delete by filter; no get / update). The chunk row type is `TextChunk` (KS-1a owns `Chunk`).
+- **Types:** `EntityKind` / `ENTITY_KINDS` live in `config/schema.ts` (the config validates
+  `freshness.byEntityKind`) and are re-exported by `types.ts`, like `Role`. `RelationType` and
+  `RelationSourceKind` are unions in `types.ts`; KS-3 owns the runtime `RELATION_TYPES` list and
+  should type it `readonly RelationType[]`. `RetrievalRole = Role | 'user'` (API reads, §17).
+  `RetrievalEvent.scope` is text: `node`, `tree` or `node:<workspaceId>` when narrowed.
+- **Scope:** `KnowledgeScope` gains `ancestorIds` (nearest first) so `scopeRank` can tell
+  descendants from ancestors. `nodeIds` order: self, descendants (breadth-first), ancestors.
+  `narrowTo` to a sibling is allowed (same tree) and returns that node's own view. Unknown and
+  out-of-tree ids both raise `KnowledgeNotFoundError` (`notFound(kind, id)`: "<kind> '<id>' not
+  found"). `setItemScopes` checks every node against the item's own tree and replaces all rows in
+  one transaction.
+- **Budgets:** budget kinds are `search`, `card`, `expand`, `briefing`; KS-4 uses `expand` for
+  `read_artifact` and `search` for `list_changes`. `budgetFor(config, role, provider, kind,
+  requested?)`: role value else default, times the provider scale (floor), capped by
+  `hardMaxTokens`, lowered (never raised) by `requested`, at least 1. `fitToBudget` counts each
+  item as `estimateTokens(render(item) + '\n')`, adds an optional envelope `overhead`, returns
+  `{ items, tokens, truncated, more }` and only ever a prefix; an item bigger than the budget is
+  not returned — cut it with `truncateToTokens` first. Cursors: `cursorKey(params)` (sha256 of the
+  canonical JSON, 16 hex), `encodeCursor` / `decodeCursor` (base64url `{v,k,o}`; wrong request or
+  malformed → `InvalidCursorError`), `fitPage` for paging.
+- **Trust:** `stripFences` removes invisible format characters and every run of ≥ 3 angle
+  brackets, including fullwidth / small-form lookalikes, repeating until none remains (so removal
+  cannot create a new run). The fence label keeps only `[A-Za-z0-9_-]`. `redactServed` redacts the
+  identity secrets of every node of the caller's tree (text served to a node may come from any
+  node of its tree).
+- **Retrieval log:** queries are redacted with `redactServed` and capped at 2 000 chars; the bus
+  event is `{ type: 'retrieval', workspaceId, retrievalEventId, agentRunId?, taskId? }`. It is
+  not yet persisted to `bus_events` (KS-6). `runIsUploadExposed` reads only `retrieval_events`, so
+  today's unlogged `read_artifact` calls are not covered until KS-4 logs them.
+- **Config defaults not fixed by the design:** `dedupe.similarityFloor` 0.5 on a 0–1 scale (KS-2
+  defines the measure), `retention.pruneMinAgeDays` 90, `budgets.providers` empty (scale 1),
+  `freshness.byEntityKind` empty. `chunkTokens > maxChunkTokens` is a config error.
+- **Backfill** (`knowledge/backfill.ts`, called in `createRuntime` right after `openStore`):
+  incremental instead of flag-guarded — each step touches only rows still missing what it adds, so
+  rows saved by pre-KS-1/2/3 code paths are completed at the next start and user edits are never
+  undone. Entities: competitor → `competitor` (name), persona → `persona` (named by `segment`),
+  symptom → `symptom`, strength → `topic` (no strength kind), finding subject → existing
+  `competitor` / `persona` / `company` entity with that key or alias in the tree (survivor of a
+  merge), else a `company` entity when the subject is a node's scope name (created on this first
+  use, home = that node), else `topic`; all versions of a lineage share the entity. Hypotheses are
+  left to KS-3 (their text is a sentence, not a name). Also sets `last_confirmed_at = created_at`
+  for verified findings never confirmed (same rule as the migration).
+- **Upload authority:** `scoring/export.ts` exports `internalUploadIds` and
+  `evidenceIncludesUpload` (delimited block); the backfill and the tests use them, so the flag
+  and the export's expansion agree by construction.

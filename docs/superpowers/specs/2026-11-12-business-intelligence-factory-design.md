@@ -281,6 +281,10 @@ Criteria agents assign (each with reasoning + evidence links):
 - **telemetry** (optional): `bus_events` retention in days; OTLP/HTTP JSON log export of the event
   bus (off by default; metadata only — ids, types, statuses, harness error text — never agent or
   user free text, so upload-derived text cannot leave through it)
+- **knowledge** (optional, every field defaulted): response budgets per kind (search / card /
+  expand / briefing) with per-role overrides and per-provider scale, `hardMaxTokens`, freshness
+  TTLs, extraction and chunking limits, caption rule, duplicate-handshake settings, prune minimum
+  age (knowledge store design §16; read through `knowledgeSettings`)
 
 Editable in a simple settings page and as a file.
 

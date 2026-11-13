@@ -32,6 +32,13 @@ the agent CLIs call into, and a small React web app. Design spec:
    - optional `escalation` (`enabled`, `model` — default `roles.orchestrator`, `maxQuestions` ≤ 3,
      `maxPerTask`, default 2) and `telemetry` (`busEventRetentionDays`, default 30, 0 = keep;
      `otlp: { enabled, endpoint, headers, serviceName }`, off by default).
+   - optional `knowledge` (knowledge store; every field has a default): `budgets` (tokens per
+     response kind `search` 1200 / `card` 800 / `expand` 2000 / `briefing` 1500, per-role overrides —
+     reviewer `expand` 3000, synthesizer `briefing` 4000 — and per-provider scale), `hardMaxTokens`
+     (8000), `freshness` (`defaultDays` 90, `byEntityKind`), `extraction` (`maxTextChars`,
+     `chunkTokens` 400, `maxChunkTokens` 600, `xlsxMaxRows`, `inlineMaxBytes`, `concurrency`),
+     `captions` (`required`, `minChars` 20), `dedupe` (`candidateLimit` 3, `similarityFloor`),
+     `retention` (`pruneMinAgeDays`).
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
