@@ -19,7 +19,7 @@ afterEach(() => {
 function setup() {
   const t = lessonsSetup(opened, (c) => (c.user = { id: 'erin' }));
   const h = lessonsHarness(t, () => undefined);
-  const app = createApp({ store: t.store, artifacts: h.artifacts, events: h.events, config: t.config, research: h.deps });
+  const app = createApp({ store: t.store, artifacts: h.artifacts, events: h.events, config: t.config, research: h.deps, interviewFake: async () => 'Thanks.' });
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await app.request(path, { method, headers: { 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: res.status, body: (await res.json()) as any };
@@ -54,5 +54,101 @@ describe('human actions record the configured actor (Opus 5)', () => {
     expect(listFeedback(t.store, { kind: 'lesson_retire_request' })[0]).toMatchObject({
       actor: 'erin', targetType: 'lesson', targetId: pr.body.id, afterJson: { ruleId: acc.body.rule.id },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Re-gate (Opus 4): every mutating route records its actor. The table names, for each route of the real
+// app, how: proven in this file, proven by another test file (which must mention the route), or exempt
+// (with the reason). A new mutating route fails the enumeration until it is added here.
+
+const HERE = 'test/api/actorRoutes.test.ts';
+const ROUTES: Record<string, { test: string } | { exempt: string }> = {
+  'POST /api/workspaces': { test: HERE },
+  'POST /api/workspaces/:id/interview': { test: HERE },
+  'POST /api/workspaces/:id/uploads': { test: HERE },
+  'POST /api/workspaces/:id/research': { test: HERE },
+  'POST /api/workspaces/:id/schedules': { test: HERE },
+  'PATCH /api/workspaces/:id/schedules': { test: HERE },
+  'PUT /api/config': { test: HERE },
+  'POST /api/workspaces/:id/lessons/retro': { test: HERE },
+  'POST /api/audit-schedules/:id': { test: HERE },
+  'POST /api/workspaces/:id/lessons/evaluate': { test: HERE },
+  'POST /api/workspaces/:id/lessons/rules/:rid/propose-retire': { test: HERE },
+  'POST /api/workspaces/:id/calibration/prompt-patch': { exempt: 'computes a proposal and writes nothing; applying it is the actored route below' },
+  'POST /api/unit-proposals/:id': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/findings/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/recommendations/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/personas/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/competitors/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/hypotheses/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/hypotheses/:id/correct': { test: 'test/api/feedbackRoutes.test.ts' },
+  'PATCH /api/workspaces/:id/profile': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/requests/:id': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/ratings': { test: 'test/api/feedbackRoutes.test.ts' },
+  'PUT /api/workspaces/:id/scoring-weights': { test: 'test/api/feedbackRoutes.test.ts' },
+  'POST /api/workspaces/:id/calibration/prompt-patch/apply': { test: 'test/api/usageRoutes.test.ts' },
+  'POST /api/workspaces/:id/calibration/versions/:versionId/revert': { test: 'test/api/usageRoutes.test.ts' },
+  'POST /api/requests/:id/escalation-answer': { test: 'test/api/oversight.test.ts' },
+  'POST /api/workspaces/:id/knowledge/merge-suggestions/:sid/accept': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/knowledge/merge-suggestions/:sid/reject': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/knowledge/entities/merge': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/knowledge/entities/:entityId/rename': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/knowledge/facts/:factId/retract': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'PUT /api/workspaces/:id/knowledge/facts/:factId/scopes': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/knowledge/facts/:factId/accept-replacement': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/knowledge/gc/prune': { test: 'test/api/knowledgeRoutes.test.ts' },
+  'POST /api/workspaces/:id/lessons/proposals/:pid/accept': { test: 'test/api/lessons.test.ts' },
+  'POST /api/workspaces/:id/lessons/proposals/:pid/reject': { test: 'test/api/lessons.test.ts' },
+  'POST /api/workspaces/:id/audits': { test: 'test/api/experimentRoutes.test.ts' },
+  'POST /api/workspaces/:id/audit-schedules': { test: 'test/api/experimentRoutes.test.ts' },
+  'POST /api/workspaces/:id/experiments': { test: 'test/api/experimentRoutes.test.ts' },
+};
+
+describe('every mutating route records its actor (re-gate, Opus 4)', () => {
+  it('enumerates the mutating routes of the real app: each is proven, or exempt with a reason', async () => {
+    const t = setup();
+    const app = createApp({ store: t.store, artifacts: lessonsHarness(t, () => undefined).artifacts, events: lessonsHarness(t, () => undefined).events, config: t.config, research: lessonsHarness(t, () => undefined).deps });
+    const mutating = [...new Set((app as unknown as { routes: Array<{ method: string; path: string }> }).routes
+      .filter((r) => !['GET', 'ALL', 'HEAD', 'OPTIONS'].includes(r.method)).map((r) => `${r.method} ${r.path}`))].sort();
+    expect(mutating).toEqual(Object.keys(ROUTES).sort());
+    const { readFileSync } = await import('node:fs');
+    for (const [route, how] of Object.entries(ROUTES)) {
+      if ('exempt' in how) continue;
+      const src = readFileSync(how.test, 'utf8');
+      const tail = route.split(' ')[1]!.split('/').filter((x) => x && !x.startsWith(':')).at(-1)!;
+      expect(src, `${how.test} proves ${route}`).toContain(tail);
+      expect(src, `${how.test} checks an actor`).toMatch(/actor/);
+    }
+  });
+
+  it('workspace create, interview message, upload, research start, schedule create / update, config change and the retro record a user_action with the configured actor', async () => {
+    const t = setup();
+    const actions = () => listFeedback(t.store, { kind: 'user_action' }).map((e) => [e.actor, (e.afterJson as { action: string }).action]);
+    const ws = await t.call('POST', '/api/workspaces', { name: 'Newco', sector: 'saas' });
+    expect(ws.status).toBe(201);
+    expect((await t.call('POST', `/api/workspaces/${t.a.id}/interview`, { text: 'We sell widgets.' })).status).toBe(200);
+    const form = new FormData();
+    form.set('file', new File([new TextEncoder().encode('kpi,1')], 'kpis.csv', { type: 'text/csv' }));
+    const app = createApp({ store: t.store, artifacts: lessonsHarness(t, () => undefined).artifacts, events: lessonsHarness(t, () => undefined).events, config: t.config, research: lessonsHarness(t, () => undefined).deps });
+    expect((await app.request(`/api/workspaces/${t.a.id}/uploads`, { method: 'POST', body: form })).status).toBe(201);
+    const s = await t.call('POST', `/api/workspaces/${t.a.id}/schedules`, { name: 'weekly', cron: '0 0 * * 1', phases: ['deep_dives'] });
+    expect(s.status).toBe(201);
+    expect((await t.call('PATCH', `/api/workspaces/${t.a.id}/schedules`, { id: s.body.id, enabled: false })).status).toBe(200);
+    const cfg = (await t.call('GET', '/api/config')).body;
+    expect((await t.call('PUT', '/api/config', { ...cfg, scoring: { ...cfg.scoring, personaWeight: 0.1 } })).status).toBe(200);
+    // Background work (research, retro) fails fast here (no fake agents); wait for it to settle.
+    expect((await t.call('POST', `/api/workspaces/${t.b.id}/research`, { phases: ['scoring'] })).status).toBe(202);
+    expect((await t.call('POST', `/api/workspaces/${t.a.id}/lessons/retro`, {})).status).toBe(202);
+    for (let i = 0; i < 200 && t.store.researchRuns.list({ workspaceId: t.b.id }).some((r) => r.status === 'running'); i++) await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(actions()).toEqual(expect.arrayContaining([
+      ['erin', 'create_workspace'], ['erin', 'interview_message'], ['erin', 'upload'], ['erin', 'schedule_create'],
+      ['erin', 'schedule_update'], ['erin', 'config_change'], ['erin', 'research_start'], ['erin', 'retro_run'],
+    ]));
+    // Ids and settings only: no user text, no file name.
+    const all = JSON.stringify(listFeedback(t.store, { kind: 'user_action' }));
+    expect(all).not.toContain('We sell widgets');
+    expect(all).not.toContain('kpis.csv');
   });
 });

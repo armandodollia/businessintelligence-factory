@@ -46,7 +46,7 @@ import {
 } from '../knowledge/entities.js';
 import { KnowledgeNotFoundError, inTree, scopeFor } from '../knowledge/scope.js';
 import { knowledgeRepos } from '../store/repos.js';
-import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent } from './events.js';
+import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent, type FeedbackTargetType } from './events.js';
 import { FactActionError, applyReplacementByUser, retractFactByUser, setFactScopes } from '../knowledge/facts.js'; // KS-2, KS-7
 import { pruneArtifacts, type ArtifactFiles, type PruneResult } from '../knowledge/gc.js'; // KS-7
 import { mergeSuggestionIsUploadOnly } from '../knowledge/provenance.js'; // KS-7
@@ -61,6 +61,8 @@ import type { LessonProposal, LessonRule } from '../learning/lessons/types.js';
 import { rootOf } from '../workspace/tree.js';
 import { evaluateLessons, proposeRuleRetirement } from '../learning/lessons/engine.js'; // KS-8 final gate
 import { getAuditSchedule, updateAuditSchedule, type AuditSchedule } from '../learning/reviewerAudit.js'; // KS-8 final gate
+import { runRetro } from '../learning/lessons/retro.js'; // re-gate (Opus 4)
+import type { ResearchDeps } from '../research/deps.js'; // re-gate (Opus 4)
 import { actorOf } from './events.js';
 
 /** User-facing validation error of a feedback action (the API maps it to 400). */
@@ -1047,5 +1049,30 @@ export function proposeRuleRetirementAsUser(store: Store, ruleId: string, rootWo
     });
     return p;
   });
+}
+
+/** Human actions that have no record of their own (re-gate, Opus 4); see the `user_action` feedback kind. */
+export const USER_ACTIONS = ['create_workspace', 'interview_message', 'upload', 'research_start', 'schedule_create', 'schedule_update', 'config_change', 'retro_run'] as const;
+export type UserAction = (typeof USER_ACTIONS)[number];
+
+/**
+ * Records who did a human-triggered change that has no record of its own (a `user_action` feedback event
+ * on `workspaceId`; `after` holds ids and settings only, never user text or file names).
+ */
+export function recordUserAction(
+  store: Store,
+  input: { workspaceId: string; action: UserAction; targetType: FeedbackTargetType; targetId: string; after?: Record<string, unknown> },
+  opts: ActorOpts = {},
+): void {
+  recordFeedback(store, {
+    workspaceId: input.workspaceId, actor: actor(opts), kind: 'user_action', targetType: input.targetType, targetId: input.targetId,
+    afterJson: { action: input.action, ...(input.after ?? {}) },
+  });
+}
+
+/** The user starts the retro of a tree now: a `user_action` event (`retro_run`), then the retro in the background. */
+export function runRetroAsUser(deps: ResearchDeps, rootWorkspaceId: string, opts: ActorOpts = {}): void {
+  recordUserAction(deps.store, { workspaceId: rootWorkspaceId, action: 'retro_run', targetType: 'lessons', targetId: rootWorkspaceId }, opts);
+  void runRetro(deps, rootWorkspaceId, { triggeredBy: 'user' }).catch((e: unknown) => console.error(`[bif] retro of ${rootWorkspaceId} failed: ${(e as Error).message}`));
 }
 // --- end KS-8 final gate ---

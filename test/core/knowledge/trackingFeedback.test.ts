@@ -42,6 +42,7 @@ const EXCLUDED: Record<string, string> = {
   lesson_retire_request: 'KS-8 final gate (Opus 5) lessons action; covered in test/api/actorRoutes.test.ts',
   lessons_evaluate: 'KS-8 final gate (Opus 5) lessons action; covered in test/api/actorRoutes.test.ts',
   audit_schedule_change: 'KS-8 final gate (Opus 5) audit schedule action; covered in test/api/actorRoutes.test.ts',
+  user_action: 're-gate (Opus 4) other human-triggered changes; covered route by route in test/api/actorRoutes.test.ts',
   include_override: 'WP-A agent-output action, not a knowledge action; covered in test/core/feedback.test.ts and test/api/feedbackRoutes.test.ts',
   profile_edit: 'WP-A profile action; covered in test/core/feedback.test.ts and test/api/feedbackRoutes.test.ts',
   proposal_accept: 'WP-A unit-proposal action; covered in test/core/feedback.test.ts',

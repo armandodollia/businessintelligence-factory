@@ -8,11 +8,13 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
-import { acceptLessonProposalAsUser, evaluateLessonsAsUser, FeedbackActionError, proposeRuleRetirementAsUser, rejectLessonProposalAsUser } from '../core/feedback/actions.js';
+import {
+  acceptLessonProposalAsUser, evaluateLessonsAsUser, FeedbackActionError, proposeRuleRetirementAsUser, rejectLessonProposalAsUser, runRetroAsUser,
+} from '../core/feedback/actions.js';
 import { actorOf } from '../core/feedback/events.js';
 import { activeRules } from '../core/learning/lessons/appendix.js';
 import { rulesWithEffect } from '../core/learning/lessons/engine.js';
-import { nextRetroAt, runRetro } from '../core/learning/lessons/retro.js';
+import { nextRetroAt } from '../core/learning/lessons/retro.js';
 import { lessonsSettings } from '../core/learning/lessons/settings.js';
 import { lessonRepos } from '../core/learning/lessons/store.js';
 import type { ResearchDeps } from '../core/research/deps.js';
@@ -143,7 +145,7 @@ export function mountLessonsRoutes(app: Hono, deps: LessonsRouteDeps): void {
       const { root } = caller(c);
       const s = lessonsSettings(config);
       if (!s.enabled || !s.retro.enabled) return c.json({ error: 'the retro is disabled (lessons.enabled / lessons.retro.enabled)' }, 409);
-      void runRetro(research, root, { triggeredBy: 'user' }).catch((e: unknown) => console.error(`[bif] retro of ${root} failed: ${(e as Error).message}`));
+      runRetroAsUser(research, root, { actor: actorOf(config) }); // re-gate (Opus 4): the actor is recorded
       return c.json({ started: true, rootWorkspaceId: root }, 202);
     }),
   );

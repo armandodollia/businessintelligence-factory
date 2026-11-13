@@ -37,6 +37,7 @@ import {
   answerUserRequest,
   applyPromptPatchAsUser,
   decideUnitProposal,
+  recordUserAction, // re-gate (Opus 4)
   recordWeightsChange,
   setIncludeOverride,
 } from '../core/feedback/actions.js';
@@ -284,7 +285,9 @@ export function createApp(deps: AppDeps): Hono {
     if (input.parentWorkspaceId && !store.workspaces.get(input.parentWorkspaceId)) {
       throw new HttpError(400, `parent workspace '${input.parentWorkspaceId}' not found`);
     }
-    return c.json(createWorkspace(store, input as Parameters<typeof createWorkspace>[1]), 201);
+    const ws = createWorkspace(store, input as Parameters<typeof createWorkspace>[1]);
+    recordUserAction(store, { workspaceId: ws.id, action: 'create_workspace', targetType: 'workspace', targetId: ws.id }, { actor: actorOf(config) }); // re-gate (Opus 4)
+    return c.json(ws, 201);
   });
   app.get('/api/workspaces/:id', (c) => c.json(workspace(c.req.param('id'))));
   app.get('/api/workspaces/:id/profile', (c) => {
@@ -341,6 +344,9 @@ export function createApp(deps: AppDeps): Hono {
     } finally {
       interviewBusy.delete(id);
     }
+    // Re-gate (Opus 4): who sent the message (the user's turn is the one before the agent's reply).
+    const userTurn = store.interview.list({ workspaceId: id }).filter((x) => x.role === 'user').at(-1);
+    recordUserAction(store, { workspaceId: id, action: 'interview_message', targetType: 'workspace', targetId: id, after: { ...(userTurn ? { turnId: userTurn.id } : {}), replyTurnId: turn.id } }, { actor: actorOf(config) });
     return c.json({ turn, ...interviewState(id) });
   });
   app.post('/api/workspaces/:id/uploads', async (c) => {
@@ -354,7 +360,9 @@ export function createApp(deps: AppDeps): Hono {
     const file = form.file;
     if (!(file instanceof File)) throw new HttpError(400, "multipart field 'file' is required");
     const bytes = new Uint8Array(await file.arrayBuffer());
-    return c.json(uploadInternal(id, { name: file.name, bytes, mime: file.type }, { store, artifacts }), 201);
+    const up = uploadInternal(id, { name: file.name, bytes, mime: file.type }, { store, artifacts });
+    recordUserAction(store, { workspaceId: id, action: 'upload', targetType: 'artifact', targetId: up.id }, { actor: actorOf(config) }); // re-gate (Opus 4)
+    return c.json(up, 201);
   });
 
   // --- research -------------------------------------------------------------------------------
@@ -369,7 +377,12 @@ export function createApp(deps: AppDeps): Hono {
     runPipeline(id, phases ?? ALL_PHASES, research).catch((e) =>
       console.error(`[bif] research pipeline for ${id} failed: ${(e as Error).message}`),
     );
-    return c.json(currentResearchRun(store, id) ?? null, 202);
+    const started = currentResearchRun(store, id);
+    recordUserAction(store, {
+      workspaceId: id, action: 'research_start', targetType: 'workspace', targetId: id,
+      after: { phases: phases ?? ALL_PHASES, ...(started ? { researchRunId: started.id } : {}) },
+    }, { actor: actorOf(config) }); // re-gate (Opus 4)
+    return c.json(started ?? null, 202);
   });
   app.get('/api/workspaces/:id/runs', (c) => c.json(store.researchRuns.list({ workspaceId: workspace(c.req.param('id')).id })));
   app.get('/api/workspaces/:id/tasks', (c) => {
@@ -617,7 +630,9 @@ export function createApp(deps: AppDeps): Hono {
     const input = await body(c, schemas.newSchedule);
     checkCron(input.cron);
     const s: Schedule = { id: newId('sch'), workspaceId: id, name: input.name, cron: input.cron, phases: input.phases, enabled: input.enabled ?? true, activatedAt: new Date().toISOString() };
-    return c.json(store.schedules.insert(s), 201);
+    const saved = store.schedules.insert(s);
+    recordUserAction(store, { workspaceId: id, action: 'schedule_create', targetType: 'schedule', targetId: saved.id, after: { cron: saved.cron, phases: saved.phases, enabled: saved.enabled } }, { actor: actorOf(config) }); // re-gate (Opus 4)
+    return c.json(saved, 201);
   });
   app.patch('/api/workspaces/:id/schedules', async (c) => {
     const id = workspace(c.req.param('id')).id;
@@ -628,7 +643,12 @@ export function createApp(deps: AppDeps): Hono {
     const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<Schedule>;
     // Re-enabling resets the baseline: occurrences missed while disabled are not run.
     if (clean.enabled === true && !s.enabled) clean.activatedAt = new Date().toISOString();
-    return c.json(store.schedules.update(scheduleId, clean));
+    const updated = store.schedules.update(scheduleId, clean);
+    recordUserAction(store, {
+      workspaceId: id, action: 'schedule_update', targetType: 'schedule', targetId: scheduleId,
+      after: { before: { cron: s.cron, phases: s.phases, enabled: s.enabled }, cron: updated.cron, phases: updated.phases, enabled: updated.enabled },
+    }, { actor: actorOf(config) }); // re-gate (Opus 4)
+    return c.json(updated);
   });
 
   // --- config ---------------------------------------------------------------------------------
@@ -647,8 +667,16 @@ export function createApp(deps: AppDeps): Hono {
     const next = parseConfig(raw, 'PUT /api/config');
     const before = structuredClone(config.scoring);
     const lessonsWereOn = config.lessons?.enabled !== false; // ruling R1
+    const keysBefore = JSON.stringify(config);
+    const changed = Object.keys({ ...(JSON.parse(keysBefore) as object), ...(next as object) }).filter(
+      (k) => JSON.stringify((JSON.parse(keysBefore) as Record<string, unknown>)[k]) !== JSON.stringify((next as Record<string, unknown>)[k]),
+    );
     replaceConfig(config, next);
     persistConfig();
+    // Re-gate (Opus 4): who changed the config (global: one event per business tree; key names only).
+    for (const root of store.workspaces.list().filter((w) => !w.parentWorkspaceId)) {
+      recordUserAction(store, { workspaceId: root.id, action: 'config_change', targetType: 'config', targetId: 'config', after: { changedKeys: changed } }, { actor: actorOf(config) });
+    }
     // Ruling R1: the lessons kill switch changes role prompt versions; record them in the prompt store.
     if (lessonsWereOn !== (config.lessons?.enabled !== false)) recordLessonsPromptVersions(store, config);
     // Weights are global: a change made here rescores and is logged in every workspace, exactly

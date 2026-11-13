@@ -38,6 +38,7 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   lesson_retire_request: 'rule retirement requested',
   lessons_evaluate: 'lessons engine run',
   audit_schedule_change: 'audit schedule changed',
+  user_action: 'user action',
 };
 
 const short = (v: unknown, max = 80): string => {

@@ -15,6 +15,7 @@ const TARGET_TYPES = [
   'entity', 'artifact', // knowledge store KS-3 / KS-7
   'lesson', // learning loop WP-E
   'lessons', 'audit_schedule', // KS-8 final gate (Opus 5)
+  'workspace', 'schedule', 'config', // re-gate (Opus 4): user_action targets
 ] as const satisfies readonly FeedbackTargetType[];
 
 const schemas = {

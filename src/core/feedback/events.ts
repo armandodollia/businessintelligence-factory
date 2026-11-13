@@ -76,6 +76,12 @@ export const FEEDBACK_KINDS = [
   'lessons_evaluate',
   /** The user enabled / disabled or changed an audit schedule (target type `audit_schedule`). */
   'audit_schedule_change',
+  /**
+   * Re-gate (Opus 4): any other human-triggered change that has no record of its own — creating a
+   * workspace, an interview message, an upload, starting research, a schedule change, a config change,
+   * running the retro. `afterJson.action` names it; ids only (no user text, no file names).
+   */
+  'user_action',
   // --- end KS-8 final gate ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
@@ -100,7 +106,11 @@ export type FeedbackTargetType =
   | 'lesson'
   // KS-8 final gate: the lessons engine of a tree (`lessons_evaluate`), an audit schedule (`audit_schedule_change`)
   | 'lessons'
-  | 'audit_schedule';
+  | 'audit_schedule'
+  // re-gate (Opus 4): `user_action` targets
+  | 'workspace'
+  | 'schedule'
+  | 'config';
 
 export interface FeedbackEvent {
   id: string;
