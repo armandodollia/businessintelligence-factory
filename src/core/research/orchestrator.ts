@@ -18,6 +18,7 @@ import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } fr
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
 import { PipelineBusyError, tryLockPipeline } from './lock.js';
 import { failureReason, runTaskWithReview } from './reviewLoop.js';
+import { applyTaskStatus } from './outputs.js';
 
 /** At most this many orchestrator runs per phase (initial plan + one follow-up round). */
 export const MAX_ORCHESTRATOR_ROUNDS = 2;
@@ -604,7 +605,13 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
         requeuedTasks.push(t.id);
       } else {
         // Its research run is over (or unknown): nothing will run it again.
-        store.tasks.update(t.id, { status: 'failed' });
+        // Its outputs take the failed status too (same rule as the review loop), and live views reload.
+        const failed = store.transaction(() => {
+          const task = store.tasks.update(t.id, { status: 'failed' });
+          applyTaskStatus(store, task, 'failed');
+          return task;
+        });
+        deps.events.emit({ type: 'task_status', workspaceId: failed.workspaceId, taskId: failed.id, status: 'failed' });
         abandonedTasks.push(t.id);
       }
     } else if (t.status === 'waiting_user') {

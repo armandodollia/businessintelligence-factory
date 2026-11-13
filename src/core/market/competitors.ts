@@ -59,7 +59,10 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
         // owner and status. Otherwise it is re-submitted, current for this task's round.
         const keep = !owner || (prior.taskId !== owner.id && prior.status === 'verified');
         const competitor = keep ? prior : store.competitors.update(prior.id, { ...tracking, taskId: owner.id });
-        return { competitor, decision: undefined, duplicate: true };
+        // Reuse record: ties this run (and its task) to the competitor for provenance / export
+        // filtering even when ownership stays with another task.
+        const reuse = keep ? record(store, ctx, prior, input.evidence, { reused: true, unchanged: true }, 'decision') : undefined;
+        return { competitor, decision: reuse, duplicate: true };
       }
       const patch: Partial<Competitor> = { ...values, evidence, updatedAt: now, ...tracking };
       if (input.site !== undefined) patch.site = input.site;
@@ -93,6 +96,7 @@ function record(
   c: Competitor,
   evidence: string[],
   extra: Record<string, unknown>,
+  kind: Decision['kind'] = 'score',
 ): Decision {
   const decision: Decision = {
     id: newId('dec'),
@@ -100,7 +104,7 @@ function record(
     agentRunId: ctx.agentRunId,
     role: ctx.role,
     model: ctx.model,
-    kind: 'score',
+    kind,
     payload: {
       tool: 'save_competitor', competitorId: c.id, name: c.name, threat: c.threat, directness: c.directness, comparison: c.comparison,
       ...extra,

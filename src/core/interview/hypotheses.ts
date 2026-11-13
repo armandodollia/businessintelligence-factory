@@ -37,7 +37,11 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
   const prior = replay ? store.symptomHypotheses.get((replay.payload as { hypothesisId: string }).hypothesisId) : undefined;
   if (prior) {
     // Re-submitted: current for this task's round (superseded tracking, migration 13).
-    const tracking = task && task.workspaceId === ctx.workspaceId ? { taskId: task.id, taskRound: task.round, status: 'pending' as const } : {};
+    // Without an owning task nothing will review it: `unverified`, no round.
+    const tracking =
+      task && task.workspaceId === ctx.workspaceId
+        ? { taskId: task.id, taskRound: task.round, status: 'pending' as const }
+        : { taskId: undefined, taskRound: undefined, status: 'unverified' as const };
     const sameEvidence = JSON.stringify([...prior.evidence].sort()) === JSON.stringify([...evidence].sort());
     if (prior.confidence === input.confidence && sameEvidence) {
       store.symptomHypotheses.update(prior.id, tracking);
@@ -64,7 +68,7 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
       store.decisions.insert(revision);
     });
     events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: revision });
-    return { ok: true, data: { hypothesisId: prior.id, duplicate: true, revised: true } };
+    return { ok: true, data: { hypothesisId: prior.id, revised: true } };
   }
 
   const hypothesis: SymptomHypothesis = {
@@ -75,11 +79,12 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     confidence: input.confidence,
     evidence,
     createdAt: new Date().toISOString(),
-    status: 'pending',
+    status: 'unverified', // pending once an owning task is set below
   };
   if (task && task.workspaceId === ctx.workspaceId) {
     hypothesis.taskId = task.id;
     hypothesis.taskRound = task.round;
+    hypothesis.status = 'pending';
   }
   const decision: Decision = {
     id: newId('dec'),

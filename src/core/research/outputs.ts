@@ -100,14 +100,53 @@ export function applyTaskStatus(store: Store, task: Task, status: TaskOutcome): 
   for (const h of outputs.hypotheses) store.symptomHypotheses.update(h.id, { status: next(h.id) });
 }
 
+/** JSON of refs + payload of every Decision made by the task's runs (worker, reviewer, ...). */
+function taskDecisionTexts(store: Store, taskId: string): string[] {
+  return store.agentRuns
+    .list({ taskId })
+    .flatMap((run) => store.decisions.list({ agentRunId: run.id }))
+    .map((d) => JSON.stringify([d.refs, d.payload ?? null]));
+}
+
+const ARTIFACT_ID = /\bart_[0-9A-Z]{26}\b/g;
+
 /**
- * Every artifact a task's outputs rest on, transitively: findings' evidence, recommendations → cited
- * findings' evidence, persona field evidence, competitor evidence, hypotheses → cited findings'
- * evidence (or cited artifacts). All outputs count, whatever their status (privacy: export filtering).
+ * Outputs a task is associated with, for provenance / export filtering (privacy): the outputs it
+ * owns PLUS any output (of any task) that its runs saved, re-saved or referenced — every output id in
+ * the refs or payload of its runs' Decisions (incl. replay / reuse records) — or that its deliverable
+ * (`result`, default: the stored one) cites by id. Ownership and review status are not affected.
  */
-export function taskOutputEvidence(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): string[] {
-  const o = taskOutputs(store, task);
+export function associatedOutputs(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, result?: unknown): TaskOutputs {
+  const owned = taskOutputs(store, task);
+  const ids = citedOutputIds(result !== undefined ? result : store.tasks.get(task.id)?.result);
+  for (const text of taskDecisionTexts(store, task.id)) for (const m of text.matchAll(OUTPUT_ID)) ids.add(m[0]);
+  const add = <T extends { id: string }>(list: T[], get: (id: string) => T | undefined, prefix: string): T[] => {
+    const have = new Set(list.map((x) => x.id));
+    const extra = [...ids].filter((id) => id.startsWith(prefix) && !have.has(id)).map(get).filter((x): x is T => x !== undefined);
+    return [...list, ...extra];
+  };
+  return {
+    findings: add(owned.findings, (id) => store.findings.get(id), 'fnd_'),
+    recommendations: add(owned.recommendations, (id) => store.recommendations.get(id), 'rec_'),
+    personas: add(owned.personas, (id) => store.personas.get(id), 'per_'),
+    competitors: add(owned.competitors, (id) => store.competitors.get(id), 'cmp_'),
+    hypotheses: add(owned.hypotheses, (id) => store.symptomHypotheses.get(id), 'hyp_'),
+  };
+}
+
+/**
+ * Every artifact a task's associated outputs (`associatedOutputs`) rest on, transitively: findings'
+ * evidence, recommendations → cited findings' evidence, persona field evidence, competitor evidence,
+ * hypotheses → cited findings' evidence (or cited artifacts). All outputs count, whatever their
+ * status (privacy: export filtering).
+ */
+export function taskOutputEvidence(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, result?: unknown): string[] {
+  const o = associatedOutputs(store, task, result);
   const ids = new Set<string>();
+  // Sticky provenance: every artifact any earlier Decision of the task's runs recorded (earlier
+  // submit_result provenance, save_* refs, a revision's previous evidence) stays associated, so a
+  // correction away from upload evidence cannot launder the deliverable into the export.
+  for (const text of taskDecisionTexts(store, task.id)) for (const m of text.matchAll(ARTIFACT_ID)) ids.add(m[0]);
   const findingEvidence = (id: string) => store.findings.get(id)?.evidence;
   for (const f of o.findings) for (const a of f.evidence) ids.add(a);
   for (const r of o.recommendations) for (const fid of r.findingIds) for (const a of findingEvidence(fid) ?? []) ids.add(a);

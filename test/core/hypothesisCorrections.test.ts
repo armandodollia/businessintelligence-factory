@@ -48,7 +48,8 @@ describe('save_hypothesis corrections', () => {
         const res = (await tools.call('save_hypothesis', {
           symptom_id: 'sym_1', hypothesis: 'price rise drove churn', confidence: 20, evidence: [a2.id],
         })) as { duplicate?: boolean; revised?: boolean };
-        expect(res).toMatchObject({ duplicate: true, revised: true });
+        expect(res).toMatchObject({ revised: true });
+        expect(res.duplicate).toBeUndefined();
         await revise('fix', { summary: 'v2' }, false)(r)(tools);
       };
     };

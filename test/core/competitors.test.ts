@@ -125,7 +125,7 @@ describe('save_hypothesis + interview drill-down (final review C6)', () => {
     expect(t.store.symptomHypotheses.get(hid)).toMatchObject({ symptomId: 'sym_1', confidence: 70, taskId: task.id, evidence: ['fnd_v', 'fnd_u'] });
     expect(t.store.decisions.list({ agentRunId: c.agentRunId })[0]).toMatchObject({ kind: 'score', payload: { tool: 'save_hypothesis', hypothesisId: hid } });
     // Replay is idempotent; unknown symptom / evidence rejected.
-    expect(await t.handle(c, 'save_hypothesis', { symptom_id: 'sym_1', hypothesis: 'renewals fell after the march enterprise price increase', confidence: 70, evidence: ['fnd_v'] }))
+    expect(await t.handle(c, 'save_hypothesis', { symptom_id: 'sym_1', hypothesis: 'renewals fell after the march enterprise price increase', confidence: 70, evidence: ['fnd_u', 'fnd_v'] }))
       .toMatchObject({ ok: true, data: { hypothesisId: hid, duplicate: true } });
     expect((await t.handle(c, 'save_hypothesis', { symptom_id: 'sym_nope', hypothesis: 'h', confidence: 10, evidence: ['fnd_v'] })).ok).toBe(false);
     expect((await t.handle(c, 'save_hypothesis', { symptom_id: 'sym_1', hypothesis: 'h', confidence: 10, evidence: ['art_nope'] })).ok).toBe(false);

@@ -514,7 +514,7 @@ export function resultProvenance(store: Store, task: Task | undefined, result: u
   if (task) {
     // Every output of the task (findings, recommendations → cited findings, personas, competitors,
     // hypotheses) and its transitive evidence.
-    for (const a of taskOutputEvidence(store, task)) ids.add(a);
+    for (const a of taskOutputEvidence(store, task, result)) ids.add(a);
     for (const a of artifactIdsIn(task.brief)) ids.add(a);
   }
   return [...ids].filter((id) => store.artifacts.get(id) !== undefined);
