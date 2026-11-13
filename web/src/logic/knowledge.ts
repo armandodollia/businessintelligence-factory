@@ -55,7 +55,11 @@ export type CardView = Envelope & {
   /** A line too long for the page comes back shortened as `{ text, cut: true }` (expand its id for the full text). */
   lines: Array<string | { text: string; cut?: boolean }>;
 };
-/** One `expand` response: a header (kind fact / artifact / chunk / entity / record) and listed items. */
+/**
+ * One `expand` response: a small header (identity: kind fact / artifact / chunk / entity / record, id,
+ * name or subject, state, source) and listed items — a fact's claim, criteria and quotes, a record's
+ * fields, an artifact's metadata and description (paging rework).
+ */
 export type ItemView = Envelope & { kind?: string; id?: string; source?: string; items?: Array<Record<string, unknown>> } & Record<string, unknown>;
 export type ArtifactTextView = Envelope & { items?: Array<Record<string, unknown>> } & Record<string, unknown>;
 export type ChangesView = Envelope & { changes: Array<Record<string, unknown>> };
@@ -131,7 +135,24 @@ export function itemPart(i: Record<string, unknown>): ItemPart {
   const name = (v: unknown) => (v && typeof v === 'object' && 'name' in v ? String((v as { name: unknown }).name) : '');
   const src = (v: unknown) => (v && typeof v === 'object' && 'source' in v ? ` (${String((v as { source: unknown }).source)})` : '');
   let text: string | undefined;
+  /** Scalar and object fields of the item other than its labels, as `key: value` (plain text). */
+  const rest = (skip: string[]) =>
+    Object.entries(i)
+      .filter(([k, v]) => !['type', ...skip].includes(k) && v !== undefined)
+      .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+      .join(' · ');
   switch (type) {
+    case 'field': {
+      // A record field (`profile.<key>` keeps value, confidence and evidence together).
+      const v = i.value;
+      text = typeof v === 'string' ? (v.startsWith('<<<EVIDENCE') ? undefined : v) : v !== undefined ? JSON.stringify(v) : rest(['field']);
+      return { label: String(i.field ?? 'field'), ...(text ? { text } : {}), ...(evidence.length ? { evidence } : {}) };
+    }
+    case 'meta':
+    case 'state':
+    case 'criteria':
+      text = rest([]);
+      break;
     case 'relation':
       text = `${name(i.from)}${src(i.from)} ${String(i.relation)} ${name(i.to)}${src(i.to)}`;
       break;

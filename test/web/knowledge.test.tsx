@@ -71,9 +71,10 @@ function seed() {
     ],
   });
   routes[`GET ${K}/items/fnd_up`] = () => ({
-    tokens: 80, truncated: false, kind: 'fact', id: 'fnd_up', claim: 'Globex margin is thin', lifecycle: 'current', status: 'verified', upload: true,
+    tokens: 80, truncated: false, kind: 'fact', id: 'fnd_up', subject: 'Globex', lifecycle: 'current', status: 'verified', version: 1, upload: true,
     uploadWhy: 'fnd_up cites art_up as evidence; art_up is an internal upload',
     items: [
+      { type: 'claim', text: 'Globex margin is thin' },
       { type: 'evidence', artifact_id: 'art_up', artifact_kind: 'upload', quotes: [`<<<EVIDENCE art_up\nmargin ${HOSTILE}\n>>>`] },
       { type: 'relation', relation: 'offers', from: { id: 'ent_1', name: 'Globex', source: 'ws_0' }, to: { id: 'ent_2', name: 'Labs Loans', source: 'ws_2' } },
     ],
@@ -95,6 +96,11 @@ describe('knowledge logic', () => {
     // Re-gate: a fact's quotes are items of their own (`type: 'quote'`), shown as evidence text.
     expect(itemPart({ type: 'quote', artifact_id: 'art_1', chunk_id: 'chk_1', quote: '<<<EVIDENCE art_1\nverbatim words\n>>>' }))
       .toMatchObject({ label: 'quote', evidence: [{ artifactId: 'art_1', text: 'verbatim words' }] });
+    // Paging rework: a fact's claim and a record's fields are items; metadata items read as key: value.
+    expect(itemPart({ type: 'claim', text: 'Globex margin is thin' })).toMatchObject({ label: 'claim', text: 'Globex margin is thin' });
+    expect(itemPart({ type: 'field', field: 'summary', value: 'Raise prices' })).toEqual({ label: 'summary', text: 'Raise prices' });
+    expect(itemPart({ type: 'field', field: 'profile.goals', value: 'Ship faster', confidence: 0.7 })).toMatchObject({ label: 'profile.goals', text: 'Ship faster' });
+    expect(itemPart({ type: 'meta', mime: 'text/plain', captured_at: '2026-11-01' }).text).toBe('mime: text/plain · captured_at: 2026-11-01');
   });
 });
 
