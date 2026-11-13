@@ -1,8 +1,8 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { boot } from '../../src/api/main.js';
 
 describe('boot', () => {
@@ -19,6 +19,20 @@ describe('boot', () => {
       expect(Object.keys(b.runtime.research.phaseRunners ?? {}).sort()).toEqual(['persona_panel', 'scoring']);
       expect(b.runtime.dataDir).toBe(join(dir, 'data'));
     } finally {
+      await b.close();
+    }
+  });
+
+  it('warns at startup when browser tasks cannot get a browser', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bif-boot-'));
+    const configPath = join(dir, 'bif.config.json');
+    writeFileSync(configPath, JSON.stringify({ browser: { mode: 'per_run', mcpServers: {} } }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const b = await boot({ configPath, dataDir: join(dir, 'data'), port: 0, webDist: join(dir, 'no-web') });
+    try {
+      expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/\[bif\] warning: .*mcpServers is empty/);
+    } finally {
+      warn.mockRestore();
       await b.close();
     }
   });

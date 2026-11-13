@@ -14,6 +14,8 @@ import {
   type SpawnSpec,
 } from '../adapter.js';
 
+export const OPENCODE_CONFIG_FILE = '.bif-opencode.json';
+
 /** OpenCode's MCP request timeout defaults to 5 s and also bounds tool calls. */
 const BIF_TIMEOUT_MS = 86_400_000;
 
@@ -49,7 +51,11 @@ function toOpenCodeMcp(server: unknown): unknown {
  * Verified against `opencode run --help` (1.2.27) and the event emitter in its bundled source:
  * - Flags: `--format json`, `-m provider/model`, prompt as positional `message..`. There is no
  *   system-prompt flag, so the system prompt is prepended in a `<system>` block.
- * - MCP comes from `opencode.json` in the run's cwd; MCP tools are exposed as `<server>_<tool>`.
+ * - MCP comes from a generated `.bif-opencode.json` in the run's cwd, passed as `OPENCODE_CONFIG`;
+ *   `OPENCODE_DISABLE_PROJECT_CONFIG=1` skips project files found walking up from the cwd, and with
+ *   `spec.stateDir` the global config dir is redirected (`XDG_CONFIG_HOME=<stateDir>/opencode-config`),
+ *   so the user's own MCP servers are not loaded (auth lives in the data dir, which is unchanged).
+ *   MCP tools are exposed as `<server>_<tool>`. The token stays in that file, not in argv.
  *   `timeout` (default 5000 ms) bounds tool calls, so bif gets 24 h; `oauth: false` skips
  *   OAuth discovery.
  * - Events: `{type, timestamp, sessionID, part|error}` with type `text` | `tool_use` |
@@ -69,10 +75,14 @@ export class OpenCodeAdapter implements CliAdapter {
     };
     for (const [name, server] of Object.entries(spec.extraMcpServers)) mcp[name] = toOpenCodeMcp(server);
     const config = { $schema: 'https://opencode.ai/config.json', mcp };
+    const path = join(spec.cwd, OPENCODE_CONFIG_FILE);
+    const env: Record<string, string> = { OPENCODE_CONFIG: path, OPENCODE_DISABLE_PROJECT_CONFIG: '1' };
+    if (spec.stateDir) env.XDG_CONFIG_HOME = join(spec.stateDir, 'opencode-config');
     return {
       cmd: this.command,
       args: ['run', '--format', 'json', '-m', spec.model, safePositional(withSystemBlock(spec.systemPrompt, spec.prompt))],
-      files: [{ path: join(spec.cwd, 'opencode.json'), content: JSON.stringify(config, null, 2) }],
+      files: [{ path, content: JSON.stringify(config, null, 2) }],
+      env,
     };
   }
 

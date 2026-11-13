@@ -7,6 +7,7 @@ import { loadConfig } from '../core/config/load.js';
 import type { BifConfig } from '../core/config/schema.js';
 import { EventBus } from '../core/events.js';
 import { ArtifactStore } from '../core/evidence/artifacts.js';
+import { browserStartupWarnings } from '../core/harness/browser.js';
 import { Supervisor } from '../core/harness/supervisor.js';
 import { TokenRegistry } from '../core/harness/tokens.js';
 import { createToolHandlers, type HandleTool } from '../core/harness/tools/handlers.js';
@@ -122,6 +123,7 @@ export type Booted = { runtime: Runtime; server: ServerType; scheduler: Schedule
  */
 export async function boot(opts: BootOptions = {}): Promise<Booted> {
   const runtime = createRuntime(opts);
+  for (const w of browserStartupWarnings(runtime.config)) console.warn(`[bif] warning: ${w}`);
   const server = await new Promise<ServerType>((ok, fail) => {
     const s = serve({ fetch: runtime.app.fetch, port: runtime.port, hostname: '127.0.0.1' }, () => ok(s));
     s.once('error', fail);
@@ -145,6 +147,8 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     // Open SSE streams would otherwise keep close() pending forever.
     (server as { closeAllConnections?: () => void }).closeAllConnections?.();
     await closing;
+    // The shared browser server lives in its own process group: stop it explicitly.
+    await runtime.supervisor.close();
     runtime.store.close();
   };
   return { runtime, server, scheduler, close };

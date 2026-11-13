@@ -69,6 +69,35 @@ function perTaskType<T extends z.ZodType>(item: T) {
   });
 }
 
+/**
+ * The shared browser MCP server. `args` / `env` placeholders: `{{port}}`, `{{profileDir}}` (absolute
+ * `browser.profileDir`), `{{outputDir}}` (a directory under the OS temp dir, so agents can hand the
+ * files to `save_artifact`). `port: 0` picks a free port at start. Runs connect to
+ * `http://127.0.0.1:<port><path>`.
+ */
+export const sharedBrowserSchema = z.strictObject({
+  command: z.string().min(1),
+  args: z.array(z.string()),
+  port: z.number().int().min(0).max(65535),
+  path: z.string().startsWith('/').default('/mcp'),
+  env: z.record(z.string(), z.string()).optional(),
+});
+
+/** Pinned Playwright MCP shared on one persistent research profile (`--shared-browser-context`). */
+export const PLAYWRIGHT_SHARED_BROWSER: z.output<typeof sharedBrowserSchema> = {
+  command: 'npx',
+  args: [
+    '-y', '@playwright/mcp@0.0.85',
+    '--host', '127.0.0.1', '--port', '{{port}}',
+    '--shared-browser-context',
+    '--user-data-dir', '{{profileDir}}',
+    '--output-dir', '{{outputDir}}',
+    '--file-paths', 'absolute',
+  ],
+  port: 0,
+  path: '/mcp',
+};
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -97,7 +126,16 @@ export const bifConfigSchema = z
     }),
     browser: z.strictObject({
       backend: z.enum(['mcp', 't3']),
-      /** Passed verbatim to each CLI's MCP config. */
+      /**
+       * Backend `mcp` only. `shared` (default): the harness starts `browser.shared` once (lazily)
+       * and every browser-using run connects to it over HTTP, so all runs share one browser on the
+       * research profile. `per_run`: each run spawns `browser.mcpServers` itself (stdio); runs on
+       * one profile directory cannot overlap, so `limits.maxBrowserRuns` is capped at 1.
+       */
+      mode: z.enum(['shared', 'per_run']).default('shared'),
+      /** Shared browser MCP server (HTTP). See `sharedBrowserSchema`. */
+      shared: sharedBrowserSchema.optional(),
+      /** `per_run` mode: passed to each CLI's MCP config (`{{profileDir}}` substituted). */
       mcpServers: z.record(z.string(), z.unknown()),
       profileDir: z.string().min(1),
     }),
@@ -184,7 +222,13 @@ export const defaultConfig: BifConfig = {
   },
   loop: { maxRounds: 3, passThreshold: 8, perTaskType: {} },
   limits: { maxParallelWorkers: 3, maxBrowserRuns: 2, maxTasksPerRun: 30, idleTimeoutMs: 600000 },
-  browser: { backend: 'mcp', mcpServers: {}, profileDir: 'data/browser-profile' },
+  browser: {
+    backend: 'mcp',
+    mode: 'shared',
+    shared: PLAYWRIGHT_SHARED_BROWSER,
+    mcpServers: {},
+    profileDir: 'data/browser-profile',
+  },
   identity: { emailProvider: 'mailtm' },
   actionPolicy: defaultActionPolicy,
   scoring: { personaWeight: 0, weights: {} },

@@ -45,6 +45,26 @@ describe('artifact responses', () => {
     expect((await t.app.request(`/api/artifacts/${svg.id}`)).headers.get('content-disposition')).toMatch(/^attachment;/);
     expect((await t.app.request(`/api/artifacts/${png.id}`)).headers.get('content-disposition')).toBeNull();
   });
+
+  it('PDFs open inline without the CSP sandbox (the viewer refuses sandboxed PDFs); nosniff kept', async () => {
+    const t = setup();
+    const pdf = t.artifacts.save({
+      workspaceId: t.ws.id, kind: 'document', mime: 'application/pdf', title: '10-K 2025.pdf', bytes: new TextEncoder().encode('%PDF-1.7\n'),
+    });
+    const res = await t.app.request(`/api/artifacts/${pdf.id}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/pdf');
+    expect(res.headers.get('content-security-policy')).toBeNull();
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('content-disposition')).toMatch(/^inline; filename\*=UTF-8''10-K%202025\.pdf/);
+    // A mime parameter does not smuggle an active type past the PDF exemption.
+    const fake = t.artifacts.save({
+      workspaceId: t.ws.id, kind: 'document', mime: 'text/html; x=application/pdf', bytes: new TextEncoder().encode('<b>x</b>'),
+    });
+    const r2 = await t.app.request(`/api/artifacts/${fake.id}`);
+    expect(r2.headers.get('content-security-policy')).toBe('sandbox');
+    expect(r2.headers.get('content-disposition')).toMatch(/^attachment;/);
+  });
 });
 
 describe('host / origin guard', () => {

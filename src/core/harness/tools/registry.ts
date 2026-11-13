@@ -27,17 +27,23 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 
 const BASE: ToolName[] = ['log_decision', 'save_artifact', 'request_user_action', 'request_approval'];
 
-/** Which harness tools each role sees (`tools/list`) and may call. */
+/**
+ * Which harness tools each role sees (`tools/list`) and may call. `read_artifact` is tree-scoped
+ * (same business tree only). Reviewers get no `read_workspace`: they judge the deliverable and its
+ * evidence, not the rest of the tree.
+ */
 export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   worker: [
     ...BASE, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
-    'read_workspace', 'propose_business_unit',
+    'read_workspace', 'propose_business_unit', 'read_artifact',
   ],
-  orchestrator: [...BASE, 'propose_tasks', 'read_workspace'],
-  reviewer: ['log_decision', 'submit_review', 'read_artifact', 'read_workspace'],
+  orchestrator: [...BASE, 'propose_tasks', 'read_workspace', 'read_artifact'],
+  reviewer: ['log_decision', 'submit_review', 'read_artifact'],
   persona: ['log_decision', 'submit_persona_feedback'],
   interviewer: ['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact'],
-  synthesizer: [...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace'],
+  synthesizer: [
+    ...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace', 'read_artifact',
+  ],
 };
 
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
@@ -75,7 +81,10 @@ export const toolInputSchemas = {
       mime: z.string().min(1).describe('e.g. image/png, text/html, text/plain, application/pdf'),
       content: z.string().optional().describe('UTF-8 content (text, HTML, markdown)'),
       content_base64: z.string().optional().describe('Binary content, base64-encoded'),
-      file_path: z.string().optional().describe('Absolute path of a local file to store (e.g. a screenshot)'),
+      file_path: z
+        .string()
+        .optional()
+        .describe('Absolute path of a local file to store (e.g. a screenshot); must be inside your working directory or the OS temp dir'),
       source_url: z.string().optional(),
       title: z.string().optional(),
       flow: z.string().optional().describe('Flow name for walkthroughs, e.g. signup'),

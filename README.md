@@ -33,25 +33,41 @@ the agent CLIs call into, and a small React web app. Design spec:
 Agents browse in a **dedicated, persistent research profile**, never your everyday browser profile.
 It stays logged into the throwaway accounts the agents create.
 
-- **MCP backend** (`"browser": {"backend": "mcp"}`, default): browser-using runs get the MCP
-  servers listed in `browser.mcpServers`. Every `{{profileDir}}` in them is replaced with the
-  absolute path of `browser.profileDir`, so point the browser server's profile flag at it:
+- **MCP backend, shared server** (`"backend": "mcp"`, `"mode": "shared"`, the default): the harness
+  starts **one** browser MCP server (`browser.shared`) the first time a run needs a browser, and
+  every browser-using run connects to it over HTTP (`http://127.0.0.1:<port>/mcp`, MCP server name
+  `browser`). All runs share one browser on one persistent profile; each agent is told to open its
+  own tab, work only there and close it when done. The default is a pinned Playwright MCP:
 
   ```json
   "browser": {
     "backend": "mcp",
-    "mcpServers": {
-      "playwright": { "command": "npx", "args": ["@playwright/mcp@latest", "--user-data-dir", "{{profileDir}}"] }
+    "mode": "shared",
+    "shared": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.85", "--host", "127.0.0.1", "--port", "{{port}}",
+               "--shared-browser-context", "--user-data-dir", "{{profileDir}}",
+               "--output-dir", "{{outputDir}}", "--file-paths", "absolute"],
+      "port": 0,
+      "path": "/mcp"
     },
     "profileDir": "data/browser-profile"
   }
   ```
 
-  Chrome DevTools MCP works the same way, for example
-  `{"command": "npx", "args": ["chrome-devtools-mcp@latest", "--user-data-dir", "{{profileDir}}"]}`.
-  Always use `{{profileDir}}` (or an absolute path): agent CLIs run in their own per-run working
-  directory, so a relative path would create a fresh, empty profile for every run. To log the
-  profile into a site by hand, launch the same browser server once with that profile directory.
+  Placeholders: `{{profileDir}}` = absolute `browser.profileDir`, `{{port}}` = `port` (0 picks a free
+  port), `{{outputDir}}` = a folder under the OS temp dir where screenshots land (agents can pass
+  those files to `save_artifact`). The server runs in its own process group, logs to
+  `data/browser/shared-server.log`, is restarted if it dies, and is stopped when the app stops (a
+  leftover from a crash is killed at the next start). It opens a visible Chrome window, which is
+  also where you log the research profile into a site by hand when an agent asks you to.
+- **MCP backend, per-run servers** (`"mode": "per_run"`): each browser-using run spawns
+  `browser.mcpServers` itself (stdio), with `{{profileDir}}` substituted as above. A profile can be
+  open in only one browser at a time, so this mode caps `limits.maxBrowserRuns` at 1 (with a startup
+  warning). Always use `{{profileDir}}` (or an absolute path): CLIs run in a per-run working
+  directory, so a relative path would create a fresh, empty profile for every run.
+- With backend `mcp` and no browser configured (no `shared` in shared mode, empty `mcpServers` in
+  per-run mode) the app warns at startup and `propose_tasks` rejects tasks with `needs_browser`.
 - **T3 backend** (`"backend": "t3"`): no browser MCP server is passed; agents are told to use the
   T3 Code browser tools. This only works when the agent CLIs run inside T3 Code with those tools
   available. The harness cannot choose or check the browser profile in this mode: agents use
@@ -65,6 +81,24 @@ It stays logged into the throwaway accounts the agents create.
     enforces the separate profile itself.
 
 `limits.maxBrowserRuns` (default 2) caps concurrent browser-using runs.
+
+### Agent CLI isolation
+
+- **Codex** runs with its own `CODEX_HOME` (`data/cli-state/codex-home`): a generated, empty
+  `config.toml` and `auth.json` symlinked to yours (`$CODEX_HOME` or `~/.codex`), so your Codex MCP
+  servers, plugins and hooks are not loaded; only `bif` (and `browser`) are passed with `-c`. Sign
+  in with `codex login` as usual. The link is a symlink so a token refresh made during a run lands in
+  your own file; it is re-created before every run if missing or replaced.
+- **OpenCode** reads only the generated `.bif-opencode.json` (`OPENCODE_CONFIG`), with project
+  configs disabled and the global config dir redirected to `data/cli-state/opencode-config`
+  (credentials stay in OpenCode's data dir, so logins keep working).
+- **Claude Code** gets `--strict-mcp-config` (only `bif` and `browser`), but still loads your global
+  hooks and plugins (see Known limitations).
+- **Run tokens** (the per-run MCP credential) never go on a command line: Claude Code and OpenCode
+  read them from a generated config file in the run directory, Codex from the `BIF_MCP_TOKEN`
+  environment variable (sent as a bearer header to `/mcp`).
+- `save_artifact` with `file_path` only accepts files inside the run's working directory or the OS
+  temp dir (outside the data dir), after resolving symlinks.
 
 ## Running
 
@@ -167,7 +201,9 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
 - **Local only, no authentication.** The server rejects requests whose `Host` is not
   `127.0.0.1`/`localhost` (DNS rebinding), requires JSON (or multipart uploads) on state-changing
   requests and refuses non-local `Origin`s. Artifacts are served with `Content-Security-Policy:
-  sandbox` and `nosniff`; HTML/SVG snapshots download instead of rendering. Any other program on your
+  sandbox` and `nosniff`; HTML/SVG snapshots download instead of rendering. PDFs (filings) are the
+  exception to the sandbox: browsers refuse to show a sandboxed PDF, so they open inline with
+  `nosniff` only. Any other program on your
   machine can still call the API.
 - Review-gate history and open items per section: [docs/superpowers/verify-log.md](docs/superpowers/verify-log.md).
 

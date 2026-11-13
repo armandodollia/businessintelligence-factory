@@ -16,7 +16,8 @@ Rules:
 - Do not exceed the remaining task budget. Prefer fewer, well-scoped tasks over many vague ones.
 - Rejected tasks come back with reasons; fix and re-propose them if they still matter.
 - Cite existing findings by id instead of re-researching them. Other workspaces in the same business
-  tree can be inspected with `read_workspace` (read-only).
+  tree can be inspected with `read_workspace` (read-only); read an upload or other artifact with
+  `read_artifact({ artifact_id })`.
 - Log the reasoning behind your plan with `log_decision`.
 
 When you are given results of earlier tasks, propose follow-up tasks only where they add real value

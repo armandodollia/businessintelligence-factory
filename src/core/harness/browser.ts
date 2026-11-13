@@ -1,31 +1,260 @@
-import { resolve } from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { BifConfig } from '../config/schema.js';
+import { groupAlive, isOurProcessGroup, processStartTime } from './procinfo.js';
+
+/** MCP server name browser-using runs see the shared browser under (`mcp__browser__*` tools). */
+export const SHARED_BROWSER_NAME = 'browser';
+
+/** Directory for files the browser server writes (screenshots, PDFs): under the OS temp dir, so `save_artifact` accepts them. */
+export const browserOutputDir = (): string => join(tmpdir(), 'bif-browser-output');
+
+type BrowserCfg = Pick<BifConfig, 'browser'>;
+
+function substitute(v: unknown, vars: Record<string, string>): unknown {
+  if (typeof v === 'string') return Object.entries(vars).reduce((s, [k, x]) => s.split(`{{${k}}}`).join(x), v);
+  if (Array.isArray(v)) return v.map((x) => substitute(x, vars));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, substitute(x, vars)]));
+  return v;
+}
 
 /**
- * MCP servers handed to browser-using runs. Backend `mcp`: `browser.mcpServers` with every
- * `{{profileDir}}` placeholder replaced by the absolute dedicated research profile directory
- * (never the user's everyday browser profile). Backend `t3`: `{}`; agents use the T3 Code
- * browser tools instead (see `browserPromptNote`).
+ * `per_run` mode: the MCP servers each browser-using run spawns itself, with every
+ * `{{profileDir}}` replaced by the absolute dedicated research profile directory (never the
+ * user's everyday browser profile). Backend `t3`: `{}`; agents use the T3 Code browser tools.
  */
-export function browserMcpServers(cfg: Pick<BifConfig, 'browser'>): Record<string, unknown> {
+export function browserMcpServers(cfg: BrowserCfg): Record<string, unknown> {
   if (cfg.browser.backend === 't3') return {};
-  const profileDir = resolve(cfg.browser.profileDir);
-  const sub = (v: unknown): unknown => {
-    if (typeof v === 'string') return v.split('{{profileDir}}').join(profileDir);
-    if (Array.isArray(v)) return v.map(sub);
-    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, sub(x)]));
-    return v;
-  };
-  return sub(cfg.browser.mcpServers) as Record<string, unknown>;
+  return substitute(cfg.browser.mcpServers, {
+    profileDir: resolve(cfg.browser.profileDir),
+    outputDir: browserOutputDir(),
+  }) as Record<string, unknown>;
+}
+
+/** True when the config can give a run a browser (t3 backend, a shared server, or per-run servers). */
+export function browserConfigured(cfg: BrowserCfg): boolean {
+  const b = cfg.browser;
+  if (b.backend === 't3') return true;
+  if (b.mode === 'shared') return b.shared !== undefined;
+  return Object.keys(b.mcpServers).length > 0;
+}
+
+/**
+ * Concurrent browser-using runs actually allowed. `per_run` mode caps it at 1: every run would
+ * launch its own browser on the same profile directory, and a profile can only be open once.
+ */
+export function effectiveMaxBrowserRuns(cfg: Pick<BifConfig, 'browser' | 'limits'>): number {
+  const n = cfg.limits.maxBrowserRuns;
+  return cfg.browser.backend === 'mcp' && cfg.browser.mode === 'per_run' ? Math.min(n, 1) : n;
+}
+
+/** Problems with the browser setup worth printing at startup. */
+export function browserStartupWarnings(cfg: Pick<BifConfig, 'browser' | 'limits'>): string[] {
+  const out: string[] = [];
+  if (cfg.limits.maxBrowserRuns === 0) return out;
+  if (!browserConfigured(cfg)) {
+    out.push(
+      cfg.browser.mode === 'shared'
+        ? "browser.backend is 'mcp' in shared mode but browser.shared is not set: tasks that need a browser are rejected"
+        : "browser.backend is 'mcp' but browser.mcpServers is empty: tasks that need a browser are rejected",
+    );
+  } else if (cfg.browser.backend === 'mcp' && cfg.browser.mode === 'per_run' && cfg.limits.maxBrowserRuns > 1) {
+    out.push(
+      `browser.mode is 'per_run': each run launches its own browser on the one research profile, so ` +
+        `limits.maxBrowserRuns ${cfg.limits.maxBrowserRuns} is reduced to 1 (use mode 'shared' for parallel browsing)`,
+    );
+  }
+  return out;
 }
 
 /** Browser instructions appended to the system prompt of browser-using runs. */
-export function browserPromptNote(cfg: Pick<BifConfig, 'browser'>): string {
+export function browserPromptNote(cfg: BrowserCfg): string {
   const common =
     'The browser uses a dedicated, persistent research profile that stays logged into accounts created ' +
-    'for research. Open your own tabs and close them when you are done; other agents share the browser.';
+    'for research. Other agents use the same browser at the same time: open a NEW tab for your work ' +
+    'before navigating, work only in your own tab(s), never close or reuse tabs you did not open, and ' +
+    'close your tabs when you are done.';
   if (cfg.browser.backend === 't3') {
     return `## Browser\nUse the T3 Code browser tools (not a browser MCP server) for all browsing. ${common}`;
   }
-  return `## Browser\nUse the browser MCP tools for all browsing. ${common}`;
+  const files =
+    'To keep a screenshot as evidence, save it with `save_artifact` (file_path = the absolute path the browser ' +
+    'tool reports, or content_base64).';
+  return `## Browser\nUse the browser MCP tools for all browsing. ${common}\n${files}`;
+}
+
+function freePort(): Promise<number> {
+  return new Promise((ok, fail) => {
+    const s = createServer();
+    s.once('error', fail);
+    s.listen(0, '127.0.0.1', () => {
+      const addr = s.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      s.close(() => ok(port));
+    });
+  });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export type SharedBrowserOptions = {
+  config: BrowserCfg;
+  /** Holds the server log and pid file (`<dataDir>/browser/`). */
+  dataDir: string;
+  /** How long to wait for the server to answer HTTP (npx may download first). Default 120 s. */
+  startTimeoutMs?: number;
+};
+
+/**
+ * One browser MCP server shared by every browser-using run (`browser.mode: 'shared'`). Started
+ * lazily by the first `ensure()`, in its own process group (so run reaping never kills it), and
+ * restarted by the next `ensure()` if it died. A leftover server from a crashed harness (pid file)
+ * is killed before starting, since it would hold the research profile.
+ */
+export class SharedBrowser {
+  private starting: Promise<string> | null = null;
+  private child: ChildProcess | null = null;
+  private readonly dir: string;
+  private readonly onExit = () => this.killNow();
+
+  constructor(private readonly opts: SharedBrowserOptions) {
+    this.dir = join(resolve(opts.dataDir), 'browser');
+  }
+
+  /** Log file of the shared server (stdout and stderr). */
+  get logPath(): string {
+    return join(this.dir, 'shared-server.log');
+  }
+
+  private get pidPath(): string {
+    return join(this.dir, 'shared-server.pid');
+  }
+
+  /** URL of the running server, starting it if needed. Rejects when it cannot be started. */
+  ensure(): Promise<string> {
+    if (!this.starting) {
+      this.starting = this.start();
+      this.starting.catch(() => (this.starting = null));
+    }
+    return this.starting;
+  }
+
+  /** MCP servers entry handed to a browser-using run. */
+  async servers(): Promise<Record<string, unknown>> {
+    return { [SHARED_BROWSER_NAME]: { type: 'http', url: await this.ensure() } };
+  }
+
+  private async start(): Promise<string> {
+    const shared = this.opts.config.browser.shared;
+    if (!shared) throw new Error('browser.shared is not configured');
+    mkdirSync(this.dir, { recursive: true });
+    this.killStale();
+    const port = shared.port || (await freePort());
+    const profileDir = resolve(this.opts.config.browser.profileDir);
+    const outputDir = browserOutputDir();
+    mkdirSync(profileDir, { recursive: true });
+    mkdirSync(outputDir, { recursive: true });
+    const vars = { port: String(port), profileDir, outputDir };
+    const args = substitute(shared.args, vars) as string[];
+    const env = { ...process.env, ...(substitute(shared.env ?? {}, vars) as Record<string, string>) };
+    const log = openSync(this.logPath, 'a');
+    let child: ChildProcess;
+    try {
+      // cwd = the output dir: files a client names without roots land there (OS temp dir, accepted by save_artifact).
+      child = spawn(shared.command, args, { cwd: outputDir, env, stdio: ['ignore', log, log], detached: process.platform !== 'win32' });
+    } finally {
+      closeSync(log);
+    }
+    this.child = child;
+    let exited: string | null = null;
+    child.once('error', (e) => (exited = `spawn failed: ${e.message}`));
+    child.once('exit', (code, signal) => {
+      exited ??= `exited (${signal ?? code})`;
+      if (this.child === child) {
+        this.child = null;
+        this.starting = null;
+        process.off('exit', this.onExit);
+        rmSync(this.pidPath, { force: true });
+      }
+    });
+    if (child.pid !== undefined) {
+      writeFileSync(this.pidPath, JSON.stringify({ pid: child.pid, startedAt: processStartTime(child.pid) }));
+      // A harness exit must not leave the browser (and its profile lock) behind.
+      process.on('exit', this.onExit);
+    }
+
+    const url = `http://127.0.0.1:${port}${shared.path}`;
+    const deadline = Date.now() + (this.opts.startTimeoutMs ?? 120_000);
+    for (;;) {
+      if (exited) throw new Error(`shared browser server ${exited}; see ${this.logPath}`);
+      try {
+        await fetch(url, { method: 'GET', signal: AbortSignal.timeout(2000) });
+        return url; // any HTTP answer means it is listening
+      } catch {
+        // not up yet
+      }
+      if (Date.now() >= deadline) {
+        this.killNow();
+        throw new Error(`shared browser server did not answer on ${url} within ${this.opts.startTimeoutMs ?? 120_000} ms; see ${this.logPath}`);
+      }
+      await sleep(250);
+    }
+  }
+
+  /** Kills a server left behind by a previous harness process (verified by pid start time). */
+  private killStale(): void {
+    if (!existsSync(this.pidPath)) return;
+    try {
+      const { pid, startedAt } = JSON.parse(readFileSync(this.pidPath, 'utf8')) as { pid: number; startedAt?: string };
+      if (process.platform !== 'win32' && isOurProcessGroup(pid, startedAt).ours) process.kill(-pid, 'SIGKILL');
+    } catch {
+      // unreadable pid file or already gone
+    }
+    rmSync(this.pidPath, { force: true });
+  }
+
+  private killNow(): void {
+    const pid = this.child?.pid;
+    if (pid === undefined) return;
+    try {
+      if (process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
+      else this.child?.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+
+  /** Stops the server (SIGTERM to its group, SIGKILL after `graceMs`). */
+  async close(graceMs = 3000): Promise<void> {
+    const child = this.child;
+    this.starting = null;
+    if (!child || child.pid === undefined) return;
+    const pid = child.pid;
+    const gone = () => (process.platform === 'win32' ? child.exitCode !== null || child.signalCode !== null : !groupAlive(pid));
+    try {
+      if (process.platform !== 'win32') process.kill(-pid, 'SIGTERM');
+      else child.kill('SIGTERM');
+    } catch {
+      // already gone
+    }
+    const deadline = Date.now() + graceMs;
+    while (!gone() && Date.now() < deadline) await sleep(25);
+    if (!gone()) this.killNow();
+    this.child = null;
+    process.off('exit', this.onExit);
+    rmSync(this.pidPath, { force: true });
+  }
+}
+
+/**
+ * MCP servers for a browser-using run: the shared server (started on demand), the per-run servers,
+ * or none for the t3 backend.
+ */
+export async function browserServersFor(cfg: BrowserCfg, shared: SharedBrowser): Promise<Record<string, unknown>> {
+  if (cfg.browser.backend === 't3') return {};
+  if (cfg.browser.mode === 'shared') return shared.servers();
+  return browserMcpServers(cfg);
 }

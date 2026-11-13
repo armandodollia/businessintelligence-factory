@@ -25,20 +25,28 @@ const parseAll = (lines: string[]): RunEvent[] => {
 };
 
 describe('OpenCodeAdapter', () => {
-  it('command shape and opencode.json', () => {
-    const { cmd, args, files } = new OpenCodeAdapter().buildCommand(spec);
+  it('command shape and generated config file', () => {
+    const { cmd, args, files, env } = new OpenCodeAdapter().buildCommand(spec);
     expect(cmd).toBe('opencode');
     expect(args.slice(0, 5)).toEqual(['run', '--format', 'json', '-m', 'github-copilot/gpt-6.1-sol']);
     const prompt = args.at(-1)!;
     expect(prompt.startsWith('<system>\nYou are a research worker.\n</system>')).toBe(true);
     expect(files).toHaveLength(1);
-    expect(files[0]!.path).toBe(join('/tmp/bif-run', 'opencode.json'));
+    expect(files[0]!.path).toBe(join('/tmp/bif-run', '.bif-opencode.json'));
+    // Only the generated file is loaded: no project config, no redirect of the global dir without stateDir.
+    expect(env).toEqual({ OPENCODE_CONFIG: files[0]!.path, OPENCODE_DISABLE_PROJECT_CONFIG: '1' });
+    expect(args.join(' ')).not.toContain('tok_');
     const cfg = JSON.parse(files[0]!.content);
     expect(cfg.mcp.bif).toEqual({ type: 'remote', url: spec.mcpUrl, enabled: true, oauth: false, timeout: 86_400_000 });
     expect(cfg.mcp.playwright).toEqual({
       type: 'local', command: ['npx', '@playwright/mcp@0.0.41'], environment: { A: '1' }, enabled: true,
     });
     expect(cfg.mcp.remote).toEqual({ type: 'remote', url: 'http://x.test/mcp', headers: { h: 'v' }, enabled: true });
+  });
+
+  it('stateDir isolates the global config dir (user MCP servers are not loaded)', () => {
+    const { env } = new OpenCodeAdapter().buildCommand({ ...spec, stateDir: '/data/cli-state' });
+    expect(env).toMatchObject({ XDG_CONFIG_HOME: join('/data/cli-state', 'opencode-config'), OPENCODE_DISABLE_PROJECT_CONFIG: '1' });
   });
 
   it('fixture parse → message/tool_call/done', () => {

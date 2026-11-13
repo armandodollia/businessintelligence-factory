@@ -9,6 +9,8 @@ import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
 import type { Decision, Finding, Task, UserRequest } from '../../types.js';
 import type { RunContext } from '../tokens.js';
+import { browserConfigured } from '../browser.js';
+import { isAllowedRunFile } from '../paths.js';
 import { findReplay } from './idempotency.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
@@ -230,6 +232,10 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       let artifact;
       if (input.file_path !== undefined) {
         if (!isAbsolute(input.file_path)) return fail('file_path must be an absolute path');
+        // Agents may only hand over files they produced: no reading the user's disk through us.
+        if (!isAllowedRunFile(input.file_path, artifacts.dataDir, ctx.workspaceId, ctx.agentRunId)) {
+          return fail('file_path must be inside your working directory or the OS temp dir');
+        }
         artifact = artifacts.saveFromPath({ ...meta, filePath: input.file_path });
       } else if (input.content_base64 !== undefined) {
         artifact = artifacts.save({ ...meta, bytes: new Uint8Array(Buffer.from(input.content_base64, 'base64')) });
@@ -399,6 +405,18 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
 
       const extra = deps.extraHandlers?.[name];
       if (!extra) return announce(fail(`tool '${name}' is not available yet in this build`));
+      if (name === 'propose_tasks' && !browserConfigured(deps.config)) {
+        const tasks = (parsed.data as { tasks: Array<{ needs_browser?: boolean }> }).tasks;
+        const idx = tasks.flatMap((t, i) => (t.needs_browser ? [i] : []));
+        if (idx.length) {
+          return announce(
+            fail(
+              `tasks ${idx.join(', ')} set needs_browser but no browser is configured (browser.backend 'mcp' without ` +
+                `a shared server or mcpServers). Propose them again without needs_browser, or drop them.`,
+            ),
+          );
+        }
+      }
       if (name === 'save_recommendation') {
         // Spec §7.2: unverified results are excluded from synthesis unless the user overrides.
         const ids = (parsed.data as ToolInput<'save_recommendation'>).finding_ids;

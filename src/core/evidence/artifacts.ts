@@ -76,7 +76,8 @@ function extFor(mime: string, filePath?: string): string {
 export class ArtifactStore {
   constructor(
     private readonly store: Store,
-    private readonly dataDir: string,
+    /** Root of the data directory (artifact paths are relative to it). */
+    readonly dataDir: string,
   ) {}
 
   /**

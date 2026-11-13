@@ -1,5 +1,5 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -61,18 +61,19 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
 describe('role scope table', () => {
   it('matches the brief', () => {
     const base = ['log_decision', 'save_artifact', 'request_user_action', 'request_approval'];
-    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'read_workspace']));
+    // Reviewers judge only the deliverable and its evidence: no read_workspace (final review A4).
+    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact']));
     expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback']));
     expect(new Set(ROLE_TOOLS.interviewer)).toEqual(new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact']));
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
       new Set([
         ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
-        'read_workspace', 'propose_business_unit',
+        'read_workspace', 'propose_business_unit', 'read_artifact',
       ]),
     );
-    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace']));
+    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace', 'read_artifact']));
     expect(new Set(ROLE_TOOLS.synthesizer)).toEqual(
-      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace']),
+      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace', 'read_artifact']),
     );
     for (const tools of Object.values(ROLE_TOOLS)) for (const t of tools) expect(TOOL_NAMES).toContain(t);
   });
@@ -258,6 +259,41 @@ describe('tool handlers', () => {
     expect(img).toMatchObject({ ok: true, images: [{ mimeType: 'image/png' }] });
     const other = await handle(ctx('reviewer', { workspaceId: 'ws_b' }), 'read_artifact', { artifact_id: id });
     expect(other.ok).toBe(false);
+    // Every role that reads evidence gets read_artifact, still scoped to the business tree.
+    for (const role of ['worker', 'orchestrator', 'synthesizer', 'interviewer'] as const) {
+      expect((await handle(ctx(role), 'read_artifact', { artifact_id: id })).ok).toBe(true);
+      expect((await handle(ctx(role, { workspaceId: 'ws_b' }), 'read_artifact', { artifact_id: id })).ok).toBe(false);
+    }
+    const rw = await handle(ctx('reviewer'), 'read_workspace', { workspace_id: 'ws_a' });
+    expect(rw).toMatchObject({ ok: false, error: expect.stringMatching(/not available to role 'reviewer'/) });
+  });
+
+  it('save_artifact file_path: only files inside the run cwd or the OS temp dir', async () => {
+    const { dir, handle } = setup();
+    const c = ctx('worker');
+    const cwd = join(dir, c.workspaceId, 'runs', c.agentRunId, 'cwd');
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(join(cwd, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1]));
+    const inCwd = await handle(c, 'save_artifact', { kind: 'screenshot', mime: 'image/png', file_path: join(cwd, 'shot.png') });
+    expect(inCwd.ok).toBe(true);
+    const tmpFile = join(mkdtempSync(join(tmpdir(), 'bif-shot-')), 'a.txt');
+    writeFileSync(tmpFile, 'from tmp');
+    expect((await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', file_path: tmpFile })).ok).toBe(true);
+
+    // Outside both roots: another run's cwd, the data dir itself, a home-dir secret.
+    const otherRun = join(dir, c.workspaceId, 'runs', 'arun_other', 'cwd');
+    mkdirSync(otherRun, { recursive: true });
+    writeFileSync(join(otherRun, 'x.txt'), 'other');
+    const outside = [join(otherRun, 'x.txt'), join(dir, 'bif.db'), join(homedir(), '.ssh', 'id_rsa'), '/etc/passwd'];
+    for (const file_path of outside) {
+      const r = await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', file_path });
+      // This dataDir lives under the OS temp dir: the rest of the data dir is still off limits.
+      expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/file_path must be inside/) });
+    }
+    // A symlink inside the cwd pointing outside is resolved and refused.
+    symlinkSync('/etc/passwd', join(cwd, 'link.txt'));
+    const link = await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', file_path: join(cwd, 'link.txt') });
+    expect(link).toMatchObject({ ok: false, error: expect.stringMatching(/file_path must be inside/) });
   });
 
   it('extra handlers: absent → not available; present → validated input + decision for judgments', async () => {
@@ -406,7 +442,7 @@ describe('mcp server', () => {
     return client;
   }
 
-  it('tools/list for reviewer returns exactly its 4 tools', async () => {
+  it('tools/list for reviewer returns exactly its 3 tools', async () => {
     const s = setup();
     const tokens = new TokenRegistry(s.store);
     const app = new Hono();
@@ -414,7 +450,7 @@ describe('mcp server', () => {
     const reviewer = ctx('reviewer');
     const client = await connect(app, tokens.issue(reviewer));
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'read_workspace', 'submit_review']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'submit_review']);
     const review = tools.find((t) => t.name === 'submit_review')!;
     expect(review.inputSchema.type).toBe('object');
     expect(review.inputSchema.properties).toHaveProperty('score');
@@ -447,6 +483,33 @@ describe('mcp server', () => {
       }),
     );
     expect(res.status).toBe(401);
+  });
+
+  it('/mcp takes the run token as a bearer header (keeps it out of CLI argv)', async () => {
+    const s = setup();
+    const tokens = new TokenRegistry(s.store);
+    const app = new Hono();
+    mountMcp(app, { tokens, handle: s.handle });
+    const token = tokens.issue(ctx('reviewer'));
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL('http://bif.local/mcp'), {
+        fetch: async (url, init) => app.fetch(new Request(url, init)),
+        requestInit: { headers: { authorization: `Bearer ${token}` } },
+      }),
+    );
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'submit_review']);
+    await client.close();
+    for (const authorization of [undefined, 'Bearer tok_unknown', `Basic ${token}`]) {
+      const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+      if (authorization) headers.authorization = authorization;
+      const res = await app.fetch(
+        new Request('http://bif.local/mcp', {
+          method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+        }),
+      );
+      expect(res.status).toBe(401);
+    }
   });
 
   it('blocking request_approval over a real HTTP server stays open until resolved', async () => {

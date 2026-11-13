@@ -29,6 +29,7 @@ function setup(cfg: (c: BifConfig) => void = () => {}) {
   const config = structuredClone(defaultConfig);
   config.providers.claude.command = FAKE_CLI;
   config.limits.idleTimeoutMs = 2000;
+  config.browser.mode = 'per_run';
   config.browser.mcpServers = { playwright: { command: 'npx', args: ['@playwright/mcp@0.0.41'] } };
   cfg(config);
   const events = new EventBus();

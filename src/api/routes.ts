@@ -44,7 +44,7 @@ export type AppDeps = {
   configPath?: string;
   /** In-process interviewer (tests / dry runs). */
   interviewFake?: InterviewerFake;
-  /** Mounts the harness MCP server at `/mcp/:token` when given. */
+  /** Mounts the harness MCP server at `/mcp/:token` (and bearer-token `/mcp`) when given. */
   mcp?: McpDeps;
   /** Built web app (`web/dist`); served at `/` when the directory exists. */
   webDist?: string;
@@ -180,6 +180,9 @@ export function isLocalOrigin(origin: string): boolean {
  */
 const ACTIVE_MIME = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml|multipart\/related|text\/xml|application\/xml)\b/i;
 
+/** Exactly `application/pdf` (parameters allowed), so no other type borrows the PDF exemption. */
+const isPdfMime = (mime: string) => mime.split(';')[0]!.trim().toLowerCase() === 'application/pdf';
+
 /**
  * Builds the HTTP app (JSON API, SSE, optional MCP and static web). Separate from `listen` so tests
  * use `app.request`. Errors render as `{ error }` with 400 (validation, RatingError), 404 (unknown
@@ -200,7 +203,7 @@ export function createApp(deps: AppDeps): Hono {
     const origin = c.req.header('origin');
     if (origin !== undefined && !isLocalOrigin(origin)) return c.json({ error: 'forbidden origin' }, 403);
     const path = c.req.path;
-    if (path.startsWith('/mcp/') && method === 'DELETE') return next(); // MCP session close has no body
+    if ((path === '/mcp' || path.startsWith('/mcp/')) && method === 'DELETE') return next(); // MCP session close has no body
     const type = (c.req.header('content-type') ?? '').toLowerCase();
     const isJson = type.startsWith('application/json');
     const isUpload = /^\/api\/workspaces\/[^/]+\/uploads$/.test(path) && type.startsWith('multipart/form-data');
@@ -433,6 +436,11 @@ export function createApp(deps: AppDeps): Hono {
     const name = artifact.title ?? `${artifact.id}`;
     if (active) {
       headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
+    } else if (isPdfMime(artifact.mime)) {
+      // The browser's PDF viewer will not render a sandboxed document, and a PDF runs no page
+      // script as our origin: filings open inline, nosniff kept.
+      delete headers['content-security-policy'];
+      headers['content-disposition'] = `inline; filename*=UTF-8''${encodeURIComponent(name)}`;
     } else if (artifact.kind === 'upload' && artifact.title) {
       headers['content-disposition'] = `inline; filename*=UTF-8''${encodeURIComponent(artifact.title)}`;
     }

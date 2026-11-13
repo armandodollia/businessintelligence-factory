@@ -30,12 +30,21 @@
   },
   "browser": {
     "backend": "mcp",
-    "mcpServers": {
-      "playwright": {
-        "command": "npx",
-        "args": ["@playwright/mcp@latest", "--user-data-dir", "{{profileDir}}"]
-      }
+    "mode": "shared",
+    "shared": {
+      "command": "npx",
+      "args": [
+        "-y", "@playwright/mcp@0.0.85",
+        "--host", "127.0.0.1", "--port", "{{port}}",
+        "--shared-browser-context",
+        "--user-data-dir", "{{profileDir}}",
+        "--output-dir", "{{outputDir}}",
+        "--file-paths", "absolute"
+      ],
+      "port": 0,
+      "path": "/mcp"
     },
+    "mcpServers": {},
     "profileDir": "data/browser-profile"
   },
   "identity": { "emailProvider": "mailtm" },

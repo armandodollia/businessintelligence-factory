@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { RunEvent, SpawnSpec } from '../../../src/core/harness/adapter.js';
-import { CodexAdapter, toToml } from '../../../src/core/harness/adapters/codex.js';
+import { BIF_TOKEN_ENV, CODEX_HOME_CONFIG, CodexAdapter, toToml } from '../../../src/core/harness/adapters/codex.js';
 import { getAdapter } from '../../../src/core/harness/adapters/index.js';
 
 const spec: SpawnSpec = {
@@ -50,6 +50,35 @@ describe('CodexAdapter', () => {
     expect(prompt.startsWith('<system>\nYou are a research worker.\n</system>')).toBe(true);
     expect(prompt.endsWith('Walk the signup flow')).toBe(true);
     expect(files).toEqual([]);
+  });
+
+  it('bearer endpoint keeps the run token out of argv (env var instead)', () => {
+    const { args, env } = new CodexAdapter().buildCommand({
+      ...spec, mcpBearer: { url: 'http://127.0.0.1:4317/mcp', token: 'tok_abc' },
+    });
+    expect(args.join('\n')).not.toContain('tok_abc');
+    const configs = args.flatMap((a, i) => (args[i - 1] === '-c' ? [a] : []));
+    expect(configs).toContain('mcp_servers.bif.url="http://127.0.0.1:4317/mcp"');
+    expect(configs).toContain(`mcp_servers.bif.bearer_token_env_var="${BIF_TOKEN_ENV}"`);
+    expect(env).toMatchObject({ [BIF_TOKEN_ENV]: 'tok_abc' });
+  });
+
+  it('stateDir: dedicated CODEX_HOME with generated config.toml and auth.json linked to the user home', () => {
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = '/users/me/.codex';
+    try {
+      const { env, files, links } = new CodexAdapter().buildCommand({ ...spec, stateDir: '/data/cli-state' });
+      const home = join('/data/cli-state', 'codex-home');
+      expect(env).toMatchObject({ CODEX_HOME: home });
+      expect(files).toEqual([{ path: join(home, 'config.toml'), content: CODEX_HOME_CONFIG }]);
+      expect(CODEX_HOME_CONFIG.split('\n').filter((l) => l.trim() && !l.startsWith('#'))).toEqual([]);
+      expect(links).toEqual([{ path: join(home, 'auth.json'), target: '/users/me/.codex/auth.json' }]);
+      // Without stateDir nothing changes (the CLI's own home is used).
+      expect(new CodexAdapter().buildCommand(spec).env).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prev;
+    }
   });
 
   it('toToml renders inline values', () => {

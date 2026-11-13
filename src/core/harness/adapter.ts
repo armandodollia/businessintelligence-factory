@@ -18,6 +18,16 @@ export type SpawnSpec = {
   model: string;
   /** Harness MCP endpoint for this run (`<base>/mcp/<token>`). */
   mcpUrl: string;
+  /**
+   * The same endpoint without the token in the URL (`<base>/mcp`, token sent as
+   * `Authorization: Bearer`), for CLIs that would otherwise get the URL on their command line.
+   */
+  mcpBearer?: { url: string; token: string };
+  /**
+   * Absolute directory for isolated CLI state (e.g. a dedicated CODEX_HOME), so runs never load
+   * the user's own MCP servers, plugins or hooks. Omitted: the CLI's normal home is used.
+   */
+  stateDir?: string;
   /** Extra MCP servers (e.g. browser), in Claude Code `mcpServers` entry format. */
   extraMcpServers: Record<string, unknown>;
   cwd: string;
@@ -31,6 +41,8 @@ export type BuiltCommand = {
   files: Array<{ path: string; content: string }>;
   /** Extra environment variables for the subprocess (merged under `SpawnSpec.env`). */
   env?: Record<string, string>;
+  /** Symlinks the supervisor creates before spawning (`path` → `target`; copied where links fail). */
+  links?: Array<{ path: string; target: string }>;
 };
 
 /**

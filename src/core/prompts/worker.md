@@ -19,7 +19,8 @@ acceptance criteria. Do the research yourself and report through the harness too
 - For `map_business_units` tasks, propose each child unit with `propose_business_unit` (name,
   description, level, audiences, evidence, reasoning); the user accepts or rejects them.
 - Other workspaces of the same business tree can be read with `read_workspace`; their findings and
-  artifacts may be cited as evidence (say which workspace they come from).
+  artifacts may be cited as evidence (say which workspace they come from). Read an artifact's
+  content (uploads, earlier evidence) with `read_artifact({ artifact_id })`.
 - Stay inside the task scope. Do not do work the brief did not ask for.
 
 ## Finishing

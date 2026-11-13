@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { BifConfig } from '../config/schema.js';
@@ -9,7 +11,8 @@ import { newId } from '../store/repos.js';
 import type { AgentRun, Role } from '../types.js';
 import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
-import { browserMcpServers } from './browser.js';
+import { browserServersFor, effectiveMaxBrowserRuns, SharedBrowser } from './browser.js';
+import { runCwdOf, runDirOf } from './paths.js';
 import { priorAttemptSection } from './priorAttempt.js';
 import { processStartTime } from './procinfo.js';
 import { Semaphore } from './semaphore.js';
@@ -37,6 +40,8 @@ export type SupervisorDeps = {
   backoff?: Backoff;
   /** Delay between SIGTERM and SIGKILL. Default 5000 ms. */
   killGraceMs?: number;
+  /** Shared browser server (`browser.mode: 'shared'`); default: one owned by this supervisor. */
+  browser?: SharedBrowser;
 };
 
 export type RunOptions = {
@@ -100,14 +105,22 @@ export class Supervisor {
   private readonly killGraceMs: number;
   /** `deps.dataDir` made absolute: CLIs run in their own cwd, so every path we hand them must be absolute. */
   private readonly dataDir: string;
+  /** The shared browser MCP server browser-using runs connect to (started on first use). */
+  readonly browser: SharedBrowser;
 
   constructor(private readonly deps: SupervisorDeps) {
     this.dataDir = resolvePath(deps.dataDir);
     this.workers = new Semaphore(deps.config.limits.maxParallelWorkers);
-    const maxBrowser = deps.config.limits.maxBrowserRuns;
+    this.browser = deps.browser ?? new SharedBrowser({ config: deps.config, dataDir: this.dataDir });
+    const maxBrowser = effectiveMaxBrowserRuns(deps.config);
     this.browsers = maxBrowser > 0 ? new Semaphore(maxBrowser) : null;
     this.backoff = deps.backoff ?? DEFAULT_BACKOFF;
     this.killGraceMs = deps.killGraceMs ?? 5000;
+  }
+
+  /** Stops the shared browser server, if one was started. */
+  async close(): Promise<void> {
+    await this.browser.close();
   }
 
   /**
@@ -148,7 +161,7 @@ export class Supervisor {
       for (const e of closing) {
         all.push(e);
         try {
-          const path = join(dataDir, ctx.workspaceId, 'runs', ctx.agentRunId, 'events.jsonl');
+          const path = join(runDirOf(dataDir, ctx.workspaceId, ctx.agentRunId), 'events.jsonl');
           mkdirSync(dirname(path), { recursive: true });
           appendFileSync(path, JSON.stringify(e) + '\n');
         } catch {
@@ -180,8 +193,8 @@ export class Supervisor {
   ): Promise<RunOutcome> {
     const { store, events, tokens } = this.deps;
     const dataDir = this.dataDir;
-    const runDir = join(dataDir, ctx.workspaceId, 'runs', ctx.agentRunId);
-    const cwd = join(runDir, 'cwd');
+    const runDir = runDirOf(dataDir, ctx.workspaceId, ctx.agentRunId);
+    const cwd = runCwdOf(dataDir, ctx.workspaceId, ctx.agentRunId);
     mkdirSync(cwd, { recursive: true });
     const eventsPath = join(runDir, 'events.jsonl');
     writeFileSync(eventsPath, '');
@@ -344,7 +357,7 @@ export class Supervisor {
     return res;
   }
 
-  private attemptCli(
+  private async attemptCli(
     ctx: RunContext,
     token: string,
     cwd: string,
@@ -355,19 +368,23 @@ export class Supervisor {
     const { config, mcpBaseUrl } = this.deps;
     const provider = ctx.model.provider;
     const adapter = getAdapter(provider, config.providers[provider].command);
+    const base = mcpBaseUrl.replace(/\/+$/, '');
     const spec = {
       prompt: opts.prompt,
       systemPrompt: opts.systemPrompt,
       model: ctx.model.model,
-      mcpUrl: `${mcpBaseUrl.replace(/\/+$/, '')}/mcp/${token}`,
-      extraMcpServers: opts.needsBrowser ? browserMcpServers(config) : {},
+      mcpUrl: `${base}/mcp/${token}`,
+      mcpBearer: { url: `${base}/mcp`, token },
+      extraMcpServers: opts.needsBrowser ? await browserServersFor(config, this.browser) : {},
       cwd,
+      stateDir: join(this.dataDir, 'cli-state'),
     };
     const built = adapter.buildCommand(spec);
     for (const f of built.files) {
       mkdirSync(dirname(f.path), { recursive: true });
       writeFileSync(f.path, f.content);
     }
+    for (const l of built.links ?? []) linkFile(l.path, l.target);
     const stdoutLog = join(runDir, 'stdout.log');
     const stderrLog = join(runDir, 'stderr.log');
 
@@ -488,6 +505,34 @@ export class Supervisor {
 }
 
 const isWin = process.platform === 'win32';
+
+/**
+ * Points `path` at `target` with a symlink, so a CLI that refreshes credentials in place writes
+ * them to the user's own file; copies when symlinks are unavailable. A missing target removes
+ * `path`. The link (or copy) is made under a temp name and renamed into place, so concurrent runs
+ * never write through an existing link onto the target.
+ */
+function linkFile(path: string, target: string) {
+  mkdirSync(dirname(path), { recursive: true });
+  let current: string | null | undefined; // link target, null = regular file, undefined = absent
+  try {
+    current = lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null;
+  } catch {
+    current = undefined;
+  }
+  if (!existsSync(target)) {
+    if (current !== undefined) rmSync(path, { force: true });
+    return;
+  }
+  if (current === target) return;
+  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    symlinkSync(target, tmp);
+  } catch {
+    copyFileSync(target, tmp);
+  }
+  renameSync(tmp, path);
+}
 
 function signalGroup(pid: number | undefined, sig: NodeJS.Signals, child?: { kill(sig: NodeJS.Signals): boolean }) {
   try {
