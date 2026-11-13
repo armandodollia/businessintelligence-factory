@@ -147,7 +147,11 @@ export interface EvidenceGroups {
   links: EvidenceItem[];
 }
 
-export const ALL_PHASES: Phase[] = [
+/** `mapping` (Task 10b) is optional and runs first when present; not in the default set. */
+export type ResearchPhase = Phase | 'mapping';
+export const OPTIONAL_PHASES: ResearchPhase[] = ['mapping'];
+
+export const ALL_PHASES: ResearchPhase[] = [
   'market_research',
   'competitor_discovery',
   'deep_dives',

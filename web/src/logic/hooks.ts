@@ -16,7 +16,7 @@ import type {
   InterviewState,
   InterviewTurn,
   NewSchedule,
-  Phase,
+  ResearchPhase,
   Rating,
   RatingInput,
   RatingTargetType,
@@ -29,6 +29,9 @@ import type {
   UserRequest,
   WorkspaceNode,
 } from './types.js';
+
+/** URL builders views may use for links and images. */
+export { artifactUrl, exportUrl };
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -406,7 +409,7 @@ export function useResearch(wsId: string | null | undefined) {
   });
 
   const start = useCallback(
-    async (phases?: Phase[]) => {
+    async (phases?: ResearchPhase[]) => {
       if (!wsId) return;
       await action.run(() => api.startResearch(wsId, phases));
       setSelected(null);

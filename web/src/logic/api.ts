@@ -13,7 +13,7 @@ import type {
   InterviewTurn,
   NewSchedule,
   PersonaNode,
-  Phase,
+  ResearchPhase,
   Rating,
   RatingInput,
   Recommendation,
@@ -106,7 +106,7 @@ export const api = {
   },
 
   // research
-  startResearch: (id: string, phases?: Phase[]) =>
+  startResearch: (id: string, phases?: ResearchPhase[]) =>
     post<ResearchRun | ResearchRun[] | null>(`${ws(id)}/research`, phases ? { phases } : {}),
   listRuns: (id: string) => get<ResearchRun[]>(`${ws(id)}/runs`),
   listTasks: (id: string, runId?: string) =>
