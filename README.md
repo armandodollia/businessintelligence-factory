@@ -358,6 +358,30 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `GET /api/workspaces/:id/metrics/prompt-versions[?role=]`,
   `GET /api/workspaces/:id/calibration/versions[?role=]`,
   `POST /api/workspaces/:id/calibration/versions/:versionId/revert`.
+- **Lessons and the weekly retro.** Per role and per business, BIF watches recurring problems: review
+  issue classes per task type, negative decision outcomes, run failures (not rate limits or other
+  infrastructure), policy denials, your exclusions / corrections / rating disagreements on an agent's
+  output, knowledge-store signals (zero-result searches, unused reads, duplicates, missing captions,
+  rejected quotes) and signals other features record (`recordLessonSignal`). When one recurs in 3
+  tasks, a rule is **proposed** on the **Lessons** page; you accept or reject it (with an optional
+  reason), and only an accepted rule is appended to that role's prompt, tagged with a tracking
+  marker (`[L-7F3A2C.v1]`), so the prompt version changes and every run's stored prompt shows which
+  rules it had. The page shows each rule's effect: the category's rate before the rule and under its
+  current version, and per prompt version (with pass rate, rating agreement and cost). The engine
+  then proposes to strengthen a rule that keeps recurring, retire one after 10 clean tasks, or revert
+  one whose rate did not drop after 5 tasks; each is again yours to accept. At most 15 rules per role.
+  Rules are written from templates, never from stored text; examples quote review issues only when
+  they are not upload-derived and not from an upload-exposed run or task (the export's rule), else
+  they name the id. Every Monday 06:00 (`lessons.retro.cron`) the scheduler runs a **retro** per
+  business: the `retro` agent reads a digest of the week (task results, costs, outcomes, review
+  issues, failures, denials, your feedback, knowledge signals, rules and pending proposals; fixed size,
+  redacted, fenced, logged as a read before the run starts) and proposes prompt rules and
+  calibration notes citing digest ids — pending until you accept each one. Accepts and rejects are
+  feedback events (`lesson_accept` / `lesson_reject`) with your `user.id`; accepts are also
+  Decisions. API: `GET /api/workspaces/:id/lessons`, `POST …/lessons/evaluate`,
+  `POST …/lessons/proposals/:pid/accept|reject` (`{reason?}`), `POST …/lessons/rules/:rid/propose-retire`,
+  `POST …/lessons/retro`. Config: `lessons` (`enabled`, `minTasks`, `retireAfterCleanTasks`,
+  `minEffectTasks`, `maxRulesPerRole` ≤ 15, `retro: { enabled, cron, model, windowDays, maxProposals }`).
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is
   diffed against the previous run of the same phase and schedule, shown on the Research page. The
   diff lists the facts the run replaced (old → new), retracted and confirmed (from its applied fact
