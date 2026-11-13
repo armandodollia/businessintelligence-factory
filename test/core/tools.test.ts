@@ -61,15 +61,18 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
 describe('role scope table', () => {
   it('matches the brief', () => {
     const base = ['log_decision', 'save_artifact', 'request_user_action', 'request_approval'];
-    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact']));
+    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'read_workspace']));
     expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback']));
-    expect(new Set(ROLE_TOOLS.interviewer)).toEqual(new Set(['log_decision', 'update_profile', 'save_symptom']));
+    expect(new Set(ROLE_TOOLS.interviewer)).toEqual(new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace']));
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
-      new Set([...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona']),
+      new Set([
+        ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
+        'read_workspace', 'propose_business_unit',
+      ]),
     );
-    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks']));
+    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace']));
     expect(new Set(ROLE_TOOLS.synthesizer)).toEqual(
-      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review']),
+      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace']),
     );
     for (const tools of Object.values(ROLE_TOOLS)) for (const t of tools) expect(TOOL_NAMES).toContain(t);
   });
@@ -328,7 +331,7 @@ describe('mcp server', () => {
     return client;
   }
 
-  it('tools/list for reviewer returns exactly its 3 tools', async () => {
+  it('tools/list for reviewer returns exactly its 4 tools', async () => {
     const s = setup();
     const tokens = new TokenRegistry(s.store);
     const app = new Hono();
@@ -336,7 +339,7 @@ describe('mcp server', () => {
     const reviewer = ctx('reviewer');
     const client = await connect(app, tokens.issue(reviewer));
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'submit_review']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['log_decision', 'read_artifact', 'read_workspace', 'submit_review']);
     const review = tools.find((t) => t.name === 'submit_review')!;
     expect(review.inputSchema.type).toBe('object');
     expect(review.inputSchema.properties).toHaveProperty('score');

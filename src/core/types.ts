@@ -6,6 +6,8 @@ export type { ModelRef, ProviderId, Role, TaskType } from './config/schema.js';
 import type { ModelRef, Role, TaskType } from './config/schema.js';
 
 export type Phase =
+  /** Optional; runs first when present; not in the default pipeline (Task 10b). */
+  | 'mapping'
   | 'market_research'
   | 'competitor_discovery'
   | 'deep_dives'
@@ -15,11 +17,66 @@ export type Phase =
 
 export type Criteria = Record<string, number | string>;
 
+export type ScopeLevel = 'company' | 'division' | 'slice';
+export type Audience = 'external' | 'internal';
+
+export interface WorkspaceScope {
+  level: ScopeLevel;
+  name: string;
+  description: string;
+}
+
+/**
+ * A node of the business map (spec §8c). `scope`, `audiences` and `parentWorkspaceId` were added in
+ * migration 6. `scope` and `audiences` are optional on insert only so older literals keep compiling:
+ * the columns have DB defaults (`company`, `['external']`), so rows read from the store always carry
+ * them. Use `scopeOf` / `audiencesOf` (workspace/tree.ts) when reading untrusted objects.
+ */
 export interface Workspace {
   id: string;
   name: string;
   sector: string;
   createdAt: string;
+  scope?: WorkspaceScope;
+  /** Default `['external']`. */
+  audiences?: Audience[];
+  /** Parent node in the business tree (any depth). */
+  parentWorkspaceId?: string;
+}
+
+/** A child business unit proposed by a `map_business_units` task; the user accepts or rejects it. */
+export interface UnitProposal {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  level: ScopeLevel;
+  audiences: Audience[];
+  /** Artifact ids (same business tree). */
+  evidence: string[];
+  reasoning: string;
+  status: 'proposed' | 'accepted' | 'rejected';
+  childWorkspaceId?: string;
+  /** The Decision logged when the unit was proposed (ratable). */
+  decisionId?: string;
+  createdAt: string;
+}
+
+/** An item tagged with the workspace it comes from (roll-up / cross-tree reading). */
+export type Sourced<T> = T & { sourceWorkspaceId: string };
+
+export interface CrossCuttingGroup {
+  /** Normalized title used for grouping. */
+  key: string;
+  title: string;
+  sourceWorkspaceIds: string[];
+  symptoms: Sourced<Symptom>[];
+}
+
+export interface Rollup {
+  symptoms: Sourced<Symptom>[];
+  recommendations: Sourced<Recommendation>[];
+  findings: Sourced<Finding>[];
 }
 
 export interface Artifact {
@@ -182,6 +239,8 @@ export interface Persona {
   profile: Record<string, PersonaProfileField>;
   agentMdPath: string;
   version: number;
+  /** Default `external` (DB default, migration 6). */
+  audience?: Audience;
 }
 
 export interface Symptom {

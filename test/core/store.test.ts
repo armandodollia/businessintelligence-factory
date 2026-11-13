@@ -211,7 +211,12 @@ describe('store', () => {
     store.interview.insert(turn);
     store.profiles.insert(profile);
 
-    expect(store.workspaces.get(ws)).toEqual(workspace);
+    // Columns added in migration 6 come back with their DB defaults.
+    expect(store.workspaces.get(ws)).toEqual({
+      ...workspace,
+      scope: { level: 'company', name: '', description: '' },
+      audiences: ['external'],
+    });
     expect(store.artifacts.get(artifact.id)).toEqual(artifact);
     expect(store.tasks.get(task.id)).toEqual(task);
     expect(store.researchRuns.get(researchRun.id)).toEqual(researchRun);
@@ -220,7 +225,7 @@ describe('store', () => {
     expect(store.ratings.get(rating.id)).toEqual(rating);
     expect(store.ratings.get(ratingNull.id)).toEqual(ratingNull);
     expect(store.recommendations.get(recommendation.id)).toEqual(recommendation);
-    expect(store.personas.get(persona.id)).toEqual(persona);
+    expect(store.personas.get(persona.id)).toEqual({ ...persona, audience: 'external' });
     expect(store.symptoms.get(symptom.id)).toEqual(symptom);
     expect(store.schedules.get(schedule.id)).toEqual(schedule);
     expect(store.interview.get(turn.id)).toEqual(turn);

@@ -16,6 +16,10 @@ acceptance criteria. Do the research yourself and report through the harness too
 - If a site needs something you cannot do (phone, payment, KYC, captcha, a blocked disposable email),
   call `request_user_action` and wait; then continue in the same browser session.
 - Before any approval-required action, call `request_approval` and follow the answer.
+- For `map_business_units` tasks, propose each child unit with `propose_business_unit` (name,
+  description, level, audiences, evidence, reasoning); the user accepts or rejects them.
+- Other workspaces of the same business tree can be read with `read_workspace`; their findings and
+  artifacts may be cited as evidence (say which workspace they come from).
 - Stay inside the task scope. Do not do work the brief did not ask for.
 
 ## Finishing

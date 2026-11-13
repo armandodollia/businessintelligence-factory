@@ -15,6 +15,7 @@ import type {
   Schedule,
   Symptom,
   Task,
+  UnitProposal,
   UserRequest,
   Workspace,
 } from '../types.js';
@@ -135,10 +136,14 @@ export class Repo<T, K extends keyof T & string> {
     return out as T;
   }
 
+  /**
+   * Inserts a row. Fields that are `undefined` are left out of the INSERT, so SQL column defaults
+   * apply (NULL for columns without one).
+   */
   insert(entity: T): T {
-    const fields = Object.keys(this.spec.fields);
-    const sql = `INSERT INTO ${this.spec.table} (${fields.map((f) => this.cols[f]).join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`;
     const e = entity as Record<string, unknown>;
+    const fields = Object.keys(this.spec.fields).filter((f) => e[f] !== undefined);
+    const sql = `INSERT INTO ${this.spec.table} (${fields.map((f) => this.cols[f]).join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`;
     this.stmt(sql).run(...fields.map((f) => this.encode(f, e[f])));
     return entity;
   }
@@ -198,7 +203,10 @@ export const specs = {
   workspaces: {
     table: 'workspaces',
     key: 'id',
-    fields: { id: 'text', name: 'text', sector: 'text', createdAt: 'text' },
+    fields: {
+      id: 'text', name: 'text', sector: 'text', createdAt: 'text', scope: 'json', audiences: 'json',
+      parentWorkspaceId: 'text',
+    },
   } satisfies TableSpec<Workspace>,
   artifacts: {
     table: 'artifacts',
@@ -278,7 +286,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', slug: 'text', segment: 'text', profile: 'json',
-      agentMdPath: 'text', version: 'int',
+      agentMdPath: 'text', version: 'int', audience: 'text',
     },
   } satisfies TableSpec<Persona>,
   symptoms: {
@@ -315,6 +323,15 @@ export const specs = {
       emailPassword: 'text', createdAt: 'text',
     },
   } satisfies TableSpec<Identity>,
+  unitProposals: {
+    table: 'unit_proposals',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', name: 'text', description: 'text', level: 'text', audiences: 'json',
+      evidence: 'json', reasoning: 'text', status: 'text', childWorkspaceId: 'text', decisionId: 'text',
+      createdAt: 'text',
+    },
+  } satisfies TableSpec<UnitProposal>,
 } as const;
 
 export function createRepos(db: DatabaseSync) {
@@ -335,6 +352,7 @@ export function createRepos(db: DatabaseSync) {
     interview: new Repo<InterviewTurn, 'id'>(db, specs.interview),
     profiles: new Repo<Profile, 'workspaceId'>(db, specs.profiles),
     identities: new Repo<Identity, 'id'>(db, specs.identities),
+    unitProposals: new Repo<UnitProposal, 'id'>(db, specs.unitProposals),
   };
 }
 

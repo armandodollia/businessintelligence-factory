@@ -19,6 +19,8 @@ export const TOOL_NAMES = [
   'update_profile',
   'save_symptom',
   'save_recommendation',
+  'read_workspace',
+  'propose_business_unit',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -26,12 +28,15 @@ const BASE: ToolName[] = ['log_decision', 'save_artifact', 'request_user_action'
 
 /** Which harness tools each role sees (`tools/list`) and may call. */
 export const ROLE_TOOLS: Record<Role, ToolName[]> = {
-  worker: [...BASE, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona'],
-  orchestrator: [...BASE, 'propose_tasks'],
-  reviewer: ['log_decision', 'submit_review', 'read_artifact'],
+  worker: [
+    ...BASE, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
+    'read_workspace', 'propose_business_unit',
+  ],
+  orchestrator: [...BASE, 'propose_tasks', 'read_workspace'],
+  reviewer: ['log_decision', 'submit_review', 'read_artifact', 'read_workspace'],
   persona: ['log_decision', 'submit_persona_feedback'],
-  interviewer: ['log_decision', 'update_profile', 'save_symptom'],
-  synthesizer: [...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review'],
+  interviewer: ['log_decision', 'update_profile', 'save_symptom', 'read_workspace'],
+  synthesizer: [...BASE, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace'],
 };
 
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
@@ -162,6 +167,17 @@ export const toolInputSchemas = {
     finding_ids: z.array(id).min(1),
     priority: z.number().optional(),
   }),
+  read_workspace: z.object({
+    workspace_id: id.describe('Any workspace of this business tree (ancestors, siblings, descendants)'),
+  }),
+  propose_business_unit: z.object({
+    name: z.string().min(1),
+    description: z.string().min(1),
+    level: z.enum(['company', 'division', 'slice']),
+    audiences: z.array(z.enum(['external', 'internal'])).min(1),
+    evidence: z.array(id).default([]).describe('Artifact ids supporting the unit (site, filings, org signals)'),
+    reasoning: z.string().min(1),
+  }),
 } satisfies Record<ToolName, z.ZodType>;
 
 export type ToolInput<N extends ToolName> = z.output<(typeof toolInputSchemas)[N]>;
@@ -186,6 +202,10 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   update_profile: 'Merge facts learned in the interview into the business profile.',
   save_symptom: 'Save a business symptom or strength surfaced in the interview.',
   save_recommendation: 'Save a recommendation that references the findings supporting it.',
+  read_workspace:
+    'Read another workspace of this business tree (read-only): scope, profile, finding and symptom titles, tagged by source.',
+  propose_business_unit:
+    'Propose a child business unit (division, product, team, internal platform) for the user to accept or reject.',
 };
 
 /** JSON Schema of a tool's input as agents should send it (defaults shown as optional). */

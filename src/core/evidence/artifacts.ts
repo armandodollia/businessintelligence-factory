@@ -4,6 +4,7 @@ import { dirname, extname, join } from 'node:path';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Artifact } from '../types.js';
+import { sameTree } from '../workspace/tree.js';
 
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
@@ -107,9 +108,16 @@ export class ArtifactStore {
     return { artifact, bytes: readFileSync(join(this.dataDir, artifact.path)) };
   }
 
-  /** Returns the ids that do not exist in `workspaceId` (unknown or owned by another workspace). */
+  /**
+   * Returns the ids that are not usable as evidence by `workspaceId`: unknown, or owned by a
+   * workspace outside its business tree. Artifacts of any workspace in the same tree (same root:
+   * ancestors, siblings, cousins, descendants) count as present.
+   */
   exists(workspaceId: string, ids: string[]): string[] {
-    return ids.filter((id) => this.store.artifacts.get(id)?.workspaceId !== workspaceId);
+    return ids.filter((id) => {
+      const owner = this.store.artifacts.get(id)?.workspaceId;
+      return owner === undefined || (owner !== workspaceId && !sameTree(this.store, owner, workspaceId));
+    });
   }
 
   /** Filesystem location of an artifact's file (joined onto `dataDir`). */

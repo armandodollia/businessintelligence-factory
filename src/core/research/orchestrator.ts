@@ -7,6 +7,7 @@ import { loadPrompt, promptVersion } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { ModelRef, Phase, ResearchRun, Task, Workspace } from '../types.js';
+import { treeContext } from '../workspace/businessMap.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
 import { failureReason, runTaskWithReview } from './reviewLoop.js';
@@ -146,14 +147,6 @@ export function resultsSummary(store: Store, rr: ResearchRun): string {
     .join('\n');
 }
 
-/** Extra context sections contributed by later features (scope / business tree). */
-export type ContextExtender = (store: Store, ws: Workspace, phase: Phase) => string[];
-const extenders: ContextExtender[] = [];
-/** Registers a context extender (used by the business-tree module). */
-export function addContextExtender(fn: ContextExtender): void {
-  extenders.push(fn);
-}
-
 /** Full orchestrator prompt for one round. */
 export function orchestratorPrompt(store: Store, config: BifConfig, rr: ResearchRun, round: number): string {
   const ws = store.workspaces.get(rr.workspaceId) ?? {
@@ -163,7 +156,7 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
   const remaining = Math.max(0, config.limits.maxTasksPerRun - existing.length);
   const parts = [
     ...workspaceContext(store, ws),
-    ...extenders.flatMap((fn) => fn(store, ws, rr.phase)),
+    ...treeContext(store, ws),
     `## Phase: ${rr.phase} (orchestrator round ${round} of ${MAX_ORCHESTRATOR_ROUNDS})\nGoal: ${phaseGoal(rr.phase, ws)}`,
     `## Allowed task types\n${PHASE_TASK_TYPES[rr.phase].map((t) => `- ${t}`).join('\n') || '- (none)'}`,
     `## Allowed models\n${allowedModels(config).map((m) => `- {"provider":"${m.provider}","model":"${m.model}"}`).join('\n')}`,

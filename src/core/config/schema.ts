@@ -25,6 +25,7 @@ export const TASK_TYPES = [
   'symptom_hypotheses',
   'synthesize_recommendations',
   'persona_panel',
+  'map_business_units',
 ] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
@@ -64,6 +65,7 @@ function perTaskType<T extends z.ZodType>(item: T) {
     symptom_hypotheses: opt,
     synthesize_recommendations: opt,
     persona_panel: opt,
+    map_business_units: opt,
   });
 }
 

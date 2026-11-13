@@ -243,4 +243,31 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE UNIQUE INDEX identities_ws_site ON identities (workspace_id, site);
   `,
+  // 6: Section C — scope, audiences and tree link on workspaces; persona audience; unit proposals
+  // from the business-mapping phase. Defaults keep older rows valid (company / external).
+  `
+  ALTER TABLE workspaces ADD COLUMN scope TEXT NOT NULL DEFAULT '{"level":"company","name":"","description":""}';
+  ALTER TABLE workspaces ADD COLUMN audiences TEXT NOT NULL DEFAULT '["external"]';
+  ALTER TABLE workspaces ADD COLUMN parent_workspace_id TEXT;
+  UPDATE workspaces SET scope = json_object('level', 'company', 'name', name, 'description', '');
+  CREATE INDEX workspaces_parent ON workspaces (parent_workspace_id);
+
+  ALTER TABLE personas ADD COLUMN audience TEXT NOT NULL DEFAULT 'external';
+
+  CREATE TABLE unit_proposals (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    level TEXT NOT NULL,
+    audiences TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    reasoning TEXT NOT NULL,
+    status TEXT NOT NULL,
+    child_workspace_id TEXT,
+    decision_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX unit_proposals_ws ON unit_proposals (workspace_id);
+  `,
 ];
