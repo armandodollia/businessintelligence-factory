@@ -56,6 +56,18 @@ describe('extract: html app page', () => {
   });
 });
 
+describe('extract: html structure', () => {
+  it('marks list items whose content is wrapped in blocks, and numbers ordered lists', async () => {
+    const r = await html('<ul><li><p>wrapped</p></li><li></li><li>plain<ul><li>nested</li></ul></li></ul><ol><li>one</li><li>two</li></ol><p>after</p>');
+    expect(r.blocks[0]?.text).toBe('- wrapped\n- plain\n- nested\n1. one\n2. two\n\nafter');
+  });
+
+  it('survives absurdly deep nesting without throwing', async () => {
+    const r = await html(`${'<div>'.repeat(100_000)}deep${'</div>'.repeat(100_000)}`);
+    expect(['ok', 'failed']).toContain(r.status);
+  });
+});
+
 describe('extract: hostile html', () => {
   it('never includes script, style, noscript or template content', async () => {
     const r = await html(

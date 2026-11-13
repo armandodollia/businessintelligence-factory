@@ -94,8 +94,10 @@ class Walker {
       .map((l) => (this.pre ? l.replace(/\s+$/, '') : l.trim()))
       .join('\n')
       .replace(/^\n+|\n+$/g, '');
-    if (text.trim()) this.out.para(this.kind, this.prefix + text);
     this.buf = '';
+    if (!text.trim()) return;
+    this.out.para(this.kind, this.prefix + text);
+    // A list item's marker goes on its first non-empty paragraph only.
     this.prefix = '';
     this.kind = 'p';
   }
@@ -151,6 +153,8 @@ class Walker {
       this.prefix = ordered ? `${index}. ` : '- ';
       this.walk(el, inSection);
       this.flushPara();
+      this.prefix = '';
+      this.kind = 'p';
       return;
     }
     if (tag === 'pre') {
