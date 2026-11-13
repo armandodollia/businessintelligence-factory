@@ -180,12 +180,10 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   if (usableOnly(caller.role) && (input.include_unverified || input.include_history)) {
     roleNotes.push(`include_unverified / include_history are ignored for role ${caller.role}: usable facts only`);
   }
-  // Final-gate ruling: every page of the request carries the role notes, so pages are fitted to what
-  // they leave (a nearly full page must never overflow into "nothing fits" and repeat its cursor).
-  // Exact upper bound of what merging them into the response's `notes` adds: each note's JSON and a
-  // comma, plus `,"notes":[]` when the page had no notes of its own.
-  const noteChars = roleNotes.reduce((n, x) => n + JSON.stringify(x).length + 1, 0) + ',"notes":[]'.length;
-  const pageBudget = roleNotes.length ? Math.max(1, budget - Math.ceil(noteChars / 4)) : budget;
+  // Final-gate ruling + re-gate (Opus 3): every page of the request carries the role notes (only `search`
+  // takes the flags that produce them), so its pages are measured with them, as the notes they are.
+  if (roleNotes.length) env.pageNotes = roleNotes;
+  const pageBudget = budget;
   // Re-gate (binding recovery shapes): pointers of shortened items. A pointer asks for the budget that
   // holds the item whole plus this request's role-note reserve; above the hard maximum there is none.
   const maxRequest = Math.max(MIN_RESPONSE_TOKENS, maxRequestTokens(deps.config, caller.model?.provider));

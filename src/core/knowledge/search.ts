@@ -488,8 +488,9 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
   }
   if (!terms.length) notes.push('empty query: newest items of the entity first');
   const header = { query: input.query ?? '', scope: mode, ...(relaxed ? { relaxed: true } : {}) };
+  // Measured with the role notes the dispatcher puts first in `notes` (re-gate, Opus 3).
   const pageWith = (n: string[]) => pageOf(hits.map((h) => h.hit), header, budget, {
-    key: cursorKey(cursorParts), notes: n, itemsKey: 'hits', ...(input.cursor ? { cursor: input.cursor } : {}),
+    key: cursorKey(cursorParts), notes: [...(env.pageNotes ?? []), ...n], itemsKey: 'hits', ...(input.cursor ? { cursor: input.cursor } : {}),
     // Re-gate (binding): a hit is one item of the store; `expand` of its id returns it whole.
     recover: (h) => ({ kind: 'expand_id', tool: 'expand', input: { id: h.id } }),
   });

@@ -52,8 +52,13 @@ export type ReadEnv = {
   again?: (cursor: string, need: number) => Recover | undefined;
   /** Cursor key of another read tool's request by the same caller (pointers into another tool). */
   keyFor?: (tool: string, input: Record<string, unknown>) => string;
-  /** The largest `max_tokens` a pointer may ask for, after the role-note reserve (hard maximum × provider scale). */
+  /** The largest `max_tokens` a pointer may ask for (hard maximum × provider scale). */
   pointerBudget?: (need: number) => number | undefined;
+  /**
+   * Re-gate (Opus 3): notes the dispatcher adds to every page of this request (role notes), first in
+   * `notes`. Pages are measured with them, so no fixed reserve is needed.
+   */
+  pageNotes?: string[];
 };
 
 /**
@@ -253,9 +258,11 @@ export function pageOf<T>(
     // The next item alone, measured on the page it would be served on (the envelope as the dispatcher
     // writes it: this cursor, `more`, the notes). Whole when it fits; shortened only when it does not.
     const cursor = rest.length > 1 ? encodeCursor({ key: opts.key, offset: offset + 1 }) : undefined;
+    // Re-gate (Opus 3): the last item's page has no `more` and no cursor, and is not truncated.
+    const last = rest.length === 1;
     const alone = (x: unknown) =>
       estimateTokens(JSON.stringify({
-        ...header, [opts.itemsKey ?? 'items']: [x], tokens: budget, truncated: true, more: rest.length - 1,
+        ...header, [opts.itemsKey ?? 'items']: [x], tokens: budget, truncated: !last, ...(last ? {} : { more: rest.length - 1 }),
         ...(cursor ? { cursor } : {}), content_trust: CONTENT_TRUST, ...(opts.notes?.length ? { notes: opts.notes } : {}),
       })) <= budget;
     if (alone(rest[0])) {
@@ -270,7 +277,7 @@ export function pageOf<T>(
     const full = opts.recover?.(rest[0]!, offset, need);
     const short = shortenItem(rest[0], alone, full ? { full } : { size: need }) as T | undefined;
     if (short === undefined) return { items: [], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length, stalled: true };
-    const page: ItemPage<T> = { items: [short], truncated: true, more: rest.length - 1, offset, startCursor, remaining: rest.length };
+    const page: ItemPage<T> = { items: [short], truncated: !last, more: rest.length - 1, offset, startCursor, remaining: rest.length };
     if (rest.length > 1) page.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
     return page;
   }
