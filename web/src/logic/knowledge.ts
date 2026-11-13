@@ -52,7 +52,8 @@ export type CardView = Envelope & {
   entity?: { id: string; name: string; kind: string; home: string; aliases?: string[]; upload?: boolean };
   node?: { id: string; name?: string };
   source?: string;
-  lines: string[];
+  /** A line too long for the page comes back shortened as `{ text, cut: true }` (expand its id for the full text). */
+  lines: Array<string | { text: string; cut?: boolean }>;
 };
 /** One `expand` response: a header (kind fact / artifact / chunk / entity / record) and listed items. */
 export type ItemView = Envelope & { kind?: string; id?: string; source?: string; items?: Array<Record<string, unknown>> } & Record<string, unknown>;

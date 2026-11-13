@@ -73,7 +73,7 @@ the `duplicate_handshake` decision, `fact_observations`) and from the run's tool
 the run events, ok / error from the dispatcher's bus events). Tokens and cost are summed from
 `agent_usage`. `BIF_SMOKE_KEEP=1` keeps the temp dir.
 
-### Results (after the description fixes below)
+### Results (KS-8 commit, after the description fixes below; step 6 at `max_tokens` 150)
 
 | Step | claude (haiku) | codex (gpt-6.1-sol) |
 |---|---|---|
@@ -126,17 +126,85 @@ Minor, not fixed: haiku passed `finding_ids` in `submit_result` as a JSON-encode
 an array (the deliverable schema is free-form). Harmless here: cited ids are found by regex over the
 serialized deliverable (`citedOutputIds`).
 
-Design observations (no core change made): every `read_artifact` page repeats the artifact header
+Design observations at the KS-8 commit (fixed by the paging ruling below): every `read_artifact` page repeats the artifact header
 (title, URL, fenced description, ~130 tokens), so very small `max_tokens` pages carry mostly header; and
 a page whose first passage does not fit returns a placeholder with `retry_cursor` while `cursor`
 skips that passage, so an agent that follows only `cursor` would miss it (the placeholder note says to
 use `retry_cursor`).
 
-### OpenCode (KS-8)
+### Paging ruling: position paging, header on the first page (re-run of step 6)
 
-Not run: `opencode run -m opencode/big-pickle` and `-m opencode/deepseek-v4.1-flash-free` both log
-`AI_APICallError: Free usage limit reached` (HTTP 429) on 2026-11-13, and
-`github-copilot/claude-haiku-4.5` answers `404 page not found`. Same state as 2026-11-12 (below).
+The design thread ruled on the two design observations above: the artifact header goes on the
+first page only, and `cursor` pages text by position so it never skips anything. In text reads a
+passage that does not fit is served up to the budget, marked `cut: true` ("the next page continues
+this passage"), and the next cursor continues from exactly that character. The placeholder and
+`retry_cursor` are gone. In lists, an item larger than the page is shortened and marked `cut: true`;
+`expand` of its id gives the full text. Tool descriptions now say "follow `cursor` until it is absent
+and you have read everything".
+
+Step 6 was changed so that the new behaviour shows live: `max_tokens` 250 (the header fits; a
+passage does not), and the page gained one long FAQ answer (~900 characters) that cannot fit on
+one page. The smoke now replays each agent's `read_artifact` calls (same caller key, so the agent's
+cursors are valid) to see what every page served. It counts pages that carried the artifact header,
+pieces marked `cut`, and placeholders, and checks that every passage was served whole once its
+pieces are joined. Step 6 passes only if all of them were.
+
+| Step 6, `max_tokens` 250 | claude (haiku) before | claude after | codex (gpt-6.1-sol) before | codex after |
+|---|---|---|---|---|
+| result | **FAIL** | PASS | **FAIL** | PASS |
+| `read_artifact` calls | 7 (raised to 600 midway) | 6 (stayed at 250) | 9 (raised to 500) | 6 (stayed at 250) |
+| pages carrying the artifact header | 7 of 7 | 1 of 6 | 9 of 9 | 1 of 6 |
+| pieces marked `cut` / placeholders | 4 / 1 | 1 / 0 | 5 / 1 | 1 / 0 |
+| passages served whole | 4 of 8 | **8 of 8** | 3 of 8 (expanded 4 cut passages by hand) | **8 of 8** |
+| characters never served | 383 | **0** | 851 | **0** |
+| whole run: bif tool calls, cost | 17, $0.0167 | 16, $0.0153 | 24, $0.1732 | 17, $0.1936 |
+
+"Before" ran on the KS-8 commit above, and "after" on the ruling's commit (final run: all 7 steps
+PASS for both providers, no confusion flagged, `promptStoreGaps` `[]`). Earlier "after" runs found
+the issues listed below. The long passage now spans two pages, and each agent read on with the
+cursor at the same `max_tokens`. Neither repeated a call or raised the budget.
+
+Found and fixed while re-running:
+
+- **Haiku forged a cursor.** On one run the server returned `{"o":7}`, but haiku sent
+  `{"o":7,"p":1}`, made by continuing the pattern of the previous cursor `{"o":6,"p":194}`. The
+  harness accepted it and one character was skipped. The tool results kept in `stdout.log` confirm
+  that the server's own cursors were correct. Cursors now carry a check value. A hand-edited cursor is
+  rejected with "invalid cursor: pass the `cursor` of the previous response exactly as returned, or
+  repeat the call without one". In the next claude runs every cursor was sent back unchanged.
+- **Haiku sent `relation: "\"new\""`** (a JSON-encoded string) and got only "relation: Invalid input".
+  It then tried `{"confirms": <the Team-plan fact>}` for the Enterprise claim; the quote check rejected
+  that save. `relation` now accepts a JSON-encoded value, and a wrong value gets "relation must be
+  "new", {"confirms": "<fact id>"} or {"replaces": "<fact id>"}". The schema agents see is unchanged.
+- In one claude run haiku read the page first and saved the true Enterprise claim directly,
+  without trying the colleague's quote, so step 7 was not exercised. The judge also wrongly counted the claim
+  "…the page does not state a $199 price" as saving the $199 claim; that check is fixed.
+
+Pinned by `test/core/knowledge/smokeContracts.test.ts`:
+
+- At `max_tokens` 100 to 2000, every passage is served whole across the pages.
+- `cut` only on the last item of a page, and the next page continues that passage.
+- The header is on the first page only; a first page too small for it gets a shortened header with `header_cut: true`.
+- No piece shows any part of a secret, and every piece is one whole fence.
+- One retrieval row per page lists every passage it served.
+- Raw mode and `expand` with neighbours page the same way.
+- Lists:
+  - every evidence item and every search hit is visited;
+  - a cut card line can be expanded to the full claim.
+- Hand-edited cursors and cursors from another request are rejected.
+
+### OpenCode (KS-8): not run
+
+Re-probed on 2026-11-13 with `opencode run --print-logs --format json -m <model> "Reply with the word hi"`
+(opencode 1.2.27):
+
+| Model | Error |
+|---|---|
+| `opencode/big-pickle` (default) | `AI_APICallError`, `statusCode` 429: "Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go" (retried internally, nothing on stdout) |
+| `opencode/deepseek-v4.1-flash-free` | the same 429 "Free usage limit reached" |
+| `github-copilot/claude-haiku-4.5` | `AI_APICallError` / `APIError`, `statusCode` 404: "Not Found: 404 page not found" (`isRetryable: false`) |
+
+No paid OpenCode plan was used. Same state as 2026-11-12 (below).
 
 ## OpenCode failure
 

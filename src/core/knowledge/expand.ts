@@ -15,6 +15,12 @@
  * `image` (screenshots' and images' default), `raw` (the stored bytes of a text format, redacted whole
  * and then paged, fenced). Every mode pages with a cursor bound to the request.
  *
+ * Paging (KS-8 design-thread ruling): the header goes on the first page only (later pages: `id`, items,
+ * envelope). Text reads (text / raw modes, chunks and their neighbours) page by position — a passage that
+ * does not fit is served up to the budget, marked `cut: true`, and the next cursor continues from that
+ * character; nothing is skipped. Other items are listed whole, or shortened and marked `cut: true` when
+ * one alone is larger than the page (`shortenItem`).
+ *
  * Synthesizer and interviewer see usable facts and records only: anything else answers "not found",
  * and history / unverified updates are left out. Reviewer and escalation runs read only their task's
  * review slice; nested items outside it are left out.
@@ -23,19 +29,19 @@ import type { ArtifactStore } from '../evidence/artifacts.js';
 import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Artifact, Finding, RetrievalResultRef, TextChunk } from '../types.js';
-import { estimateTokens, truncateToTokens, decodeCursor, encodeCursor } from './budget.js';
+import { estimateTokens, decodeCursorAt, encodeCursor } from './budget.js';
 import { entityCard, type CardLine } from './cards.js';
 import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
 import { itemIsUploadDerived } from './provenance.js';
 import {
-  aroundVisible, artifactInNodeScope, ENVELOPE_TOKENS, entityVisibleIn, factInNodeScope, inSlice, outsideScopeNote, pageOf, readableById,
+  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, outsideScopeNote, pageOf, readableById, shortenItem,
   sourceLabel, uniqueRefs, usableOnly,
   type ReadEnv, type ReadOutput,
 } from './readCommon.js';
 import { notFound, type ScopeMode } from './scope.js';
 import { artifactChunks, canonicalArtifactId, servedChunkText, servedLine, servedTextState, type ServedTextState } from './texts.js';
-import { fenceEvidence, redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
+import { CONTENT_TRUST, fenceEvidence, redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
 
 const CLAIM_MAX = 4000;
 const LINE = 400;
@@ -72,23 +78,170 @@ function inTree(env: ReadEnv, ws: string | undefined): boolean {
   return ws !== undefined && env.scope.treeIds.includes(ws);
 }
 
+/**
+ * KS-8 ruling: the header (and the notes about the item) goes on the first page only; a later page
+ * carries the item's id, its items and the envelope. A page starting at the very beginning (also a
+ * "nothing fits" restart cursor) is a first page.
+ */
+function firstPage(header: Record<string, unknown>, at: { offset: number; pos: number }): { header: Record<string, unknown>; first: boolean } {
+  const first = at.offset === 0 && at.pos === 0;
+  return { header: first ? header : { id: header.id }, first };
+}
+
+const cursorAt = (cursor: string | undefined, key: string) => (cursor ? decodeCursorAt(cursor, key) : { offset: 0, pos: 0 });
+
 /** Pages `b.items` within `budget` and assembles the output. */
 function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
   if (b.outside) b.notes.push(outsideScopeNote(b.outside));
-  const page = pageOf(b.items, b.header, budget, { key, notes: b.notes, ...(cursor ? { cursor } : {}) });
-  const results = uniqueRefs([...b.headerRefs, ...page.items.flatMap((i) => b.refs.get(i) ?? [])]);
+  const { header, first } = firstPage(b.header, cursorAt(cursor, key));
+  const notes = first ? b.notes : [];
+  const page = pageOf(b.items, header, budget, { key, notes, ...(cursor ? { cursor } : {}) });
+  // A shortened item is a new object: its refs are those of the item it was cut from.
+  const src = b.items.slice(page.offset, page.offset + page.items.length);
+  const results = uniqueRefs([...(first ? b.headerRefs : []), ...src.flatMap((i) => b.refs.get(i) ?? [])]);
   const out: ReadOutput = {
-    data: { ...b.header, items: page.items },
+    data: { ...header, items: page.items },
     results,
-    uploadDerived: b.upload || page.items.some((i) => b.itemUpload.get(i) === true),
+    uploadDerived: (first && b.upload) || src.some((i) => b.itemUpload.get(i) === true),
     truncated: page.truncated,
     restart: { cursor: page.startCursor, remaining: page.remaining },
     more: page.more,
-    notes: b.notes,
+    notes,
     query,
     scopeLabel: 'tree',
   };
+  if (page.stalled) out.stalled = true;
   if (page.cursor) out.cursor = page.cursor;
+  return out;
+}
+
+/**
+ * Tokens of the envelope the dispatcher adds to a page of this request (tokens, truncated, more, the
+ * longest cursor this request can hand out, content_trust), measured rather than reserved.
+ */
+function envelopeTokens(budget: number, key: string, items: number, longest: number): number {
+  return estimateTokens(JSON.stringify({
+    tokens: budget, truncated: true, more: items, cursor: encodeCursor({ key, offset: items, pos: longest }), content_trust: CONTENT_TRUST,
+  })) + 2;
+}
+
+/**
+ * Header of a text read's page. First page: the whole header and notes; when they would leave less
+ * than `room` for text (a small max_tokens), the header is shortened (`shortenItem`, then just the id)
+ * and marked `header_cut: true` — `expand` of the id gives all of it — so the first page still serves
+ * text and the cursor always moves forward. Later pages: the id only.
+ */
+function textHeader(b: Built, at: { offset: number; pos: number }, room: number): { header: Record<string, unknown>; first: boolean; notes: string[] } {
+  const { header, first } = firstPage(b.header, at);
+  if (!first) return { header, first, notes: [] };
+  const size = (h: unknown, n: string[]) => estimateTokens(JSON.stringify({ ...(h as object), items: [] })) + (n.length ? estimateTokens(JSON.stringify(n)) : 0);
+  if (size(header, b.notes) <= room) return { header, first, notes: b.notes };
+  const notes = size({ id: header.id, header_cut: true }, b.notes) <= room ? b.notes : [];
+  const short = shortenItem(header, (h) => size(h, notes) <= room) as Record<string, unknown> | undefined;
+  const { cut: _cut, ...shortHeader } = short ?? { id: header.id };
+  return { header: { ...shortHeader, header_cut: true }, first, notes };
+}
+
+/** One passage of a text read: its served text (redacted, fence sequences removed) and its item fields. */
+type Passage = { chunk: TextChunk; text: string; meta: Item; refs: RetrievalResultRef[]; upload: boolean };
+
+function passageOf(env: ReadEnv, c: TextChunk, upload: boolean): Passage {
+  const meta: Item = { type: 'chunk', chunk_id: c.id, seq: c.seq };
+  if (c.headingPath) meta.heading = servedLine(env.store, env.scope.workspaceId, stripFences(c.headingPath), 160);
+  if (c.locator) meta.locator = c.locator;
+  // Redacted across chunk boundaries first, then fence sequences removed: positions index this text, and
+  // a cut made in it can never fall inside a fence marker (the fence is added around each piece).
+  const text = stripFences(servedChunkText(env.store, env.scope.workspaceId, c));
+  return { chunk: c, text, meta, refs: [{ id: c.id, kind: 'chunk' }], upload: upload || c.uploadDerived === true };
+}
+
+/** Smallest piece of a passage served after whole passages on the same page (characters). */
+const MIN_PIECE_CHARS = 48;
+
+/** Prefer to end a cut piece after a space (within the last 40 characters), never inside a surrogate pair. */
+function cutPoint(text: string, n: number): number {
+  let k = n;
+  if (k < text.length) {
+    const ws = text.slice(Math.max(0, k - 40), k).search(/\s\S*$/);
+    if (ws >= 0) {
+      const at = Math.max(0, k - 40) + ws + 1;
+      if (at > 0) k = at;
+    }
+  }
+  const code = text.charCodeAt(k - 1);
+  if (k > 0 && k < text.length && code >= 0xd800 && code <= 0xdbff) k--;
+  return k;
+}
+
+/**
+ * Pages passages by position (KS-8 ruling). From the cursor's (passage, character): whole passages
+ * while they fit; then the next one up to the budget, marked `cut: true`, and the cursor continues
+ * from exactly that character. Nothing is skipped; a piece always fits (or nothing is served and the
+ * page is `stalled`). A continued piece carries only `type`, `chunk_id` and `seq`.
+ */
+function finishText(b: Built, fenceId: string, passages: Passage[], budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
+  const at = cursorAt(cursor, key);
+  const longest = passages.reduce((m, x) => Math.max(m, x.text.length), 0);
+  const envelope = envelopeTokens(budget, key, passages.length, longest);
+  const minPiece = passages.length ? estimateTokens(JSON.stringify({ type: 'chunk', chunk_id: passages[0]!.chunk.id, seq: 0, text: fenceEvidence(fenceId, 'x'.repeat(64)), cut: true })) : 0;
+  const { header, first, notes } = textHeader(b, at, budget - envelope - minPiece);
+  let o = Math.min(at.offset, passages.length);
+  let p = o < passages.length ? Math.min(at.pos, passages[o]!.text.length) : 0;
+  let used = estimateTokens(JSON.stringify({ ...header, items: [] })) + envelope + (notes.length ? estimateTokens(JSON.stringify(notes)) : 0);
+  const items: Item[] = [];
+  const refs: RetrievalResultRef[] = first ? [...b.headerRefs] : [];
+  let upload = first && b.upload;
+  const cost = (it: Item) => estimateTokens(`${JSON.stringify(it)}\n`);
+  while (o < passages.length) {
+    const ps = passages[o]!;
+    let base: Item = p === 0 ? ps.meta : { type: 'chunk', chunk_id: ps.chunk.id, seq: ps.chunk.seq };
+    const rest = ps.text.slice(p);
+    const whole: Item = { ...base, text: fenceEvidence(fenceId, rest) };
+    if (used + cost(whole) <= budget) {
+      items.push(whole);
+      used += cost(whole);
+      refs.push(...ps.refs);
+      upload ||= ps.upload;
+      o++;
+      p = 0;
+      continue;
+    }
+    // A long heading must not stop the passage from starting on a small page (the outline lists headings).
+    if (!items.length && base === ps.meta && used + cost({ ...base, text: fenceEvidence(fenceId, rest.slice(0, 64)), cut: true }) > budget) {
+      base = { type: 'chunk', chunk_id: ps.chunk.id, seq: ps.chunk.seq };
+    }
+    const piece = (n: number): Item => ({ ...base, text: fenceEvidence(fenceId, rest.slice(0, n)), cut: true });
+    let lo = 0;
+    let hi = rest.length - 1;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (used + cost(piece(mid)) <= budget) lo = mid;
+      else hi = mid - 1;
+    }
+    const n = lo > 0 ? cutPoint(rest, lo) : 0;
+    // After whole passages, a sliver (under MIN_PIECE_CHARS) is not worth a piece: the passage starts on the next page.
+    if (n > 0 && (!items.length || n >= MIN_PIECE_CHARS)) {
+      items.push(piece(n));
+      refs.push(...ps.refs);
+      upload ||= ps.upload;
+      p += n;
+    }
+    break;
+  }
+  const truncated = o < passages.length;
+  const out: ReadOutput = {
+    data: { ...header, items },
+    results: uniqueRefs(refs),
+    uploadDerived: upload,
+    truncated,
+    restart: { cursor: encodeCursor({ key, offset: at.offset, pos: at.pos }), remaining: Math.max(1, passages.length - at.offset) },
+    more: passages.length - o,
+    notes,
+    query,
+    scopeLabel: 'tree',
+  };
+  if (truncated && !items.length) out.stalled = true;
+  else if (truncated) out.cursor = encodeCursor({ key, offset: o, pos: p });
   return out;
 }
 
@@ -324,21 +477,7 @@ function chunkOwner(env: ReadEnv, chunk: TextChunk): Artifact | undefined {
   return undefined;
 }
 
-function chunkItem(env: ReadEnv, owner: Artifact, c: TextChunk, maxTokens?: number): Item {
-  let text = servedChunkText(env.store, env.scope.workspaceId, c); // redacted before any cut
-  let cut = false;
-  if (maxTokens !== undefined && estimateTokens(text) > maxTokens) {
-    text = truncateToTokens(text, maxTokens).text;
-    cut = true;
-  }
-  const item: Item = { type: 'chunk', chunk_id: c.id, seq: c.seq, text: fenceEvidence(owner.id, text) };
-  if (c.headingPath) item.heading = servedLine(env.store, env.scope.workspaceId, stripFences(c.headingPath), 160);
-  if (c.locator) item.locator = c.locator;
-  if (cut) item.cut = true;
-  return item;
-}
-
-function expandChunk(env: ReadEnv, id: string, around: number, budget: number): Built {
+function expandChunk(env: ReadEnv, id: string, around: number): { b: Built; owner: Artifact; passages: Passage[] } {
   const { store } = env;
   const c = knowledgeRepos(store).chunks.get(id);
   if (!c) throw expandNotFound(id);
@@ -354,10 +493,7 @@ function expandChunk(env: ReadEnv, id: string, around: number, budget: number): 
   if (state.truncated) b.notes.push('the document was cut at the extraction cap (maxTextChars): only its start is indexed and served');
   const n = Math.max(0, Math.min(MAX_AROUND, Math.floor(around)));
   const all = artifactChunks(store, owner.id).filter((x) => x.seq >= c.seq - n && x.seq <= c.seq + n);
-  // Any single chunk fits the page on its own (cut after redaction when the budget is very small).
-  const room = Math.max(16, budget - estimateTokens(JSON.stringify(header)) - ENVELOPE_TOKENS - 64);
-  for (const x of all) push(b, chunkItem(env, owner, x, room), [{ id: x.id, kind: 'chunk' }], state.uploadDerived || x.uploadDerived === true);
-  return b;
+  return { b, owner, passages: all.map((x) => passageOf(env, x, state.uploadDerived)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -446,8 +582,10 @@ export function runExpand(env: ReadEnv, input: ExpandInput, budget: number, key:
   let b: Built;
   if (id.startsWith('fnd_')) b = expandFact(env, id);
   else if (id.startsWith('art_')) b = expandArtifact(env, id);
-  else if (id.startsWith('chk_')) b = expandChunk(env, id, input.around ?? 0, budget);
-  else if (id.startsWith('ent_')) b = expandEntity(env, id);
+  else if (id.startsWith('chk_')) {
+    const x = expandChunk(env, id, input.around ?? 0);
+    return finishText(x.b, x.owner.id, x.passages, budget, key, input.cursor, id);
+  } else if (id.startsWith('ent_')) b = expandEntity(env, id);
   else {
     const type = Object.entries(RECORD_PREFIX).find(([p]) => id.startsWith(p))?.[1];
     if (!type) throw expandNotFound(id);
@@ -478,10 +616,9 @@ export function runReadArtifact(env: ReadEnv, files: ArtifactBytes, input: ReadA
       outlineItems(env, b, a, h.upload);
       return finish(env, b, budget, key, input.cursor, query);
     case 'text': {
-      const room = Math.max(16, budget - estimateTokens(JSON.stringify(header)) - ENVELOPE_TOKENS - 64);
-      for (const c of artifactChunks(store, a.id)) push(b, chunkItem(env, a, c, room), [{ id: c.id, kind: 'chunk' }], h.upload || c.uploadDerived === true);
-      if (!b.items.length) b.notes.push('no extracted text to serve for this artifact');
-      return finish(env, b, budget, key, input.cursor, query);
+      const passages = artifactChunks(store, a.id).map((c) => passageOf(env, c, h.upload));
+      if (!passages.length) b.notes.push('no extracted text to serve for this artifact');
+      return finishText(b, a.id, passages, budget, key, input.cursor, query);
     }
     case 'image': {
       const out = finish(env, b, budget, key, undefined, query);
@@ -539,12 +676,18 @@ function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budg
   if (all.length > cap + margin) text = stripSecretTail(text, secrets);
   const docCut = all.length > cap;
   if (text.length > cap) text = text.slice(0, cap);
+  // Positions index the text without fence sequences, so no page boundary can fall inside one.
+  text = stripFences(text);
   if (docCut) {
     b.header.document_truncated = true;
     b.notes.push(`the stored file is longer than ${cap} characters; raw mode serves its start only`);
   }
-  const offset = cursor ? Math.min(decodeCursor(cursor, key), text.length) : 0;
-  const overhead = estimateTokens(JSON.stringify({ ...b.header, items: [] })) + ENVELOPE_TOKENS + estimateTokens(JSON.stringify(b.notes)) + 32;
+  const offset = cursor ? Math.min(decodeCursorAt(cursor, key).offset, text.length) : 0;
+  // KS-8 ruling: the artifact header and its notes on the first page only (shortened when the page is small).
+  const envelope = envelopeTokens(budget, key, text.length, 0);
+  const minPiece = estimateTokens(JSON.stringify({ type: 'raw', offset: text.length, text: fenceEvidence(a.id, 'x'.repeat(64)) }));
+  const { header, notes } = textHeader(b, { offset, pos: 0 }, budget - envelope - minPiece);
+  const overhead = estimateTokens(JSON.stringify({ ...header, items: [] })) + envelope + (notes.length ? estimateTokens(JSON.stringify(notes)) : 0);
   // Fenced, JSON-escaped text grows; leave a margin of one third.
   const pageChars = Math.max(64, Math.floor(((budget - overhead) * 4 * 2) / 3));
   let end = Math.min(text.length, offset + pageChars);
@@ -557,15 +700,14 @@ function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budg
     if (overhead + estimateTokens(JSON.stringify(item)) <= budget || end - offset <= 16) break;
     end = offset + Math.floor((end - offset) * 0.8);
   }
-  push(b, item, [{ id: a.id, kind: 'artifact' }], b.upload);
   const out: ReadOutput = {
-    data: { ...b.header, items: b.items },
+    data: { ...header, items: [item] },
     results: uniqueRefs(b.headerRefs),
     uploadDerived: b.upload,
     truncated: end < text.length,
     restart: { cursor: encodeCursor({ key, offset }), remaining: Math.max(1, text.length - offset) },
     more: end < text.length ? text.length - end : 0,
-    notes: b.notes,
+    notes,
     query,
     scopeLabel: 'tree',
   };

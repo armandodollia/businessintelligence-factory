@@ -243,7 +243,7 @@ describe('edge cases', () => {
     expect(t.seen.filter((e) => e.type === 'policy_blocked')).toEqual([]);
   });
 
-  it('an item larger than the whole budget is skipped with a placeholder and paging goes on (never stalls)', async () => {
+  it('an item larger than the whole budget is shortened and marked cut, and paging goes on (never stalls)', async () => {
     const t = ks4(opened);
     const a = await t.page('ws_a', 'Quote source text.');
     const f = t.fact('ws_a', 'Big evidence', { evidence: [a.id] });
@@ -252,6 +252,8 @@ describe('edge cases', () => {
     const r = await t.call<{ items: Array<Record<string, unknown>>; cursor?: string; tokens: number }>(c, 'expand', { id: f.id, max_tokens: 300 });
     expect(r.tokens).toBeLessThanOrEqual(300);
     expect(r.items.length).toBeGreaterThan(0);
+    expect(r.items[0]).toMatchObject({ type: 'evidence', artifact_id: a.id, cut: true });
+    expect((r.items[0]!.quotes as string[])[0]).toMatch(/^<<<EVIDENCE \S+\nquote 0 q+…\n>>>$/);
   });
 
   it('image / raw modes on a missing stored file answer with a note, not a failure', async () => {

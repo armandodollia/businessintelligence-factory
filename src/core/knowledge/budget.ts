@@ -5,10 +5,11 @@
  *   scale; never above `hardMaxTokens`; a caller's `max_tokens` may lower it, never raise it.
  * - `fitToBudget`: the longest prefix of `items` whose rendering fits. Prefix only — it never
  *   skips an item — so `offset + items.length` is where the next page starts (no loss, no repeat).
- *   An item larger than the whole budget is not returned (`items: []`, `truncated`): cut it first
- *   with `truncateToTokens`.
+ *   An item larger than the whole budget is not returned (`items: []`, `truncated`): the read tools
+ *   then shorten it (`shortenItem`) or page its text by position (KS-8 ruling).
  * - Cursors are opaque base64url strings bound to the request (`cursorKey` of its parameters), so a
- *   cursor replayed against another query is rejected. They carry no ids or text; scope and tree
+ *   cursor replayed against another query is rejected, and checked (`cursorCheck`), so a hand-edited
+ *   one is rejected too. They carry no ids or text; scope and tree
  *   checks are redone on every call, so a forged offset can only page within what the caller sees.
  */
 import { createHash } from 'node:crypto';
@@ -72,7 +73,7 @@ export function truncateToTokens(text: string, maxTokens: number): { text: strin
 
 export class InvalidCursorError extends Error {
   constructor() {
-    super('invalid cursor: repeat the call without a cursor');
+    super('invalid cursor: pass the `cursor` of the previous response exactly as returned, or repeat the call without one');
     this.name = 'InvalidCursorError';
   }
 }
@@ -95,23 +96,45 @@ export function cursorKey(parts: unknown): string {
   return createHash('sha256').update(canonical(parts)).digest('hex').slice(0, 16);
 }
 
-export function encodeCursor(state: { key: string; offset: number }): string {
-  return Buffer.from(JSON.stringify({ v: 1, k: state.key, o: state.offset })).toString('base64url');
+/**
+ * `offset`: the item (or, for raw text, the character) the next page starts at; `pos` (text reads,
+ * KS-8 ruling): the character inside that passage where the previous page stopped.
+ */
+export function encodeCursor(state: { key: string; offset: number; pos?: number }): string {
+  const c: Record<string, unknown> = { v: 1, k: state.key, o: state.offset };
+  if (state.pos) c.p = state.pos;
+  c.c = cursorCheck(state.key, state.offset, state.pos ?? 0);
+  return Buffer.from(JSON.stringify(c)).toString('base64url');
 }
 
-/** The offset a cursor points at; throws `InvalidCursorError` when malformed or from another request. */
-export function decodeCursor(cursor: string, key: string): number {
+/**
+ * Check value of a cursor (KS-8 smoke: a model "continued the pattern" of the previous cursor and
+ * sent one it made up, which skipped text). Not a secret — cursors carry no ids or text and every
+ * call re-checks scope — just a guard against hand-edited cursors.
+ */
+function cursorCheck(key: string, offset: number, pos: number): string {
+  return createHash('sha256').update(`${key}:${offset}:${pos}`).digest('hex').slice(0, 8);
+}
+
+/** Where a cursor points (item offset and position inside it); throws `InvalidCursorError` when malformed or from another request. */
+export function decodeCursorAt(cursor: string, key: string): { offset: number; pos: number } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
   } catch {
     throw new InvalidCursorError();
   }
-  const c = parsed as { v?: unknown; k?: unknown; o?: unknown } | null;
-  if (!c || c.v !== 1 || c.k !== key || typeof c.o !== 'number' || !Number.isSafeInteger(c.o) || c.o < 0) {
-    throw new InvalidCursorError();
-  }
-  return c.o;
+  const c = parsed as { v?: unknown; k?: unknown; o?: unknown; p?: unknown; c?: unknown } | null;
+  const index = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+  if (!c || c.v !== 1 || c.k !== key || !index(c.o) || (c.p !== undefined && !index(c.p))) throw new InvalidCursorError();
+  const at = { offset: c.o as number, pos: (c.p as number | undefined) ?? 0 };
+  if (c.c !== cursorCheck(key, at.offset, at.pos)) throw new InvalidCursorError();
+  return at;
+}
+
+/** The item offset a cursor points at (see `decodeCursorAt`). */
+export function decodeCursor(cursor: string, key: string): number {
+  return decodeCursorAt(cursor, key).offset;
 }
 
 export type Page<T> = Fitted<T> & {

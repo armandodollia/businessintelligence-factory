@@ -98,17 +98,16 @@ describe('tool responses at tiny configured budgets (clamped to MIN_RESPONSE_TOK
     expect(big.claim).toContain('Long claim');
   });
 
-  it('an item larger than the page is replaced by a placeholder that carries a cursor to fetch it with a larger budget', async () => {
+  it('an item larger than the page is shortened and marked cut, and the cursor moves on (KS-8: no placeholder)', async () => {
     const t = ks4(opened);
     const a = await t.page('ws_a', 'Quote source text.');
     const f = t.fact('ws_a', 'Big evidence', { evidence: [a.id] });
     for (let i = 0; i < 3; i++) knowledgeRepos(t.store).findingEvidence.insert({ findingId: f.id, seq: i, artifactId: a.id, quote: `quote ${i} ${'q'.repeat(1500)}` });
     const c = t.ctx('ws_a');
-    const r = await t.call<{ items: Array<{ omitted?: boolean; retry_cursor?: string }> }>(c, 'expand', { id: f.id, max_tokens: 300 });
-    const ph = r.items.find((i) => i.omitted);
-    expect(ph?.retry_cursor).toBeDefined();
-    const again = await t.call<{ items: Array<{ type: string }> }>(c, 'expand', { id: f.id, cursor: ph!.retry_cursor, max_tokens: 4000 });
-    expect(again.items[0]!.type).toBe('evidence');
+    const r = await t.call<{ tokens: number; items: Array<{ type: string; cut?: boolean; omitted?: boolean }> }>(c, 'expand', { id: f.id, max_tokens: 300 });
+    expect(r.tokens).toBeLessThanOrEqual(300);
+    expect(r.items[0]).toMatchObject({ type: 'evidence', cut: true });
+    expect(JSON.stringify(r)).not.toMatch(/retry_cursor|omitted/);
   });
 });
 

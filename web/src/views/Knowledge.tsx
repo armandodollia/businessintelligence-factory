@@ -164,7 +164,7 @@ function EntityCard({ k }: { k: View }) {
       <ul className="card-lines">
         {c.lines.map((l, i) => (
           <li key={i}>
-            <CardLine text={l} open={k.openItem} />
+            <CardLine text={typeof l === 'string' ? l : l.text} open={k.openItem} />
           </li>
         ))}
       </ul>

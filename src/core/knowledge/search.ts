@@ -495,6 +495,7 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
     query: input.query ?? '',
     scopeLabel: input.narrowed ? `node:${input.narrowed}` : mode,
   };
+  if (page.stalled) out.stalled = true;
   if (page.cursor) out.cursor = page.cursor;
   return out;
 }

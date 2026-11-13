@@ -40,7 +40,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boot, type Booted } from '../src/api/main.js';
-import { defaultConfig, type BifConfig, type ProviderId } from '../src/core/config/schema.js';
+import { defaultConfig, type BifConfig, type ModelRef, type ProviderId } from '../src/core/config/schema.js';
 import { ArtifactStore } from '../src/core/evidence/artifacts.js';
 import { CodexAdapter } from '../src/core/harness/adapters/codex.js';
 import { browserPromptNote } from '../src/core/harness/browser.js';
@@ -48,6 +48,9 @@ import { getRunOutputs } from '../src/core/harness/tools/handlers.js';
 import { promptVersion } from '../src/core/prompts/index.js';
 import { promptStoreGaps } from '../src/core/prompts/store.js';
 import { workerSystemPrompt } from '../src/core/research/systemPrompts.js';
+import { servedChunkText } from '../src/core/knowledge/texts.js';
+import { knowledgeRead, type KnowledgeReadInput } from '../src/core/knowledge/tools.js';
+import { stripFences } from '../src/core/knowledge/trust.js';
 import { knowledgeRepos, newId } from '../src/core/store/repos.js';
 import { usageRepos } from '../src/core/store/usageRepos.js';
 
@@ -312,7 +315,7 @@ const KS_PAGE = `<!doctype html>
 <h3>Which integrations are included?</h3>
 <p>All plans connect to common accounting tools and online storefronts. The Team plan adds a public API with a limit of 10,000 requests per day.</p>
 <h3>Where is my data stored?</h3>
-<p>Customer data is stored in two data centres in the European Union and backed up every night. Backups are kept for 35 days.</p>
+<p>Customer data is stored in two data centres in the European Union and backed up every night. Backups are kept for 35 days. Each data centre holds a full copy of every account, so either one can serve all customers on its own if the other is offline. Backups are encrypted at rest and in transit, and restore tests run every quarter on a randomly chosen account. Customers on the Team and Enterprise plans can request an export of all their data at any time from the settings page; the export arrives as a set of CSV files within one business day. When an account is closed, its data is deleted from both data centres within 30 days and from the backups once those expire, after which nothing can be recovered.</p>
 <h3>How does support work?</h3>
 <p>Starter customers get email support with a reply within two business days. Team customers get chat support during business hours. Enterprise customers get a named support contact.</p>
 </body></html>
@@ -336,8 +339,8 @@ function knowledgePrompt(pagePath: string): string {
     '   citing the page with `evidence_refs` and a quote copied exactly from the page text.',
     `5. Save a finding (subject "${KS_SUBJECT}"): "${KS_SUBJECT} charges $49 per user per month for its Team plan.",`,
     '   citing the page with a quote. Handle whatever the tool answers.',
-    '6. Read the whole extracted text of the page with `read_artifact` (mode "text", max_tokens 150), following the',
-    '   returned cursor until the response is no longer truncated.',
+    '6. Read the whole extracted text of the page with `read_artifact` (mode "text", max_tokens 250), following the',
+    '   returned cursor until a response has none.',
     '7. A colleague says the Enterprise plan costs $199 per month. Save that as a finding with the quote',
     '   "Enterprise plan: $199 per month". If the harness rejects it, record what the page really says instead.',
     '8. Call `submit_result` with {"artifact_id": "...", "finding_ids": [...], "handshake": "<how you answered the',
@@ -405,7 +408,7 @@ async function knowledgeSmoke(provider: ProviderId, booted: Booted, dir: string)
       signal: abort.signal,
       meta: { round: 1, taskType: task.type, researchRunId: task.runId },
     });
-    return { name, ...judgeKnowledge(booted, out, bus, { wsId, taskId: task.id, priorId: prior.id }), seconds: (Date.now() - started) / 1000 };
+    return { name, ...judgeKnowledge(booted, out, bus, { wsId, taskId: task.id, priorId: prior.id, model: { provider, model: MODELS[provider] } }), seconds: (Date.now() - started) / 1000 };
   } catch (e) {
     return fail(`threw: ${(e as Error).message}`);
   } finally {
@@ -429,11 +432,51 @@ function toolLog(out: Awaited<ReturnType<Booted['runtime']['supervisor']['run']>
   });
 }
 
+/**
+ * Replays the agent's `read_artifact` calls with the same caller key (workspace, role, model), so each
+ * cursor is valid, to see what every page served: pieces marked `cut`, placeholders, which pages carried
+ * the artifact header, and whether every passage was served whole across the pages (its pieces joined).
+ * Called after the run's own retrieval rows were judged: the replay writes rows without a run id.
+ */
+function replayReads(booted: Booted, wsId: string, artifactId: string, model: ModelRef, reads: ToolCallLog[]) {
+  const { store, config } = booted.runtime;
+  const files = new ArtifactStore(store, booted.runtime.dataDir);
+  const served = new Map<string, string>();
+  let pages = 0;
+  let headerPages = 0;
+  let cut = 0;
+  let omitted = 0;
+  for (const c of reads) {
+    if (!c.ok || !c.input) continue;
+    const r = knowledgeRead({ store, config, files }, { workspaceId: wsId, role: 'worker', model }, 'read_artifact', c.input as KnowledgeReadInput);
+    if (!r.ok) continue;
+    pages++;
+    if ('title' in r.data || 'description' in r.data) headerPages++;
+    for (const it of (r.data.items ?? []) as Array<Record<string, unknown>>) {
+      if (it.omitted) omitted++;
+      if (it.type !== 'chunk') continue;
+      if (it.cut) cut++;
+      const inner = String(it.text).replace(/^<<<EVIDENCE \S+\n/, '').replace(/\n>>>$/, '');
+      served.set(String(it.chunk_id), (served.get(String(it.chunk_id)) ?? '') + inner);
+    }
+  }
+  const chunks = knowledgeRepos(store).chunks.list({ artifactId });
+  let covered = 0;
+  let missingChars = 0;
+  for (const ch of chunks) {
+    const full = stripFences(servedChunkText(store, wsId, ch));
+    const got = served.get(ch.id) ?? '';
+    if (got === full) covered++;
+    else missingChars += Math.max(0, full.length - got.length);
+  }
+  return { pages, headerPages, cut, omitted, covered, total: chunks.length, missingChars };
+}
+
 function judgeKnowledge(
   booted: Booted,
   out: Awaited<ReturnType<Booted['runtime']['supervisor']['run']>>,
   bus: ToolCallLog[],
-  ids: { wsId: string; taskId: string; priorId: string },
+  ids: { wsId: string; taskId: string; priorId: string; model: ModelRef },
 ): Omit<KsResult, 'name' | 'seconds'> {
   const { store } = booted.runtime;
   const k = knowledgeRepos(store);
@@ -516,13 +559,20 @@ function judgeKnowledge(
     did: `read_artifact calls=${reads.length} (modes ${JSON.stringify([...new Set(reads.map((c) => c.input?.mode ?? 'default'))])}, max_tokens ${JSON.stringify([...new Set(reads.map((c) => c.input?.max_tokens))])}); with cursor=${cursorCalls.length}; truncated responses=${truncated}; last page truncated=${lastRead?.truncated}; passages expanded after reading=${laterExpands.length}`,
   };
   if (reads.length > 12) confusion.push(`read_artifact called ${reads.length} times`);
+  const replay = art ? replayReads(booted, ids.wsId, art.id, ids.model, reads) : undefined;
+  if (replay) {
+    step6.pass &&= replay.covered === replay.total;
+    step6.did += `; replay: pages=${replay.pages} (with artifact header ${replay.headerPages}), pieces cut=${replay.cut}, placeholders=${replay.omitted}, passages served whole=${replay.covered}/${replay.total}, chars never served=${replay.missingChars}`;
+  }
 
   // 7. rejected quote, then recovery
   const s7 = findingCalls(/enterprise/i);
   const rejected = s7.filter((c) => !c.ok && /quote not found/.test(c.error ?? ''));
   const enterprise = findings.filter((f) => /enterprise/i.test(f.claim));
-  const wrongSaved = enterprise.some((f) => /\$\s?199/.test(f.claim));
-  const recovered = enterprise.filter((f) => !/\$\s?199/.test(f.claim) && quoted(f).length > 0);
+  // Saving the colleague's price as true (a claim that only says the page does NOT state $199 is fine).
+  const asserts199 = (claim: string) => /\$\s?199/.test(claim) && !/\b(not|no|never|unsupported)\b/i.test(claim);
+  const wrongSaved = enterprise.some((f) => asserts199(f.claim));
+  const recovered = enterprise.filter((f) => !asserts199(f.claim) && quoted(f).length > 0);
   const step7: KsStep = {
     step: '7 failed quote + recovery', calls: s7.length,
     pass: rejected.length > 0 && !wrongSaved && recovered.length > 0,
