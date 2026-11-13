@@ -78,7 +78,7 @@ function seed() {
       { type: 'relation', relation: 'offers', from: { id: 'ent_1', name: 'Globex', source: 'ws_0' }, to: { id: 'ent_2', name: 'Labs Loans', source: 'ws_2' } },
     ],
   });
-  routes[`GET ${K}/entities/ent_1`] = () => ({ tokens: 40, truncated: false, entity: { id: 'ent_1', name: 'Globex', kind: 'competitor', home: 'ws_1' }, lines: ['[fnd_old] Globex charges $10 (confirmed 2026-07-01, 1 sources)'] });
+  routes[`GET ${K}/entities/ent_1`] = () => ({ tokens: 40, truncated: false, entity: { id: 'ent_1', name: 'Globex', kind: 'competitor', home: 'ws_1' }, lines: ['[fnd_old] Globex charges $10 (confirmed 2026-07-01, 1 sources)', { text: '[fnd_cut] Globex lists a long plan matrix…', cut: true }] });
 }
 
 const flush = () => act(async () => {
@@ -150,6 +150,7 @@ describe('Knowledge view', () => {
       screen.getByRole('button', { name: 'Globex' }).click();
     });
     expect(await screen.findByRole('button', { name: '[fnd_old]' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '[fnd_cut]' })).toBeTruthy(); // KS-8: a shortened line ({ text, cut }) renders as text
     routes[`GET ${K}/items/fnd_old`] = () => ({ tokens: 10, truncated: false, kind: 'fact', id: 'fnd_old', claim: 'Globex charges $10', lifecycle: 'current', items: [] });
     routes[`POST ${K}/facts/fnd_old/retract`] = () => ({ id: 'fnd_old', lifecycle: 'retracted' });
     await act(async () => {

@@ -17,7 +17,8 @@ import type { RetrievalResultRef, RetrievalRole } from '../types.js';
 import { encodeCursor, decodeCursor, estimateTokens, fitToBudget } from './budget.js';
 import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
-import { artifactVisible, canonicalArtifactId } from './texts.js';
+import { artifactVisible, canonicalArtifactId, capText } from './texts.js';
+import { FENCE_CLOSE, FENCE_OPEN } from './trust.js';
 import type { Entity, EntityKind, Relation, RelationSourceKind, RelationType } from '../types.js';
 import { getEntity } from './entities.js';
 import { SOURCE_TABLES, sourceUsableSql, sourceVisibleSql } from './usable.js';
@@ -81,6 +82,12 @@ export type ReadOutput = {
   images?: Array<{ data: string; mimeType: string }>;
   /** Where this page started: a notice that serves nothing of it hands out this cursor and count. */
   restart?: { cursor: string; remaining: number };
+  /**
+   * Nothing of the page could be served within the budget (not even a shortened item or one character
+   * of a passage): the dispatcher answers with the "repeat with a larger max_tokens" notice instead of a
+   * page that would hand out a cursor to the same place.
+   */
+  stalled?: boolean;
   /** What the log stores as the query (search text, or a compact form of the input). */
   query: string;
   /** `node` | `tree` | `node:<id>`. */
@@ -156,13 +163,20 @@ export type ItemPage<T> = {
   more: number;
   cursor?: string;
   offset: number;
-  /** A cursor for this same page (the truncation notice hands it out: repeat with a larger max_tokens). */
+  /** A cursor for this same page (the "nothing fits" notice hands it out: repeat with a larger max_tokens). */
   startCursor: string;
   /** Items from `offset` on (what a notice says was left out when nothing of the page is served). */
   remaining: number;
+  /** Nothing fit, not even the next item shortened. */
+  stalled?: boolean;
 };
 
-/** One page of `items` for a response whose fixed part is `header`; the whole JSON stays within `budget`. */
+/**
+ * One page of `items` for a response whose fixed part is `header`; the whole JSON stays within `budget`.
+ * Never skips an item (KS-8 ruling): when the next item alone is larger than the page, it is shortened
+ * to fit (`shortenItem`, marked `cut: true`; `expand` of its id gives the full text) and the cursor
+ * moves past it.
+ */
 export function pageOf<T>(
   items: readonly T[],
   header: Record<string, unknown>,
@@ -178,22 +192,87 @@ export function pageOf<T>(
   const startCursor = encodeCursor({ key: opts.key, offset });
   const fit = fitToBudget(rest, (x) => JSON.stringify(x), budget, overhead);
   if (!fit.items.length && rest.length) {
-    // The next item alone is larger than the budget: a placeholder takes its place, so paging never
-    // stalls, and it carries the cursor that fetches exactly that item with a larger max_tokens. The
-    // item counts as left out (`truncated`, `more`). Its ids are still logged (over-listing only).
-    const placeholder = {
-      omitted: true,
-      note: 'this item is larger than the response budget: repeat with retry_cursor and a larger max_tokens',
-      retry_cursor: startCursor,
-    } as unknown as T;
-    return {
-      items: [placeholder], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length,
-      cursor: rest.length > 1 ? encodeCursor({ key: opts.key, offset: offset + 1 }) : startCursor,
-    };
+    const room = budget - overhead;
+    const short = shortenItem(rest[0], (x) => estimateTokens(`${JSON.stringify(x)}\n`) <= room) as T | undefined;
+    if (short === undefined) return { items: [], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length, stalled: true };
+    const page: ItemPage<T> = { items: [short], truncated: true, more: rest.length - 1, offset, startCursor, remaining: rest.length };
+    if (rest.length > 1) page.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
+    return page;
   }
   const out: ItemPage<T> = { items: fit.items, truncated: fit.truncated, more: fit.more, offset, startCursor, remaining: rest.length };
   if (fit.more > 0 && fit.items.length > 0) out.cursor = encodeCursor({ key: opts.key, offset: offset + fit.items.length });
   return out;
+}
+
+/** Fields never shortened: ids, kinds, states, dates (they are short, and an id is how the full text is fetched). */
+const KEEP_WHOLE = /^(id|kind|type|source|status|lifecycle|change|relation|mode|flags|cited_by)$|_ids?$|_at$/;
+/** Angle-bracket runs (incl. lookalikes) a cut must not end inside (see `stripFences`). */
+const TRAILING_ANGLES = /[<>＜﹤＞﹥]+$/;
+
+/**
+ * `s` cut to about `max` characters, never inside a fence marker: a fenced value
+ * (`<<<EVIDENCE id\n…\n>>>`) keeps its opening line and closing marker and is cut inside; any other
+ * value is cut and loses a trailing run of angle brackets. Served text is redacted before it gets here.
+ */
+export function cutServedText(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const nl = s.indexOf('\n');
+  if (s.startsWith(`${FENCE_OPEN} `) && nl > 0 && s.endsWith(`\n${FENCE_CLOSE}`)) {
+    const head = s.slice(0, nl + 1);
+    const inner = s.slice(nl + 1, s.length - FENCE_CLOSE.length - 1);
+    return `${head}${capText(inner, Math.max(0, max - head.length - FENCE_CLOSE.length - 2))}\n${FENCE_CLOSE}`;
+  }
+  const cut = capText(s, Math.max(0, max));
+  return cut.endsWith('…') ? `${cut.slice(0, -1).replace(TRAILING_ANGLES, '')}…` : cut;
+}
+
+/**
+ * The item shortened so that `fits` holds, marked `cut: true` (a string becomes `{ text, cut: true }`):
+ * every text field longer than a common cap is cut to it (`cutServedText`), and when that is not
+ * enough every list field keeps only its first entries; the largest caps that fit win. Ids, kinds,
+ * states and dates are kept whole. `undefined` when even the barest form does not fit.
+ */
+export function shortenItem(item: unknown, fits: (x: unknown) => boolean): unknown {
+  const wrap = (x: unknown) => (typeof item === 'string' || typeof x !== 'object' || x === null ? { text: x, cut: true } : { ...(x as object), cut: true });
+  let longest = 0;
+  let longestList = 0;
+  const scan = (v: unknown, key?: string): void => {
+    if (key !== undefined && KEEP_WHOLE.test(key)) return;
+    if (typeof v === 'string') longest = Math.max(longest, v.length);
+    else if (Array.isArray(v)) {
+      longestList = Math.max(longestList, v.length);
+      v.forEach((x) => scan(x));
+    } else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) scan(x, k);
+  };
+  scan(item);
+  const capped = (v: unknown, n: number, m: number, key?: string): unknown => {
+    if (key !== undefined && KEEP_WHOLE.test(key)) return v;
+    if (typeof v === 'string') return cutServedText(v, n);
+    if (Array.isArray(v)) return v.slice(0, m).map((x) => capped(x, n, m));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capped(x, n, m, k)]));
+    return v;
+  };
+  const ok = (n: number, m: number) => fits(wrap(capped(item, n, m)));
+  /** Largest value in [lo, hi] for which `test` holds (monotone), or `undefined`. */
+  const largest = (lo: number, hi: number, test: (x: number) => boolean): number | undefined => {
+    if (!test(lo)) return undefined;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (test(mid)) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  // Prefer whole lists with shorter text; else fewer list entries with at least a snippet of text each.
+  const n = largest(0, longest, (x) => ok(x, longestList));
+  if (n !== undefined) return wrap(capped(item, n, longestList));
+  for (const floor of [Math.min(80, longest), 0]) {
+    const m = largest(0, longestList, (x) => ok(floor, x));
+    if (m === undefined) continue;
+    const best = largest(floor, longest, (x) => ok(x, m))!;
+    return wrap(capped(item, best, m));
+  }
+  return undefined;
 }
 
 /** Budget kind of each read tool (design §9; KS-0 notes: `read_artifact` uses `expand`, `list_changes` uses `search`). */

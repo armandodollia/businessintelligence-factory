@@ -166,6 +166,7 @@ export function runListChanges(env: ReadEnv, view: KnowledgeScope, input: Change
     query: input.runId ? `run ${input.runId}` : `since ${since}`,
     scopeLabel: view.workspaceId !== env.scope.workspaceId ? `node:${view.workspaceId}` : mode,
   };
+  if (page.stalled) out.stalled = true;
   if (page.cursor) out.cursor = page.cursor;
   return out;
 }

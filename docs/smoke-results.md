@@ -54,6 +54,158 @@ server; client B opened a tab and navigated it, and client A's current tab staye
 (Playwright MCP keeps the current tab per client session). No browser processes were left after
 the server stopped.
 
+## KS-8 knowledge-store smoke
+
+Run on 2026-11-13 with `BIF_SMOKE_TIMEOUT_MS=400000 npx tsx scripts/smoke.ts knowledge claude codex`
+(macOS, Node 25; claude 2.1.322, codex-cli 0.167.2, opencode 1.2.27).
+
+Per provider the script seeds a workspace, a research run, an earlier **verified** task with one
+current fact ("Northwind Widgets Team plan costs $49 per user per month.") and the run's own task,
+writes a local static HTML pricing page of a fictional vendor to the temp dir, and runs one real
+worker with the **real worker system prompt** (`workerSystemPrompt`, `worker.md` + policy) and a
+task prompt with 7 steps: save the page (`save_artifact` with `file_path`, `source_url`,
+`description`), `search` for the Team price, `expand` a passage, save a finding with a verified quote,
+save a near-duplicate of the seeded fact ("handle whatever the tool answers"), read the whole text with
+`read_artifact` mode `text` at `max_tokens: 150` following the cursor, and save a colleague's claim
+with a quote the page does not contain ("if the harness rejects it, record what the page really says").
+Each step is judged from the store (artifact + chunks, `retrieval_events`, `finding_evidence` quotes,
+the `duplicate_handshake` decision, `fact_observations`) and from the run's tool calls (inputs from
+the run events, ok / error from the dispatcher's bus events). Tokens and cost are summed from
+`agent_usage`. `BIF_SMOKE_KEEP=1` keeps the temp dir.
+
+### Results (KS-8 commit, after the description fixes below; step 6 at `max_tokens` 150)
+
+| Step | claude (haiku) | codex (gpt-6.1-sol) |
+|---|---|---|
+| 1 `save_artifact` with description | PASS, 1 call (8 passages extracted) | PASS, 1 call |
+| 2 `search` finds a page passage | PASS, 2 calls ("Team plan price", "free trial credit card") | PASS, 1 call |
+| 3 `expand` a passage (`chk_`, `around: 1`) | PASS, 1 call | PASS, 1 call |
+| 4 finding with verified quote | PASS, 1 call | PASS, 1 call |
+| 5 near-duplicate → handshake → answer | PASS, 2 calls: handshake shown, re-sent with `{"confirms": <seeded id>}` | PASS, 2 calls (+1 `log_decision`): same |
+| 6 paged read with cursor | PASS, 5 calls: 150 → "nothing fits" note → same cursor at 400 → 3 more pages | PASS, 4 calls: 150 → same cursor at 500 → 2 more pages |
+| 7 rejected quote, recovery | PASS, 2 calls: `quote not found` → saved "Enterprise plan is priced on a custom basis…" with a real quote | PASS, 2 calls (+1 `log_decision`): same, "custom pricing" |
+| run | `done`, 15 bif tool calls, 23.7 s | `done`, 15 bif tool calls, 70.0 s |
+| `retrieval_events` | 9 (search 2, expand 1, save_finding 1, read_artifact 5) | 7 (search 1, expand 1, save_finding 1, read_artifact 4) |
+| `agent_usage` | in 34, out 4 843, cache read 822 720, cache write 32 300; **$0.0147** | in 30 733, out 1 899, cache read 300 672; **$0.1805** |
+| `promptStoreGaps` | `[]` | `[]` |
+
+Neither agent saved the unsupported "$199" claim, neither retried the rejected quote, and both answered
+the handshake with `confirms` (the correct answer: the page still says $49). Claude's large cache-read
+figure is Claude Code's own system prompt and the user's global plugins re-read every turn (not
+isolated, see Notes); its cost stays under 2 cents.
+
+### Agent behaviour found, and the fixes (before → after)
+
+First run, with the original tool descriptions (`max_tokens`: "Lower this response's token budget
+(never raises it)"):
+
+| | claude (haiku) | codex (gpt-6.1-sol) |
+|---|---|---|
+| all 7 steps | PASS | PASS |
+| bif tool calls / `read_artifact` calls | 15 / 6 | 20 / 9 |
+| time, cost | 27.4 s, $0.0170 | 94.9 s, $0.2032 |
+| confusion | after "nothing of this page fits 150 tokens: repeat with this cursor and a larger max_tokens" it **repeated the identical call** (same cursor, 150) once before raising to 400 | raised only to 300, so each page carried the ~130-token artifact header plus one passage; the Plans passage came back **`cut: true`** (its last sentence missing) and the agent never noticed: it reported "read all 8 text pages" |
+
+Fixes (tool descriptions only, `src/core/harness/tools/registry.ts`):
+
+- `max_tokens` (every read tool): "Token budget of this response; values above your default budget are
+  capped. Raise it (with the same cursor) when a response says nothing fit". The old wording read as if
+  a larger value were not allowed.
+- `read_artifact`: "Follow `cursor` for the next page; a passage marked `cut: true` was shortened to fit
+  max_tokens: expand its chunk_id for the full text."
+- `expand`: a passage with `cut: true` was shortened to fit: repeat with a larger `max_tokens`.
+
+After: no repeated call (haiku 6 → 5 reads), codex raised the budget to 500 at once (9 → 4 reads,
+20 → 15 calls, $0.203 → $0.181), and no passage was served cut. The behaviour the descriptions
+promise is pinned by `test/core/knowledge/smokeContracts.test.ts` (same cursor + larger `max_tokens`
+restarts at the same passage; a cut passage is flagged and `expand` returns all of it). Whether an
+agent expands a `cut` passage was not observed live (none was cut in the after-run). One run per
+provider per condition, so the numbers are indicative, not averages.
+
+Minor, not fixed: haiku passed `finding_ids` in `submit_result` as a JSON-encoded string instead of
+an array (the deliverable schema is free-form). Harmless here: cited ids are found by regex over the
+serialized deliverable (`citedOutputIds`).
+
+Design observations at the KS-8 commit (fixed by the paging ruling below): every `read_artifact` page repeats the artifact header
+(title, URL, fenced description, ~130 tokens), so very small `max_tokens` pages carry mostly header; and
+a page whose first passage does not fit returns a placeholder with `retry_cursor` while `cursor`
+skips that passage, so an agent that follows only `cursor` would miss it (the placeholder note says to
+use `retry_cursor`).
+
+### Paging ruling: position paging, header on the first page (re-run of step 6)
+
+The design thread ruled on the two design observations above: the artifact header goes on the
+first page only, and `cursor` pages text by position so it never skips anything. In text reads a
+passage that does not fit is served up to the budget, marked `cut: true` ("the next page continues
+this passage"), and the next cursor continues from exactly that character. The placeholder and
+`retry_cursor` are gone. In lists, an item larger than the page is shortened and marked `cut: true`;
+`expand` of its id gives the full text. Tool descriptions now say "follow `cursor` until it is absent
+and you have read everything".
+
+Step 6 was changed so that the new behaviour shows live: `max_tokens` 250 (the header fits; a
+passage does not), and the page gained one long FAQ answer (~900 characters) that cannot fit on
+one page. The smoke now replays each agent's `read_artifact` calls (same caller key, so the agent's
+cursors are valid) to see what every page served. It counts pages that carried the artifact header,
+pieces marked `cut`, and placeholders, and checks that every passage was served whole once its
+pieces are joined. Step 6 passes only if all of them were.
+
+| Step 6, `max_tokens` 250 | claude (haiku) before | claude after | codex (gpt-6.1-sol) before | codex after |
+|---|---|---|---|---|
+| result | **FAIL** | PASS | **FAIL** | PASS |
+| `read_artifact` calls | 7 (raised to 600 midway) | 6 (stayed at 250) | 9 (raised to 500) | 6 (stayed at 250) |
+| pages carrying the artifact header | 7 of 7 | 1 of 6 | 9 of 9 | 1 of 6 |
+| pieces marked `cut` / placeholders | 4 / 1 | 1 / 0 | 5 / 1 | 1 / 0 |
+| passages served whole | 4 of 8 | **8 of 8** | 3 of 8 (expanded 4 cut passages by hand) | **8 of 8** |
+| characters never served | 383 | **0** | 851 | **0** |
+| whole run: bif tool calls, cost | 17, $0.0167 | 16, $0.0153 | 24, $0.1732 | 17, $0.1936 |
+
+"Before" ran on the KS-8 commit above, and "after" on the ruling's commit (final run: all 7 steps
+PASS for both providers, no confusion flagged, `promptStoreGaps` `[]`). Earlier "after" runs found
+the issues listed below. The long passage now spans two pages, and each agent read on with the
+cursor at the same `max_tokens`. Neither repeated a call or raised the budget.
+
+Found and fixed while re-running:
+
+- **Haiku forged a cursor.** On one run the server returned `{"o":7}`, but haiku sent
+  `{"o":7,"p":1}`, made by continuing the pattern of the previous cursor `{"o":6,"p":194}`. The
+  harness accepted it and one character was skipped. The tool results kept in `stdout.log` confirm
+  that the server's own cursors were correct. Cursors now carry a check value. A hand-edited cursor is
+  rejected with "invalid cursor: pass the `cursor` of the previous response exactly as returned, or
+  repeat the call without one". In the next claude runs every cursor was sent back unchanged.
+- **Haiku sent `relation: "\"new\""`** (a JSON-encoded string) and got only "relation: Invalid input".
+  It then tried `{"confirms": <the Team-plan fact>}` for the Enterprise claim; the quote check rejected
+  that save. `relation` now accepts a JSON-encoded value, and a wrong value gets "relation must be
+  "new", {"confirms": "<fact id>"} or {"replaces": "<fact id>"}". The schema agents see is unchanged.
+- In one claude run haiku read the page first and saved the true Enterprise claim directly,
+  without trying the colleague's quote, so step 7 was not exercised. The judge also wrongly counted the claim
+  "…the page does not state a $199 price" as saving the $199 claim; that check is fixed.
+
+Pinned by `test/core/knowledge/smokeContracts.test.ts`:
+
+- At `max_tokens` 100 to 2000, every passage is served whole across the pages.
+- `cut` only on the last item of a page, and the next page continues that passage.
+- The header is on the first page only; a first page too small for it gets a shortened header with `header_cut: true`.
+- No piece shows any part of a secret, and every piece is one whole fence.
+- One retrieval row per page lists every passage it served.
+- Raw mode and `expand` with neighbours page the same way.
+- Lists:
+  - every evidence item and every search hit is visited;
+  - a cut card line can be expanded to the full claim.
+- Hand-edited cursors and cursors from another request are rejected.
+
+### OpenCode (KS-8): not run
+
+Re-probed on 2026-11-13 with `opencode run --print-logs --format json -m <model> "Reply with the word hi"`
+(opencode 1.2.27):
+
+| Model | Error |
+|---|---|
+| `opencode/big-pickle` (default) | `AI_APICallError`, `statusCode` 429: "Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go" (retried internally, nothing on stdout) |
+| `opencode/deepseek-v4.1-flash-free` | the same 429 "Free usage limit reached" |
+| `github-copilot/claude-haiku-4.5` | `AI_APICallError` / `APIError`, `statusCode` 404: "Not Found: 404 page not found" (`isRetryable: false`) |
+
+No paid OpenCode plan was used. Same state as 2026-11-12 (below).
+
 ## OpenCode failure
 
 Not a harness bug that we could isolate; the provider never produced a model response on this machine:

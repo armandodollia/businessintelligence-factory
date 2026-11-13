@@ -101,7 +101,7 @@ describe('budgets and cursors (design §9, §18)', () => {
     const first = await t.call<Paged>(c, 'search', { query: 'globex', kinds: ['fact'], limit: 50 });
     expect(first.cursor).toBeDefined();
     const wrong = await t.handle(c, 'search', { query: 'globex plan', kinds: ['fact'], limit: 50, cursor: first.cursor });
-    expect(wrong).toEqual({ ok: false, error: 'invalid cursor: repeat the call without a cursor' });
+    expect(wrong).toEqual({ ok: false, error: 'invalid cursor: pass the `cursor` of the previous response exactly as returned, or repeat the call without one' });
     expect((await t.handle(t.ctx('ws_c'), 'search', { query: 'globex', kinds: ['fact'], limit: 50, cursor: first.cursor })).ok).toBe(false);
     expect((await t.handle(t.ctx('ws_a', 'orchestrator'), 'search', { query: 'globex', kinds: ['fact'], limit: 50, cursor: first.cursor })).ok).toBe(false);
     expect((await t.handle(c, 'search', { query: 'globex', kinds: ['fact'], limit: 50, cursor: 'garbage' })).ok).toBe(false);

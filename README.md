@@ -452,11 +452,35 @@ of that business tree — another company's prompts never see them. Nothing is w
 
 ## Smoke test
 
-`npx tsx scripts/smoke.ts` boots the real server on a temporary data dir and runs one real worker
-per provider (call `log_decision`, then `submit_result`, through the real MCP server), then an
-interview round-trip over HTTP with the claude CLI as interviewer. `worker [claude|codex|opencode]`
-or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`,
-`BIF_SMOKE_OPENCODE_MODEL`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).
+`npx tsx scripts/smoke.ts` boots the real server on a temporary data dir and runs, per provider:
+
+- a real worker run (`log_decision`, then `submit_result`, through the real MCP server);
+- a shared-browser run;
+- the **knowledge-store flow**.
+
+It then does an interview round-trip over HTTP with the claude CLI as interviewer.
+
+The knowledge flow uses the real worker system prompt, a real task and a verified fact seeded
+from an earlier task. The worker:
+
+1. saves a local HTML page with `save_artifact` and a description;
+2. runs `search`;
+3. `expand`s a passage;
+4. saves a finding with a verified quote;
+5. saves a near-duplicate and answers the duplicate check;
+6. reads the page text page by page with `read_artifact` and the cursor;
+7. recovers from a quote that fails verification.
+
+Each step is judged from the store and the run's tool calls. The check covers:
+
+- `retrieval_events` rows and `promptStoreGaps`;
+- a replay of the paged reads, which checks that every passage was served whole;
+- tokens and cost from `agent_usage`.
+
+Run one part with `worker`, `browser`, `knowledge` or `interview`, optionally followed by providers
+(`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
+and `BIF_SMOKE_OPENCODE_MODEL`, the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
+smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).
 
 ## Known limitations
 

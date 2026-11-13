@@ -131,7 +131,8 @@ function narrowed(store: Store, scope: KnowledgeScope, workspaceId: string | und
 
 function cardOutput(card: Card, budget: number, key: string, cursor: string | undefined, query: string, scopeLabel: string): ReadOutput {
   const lines = card.lines.map((l) => l.text);
-  const page = pageOf(lines, card.header, budget, { key, itemsKey: 'lines', ...(cursor ? { cursor } : {}) });
+  // A line too long for the page comes back as { text, cut: true } (KS-8: never skipped).
+  const page = pageOf<string | { text: string; cut: true }>(lines, card.header, budget, { key, itemsKey: 'lines', ...(cursor ? { cursor } : {}) });
   const shown = card.lines.slice(page.offset, page.offset + page.items.length);
   const out: ReadOutput = {
     data: { ...card.header, lines: page.items },
@@ -143,6 +144,7 @@ function cardOutput(card: Card, budget: number, key: string, cursor: string | un
     query,
     scopeLabel,
   };
+  if (page.stalled) out.stalled = true;
   if (page.cursor) out.cursor = page.cursor;
   return out;
 }
@@ -259,8 +261,9 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   if (notes.length) data.notes = notes;
   data.tokens = estimateTokens(JSON.stringify(data));
   data.tokens = estimateTokens(JSON.stringify(data));
-  if ((data.tokens as number) > budget) {
-    // The fixed part alone (e.g. a long claim) does not fit the budget: serve no store text rather than
+  if ((data.tokens as number) > budget || out.stalled) {
+    // The fixed part alone (e.g. a long claim) does not fit the budget, or nothing of the page could be
+    // served (KS-8: never a cursor that points back at the same place): serve no store text rather than
     // exceed it (design §4 anti-goal: no unbounded response), and say what was left out: `truncated`,
     // how many items, and the cursor that repeats this page with a larger max_tokens.
     const more = Math.max(1, out.restart?.remaining ?? 1);

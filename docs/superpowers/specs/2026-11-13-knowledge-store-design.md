@@ -436,6 +436,15 @@ clamped up to it, so even a response that can serve nothing of its page still sa
 "nothing fit" never reads as "nothing exists". Prompt sections degrade instead (left-out
 ids → counts → one count line → empty only when not even that fits).
 
+As built (KS-8 ruling after the real-CLI smoke): `cursor` never skips content. Text reads
+(`read_artifact` text / raw, `expand` on a chunk or with neighbours) page by position: a passage that
+does not fit is served up to the budget and marked `cut: true`, and the next cursor continues from
+exactly that character (no placeholder, no `retry_cursor`). In lists (hits, card lines, changes,
+expanded items) an item larger than the page is shortened and marked `cut: true`; `expand` of its id
+gives the full text. The header of `expand` / `read_artifact` goes on the first page only (a page
+too small for it gets a shortened header, `header_cut: true`); later pages carry the id, the items
+and the envelope. Agents are told: follow `cursor` until it is absent and you have read everything.
+
 ## 10. Cards (computed)
 
 Assembled at query time, within the caller's scope and budget; never stored as
