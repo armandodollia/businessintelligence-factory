@@ -1210,3 +1210,27 @@ the user decisions 13–16 recorded in design §3, §4 and §12).
     record in `results`, and the source record's upload flag marks the line.
 - **Web:** evidence is parsed out of its fence (`parseEvidence`) and shown in a `<pre>` as untrusted
   text; nothing uses `innerHTML` (tested). Card lines' `[id]` references open the item.
+
+## KS-5/6/7 integration notes
+
+Merged into `feat/learning-loop` in the order KS-5, KS-6, KS-7 (`--no-ff`), then wired (no migration added).
+
+- **Causal edges (KS-5 × KS-7):** one rule, `causalEdgeShown` (`readCommon.ts`). `aroundVisible`'s relation case
+  and `crossNodeCausalEdges` (moved from `briefing.ts`) both use it, so the company briefing lists exactly the
+  edges a symptom / cause card lists in node scope. An edge between two non-causal kinds is no longer briefed.
+  The briefing keeps its labels and now also logs the edge id; `relationSourceNode` is shared.
+- **What changed (KS-5 × KS-6):** `recordWhatChanged` takes `config` / `now` (the orchestrator passes its deps)
+  and calls `recordWhatChangedOutcomes` with them, so `stale` is recorded there. The text fallback is one
+  function, `contradictedFindings` (`scheduler/diff.ts`, with KS-6's narrower rule: only a NEW fact on the
+  subject contradicts), and `factsOfRun` lives next to it. On a replay the existing Decision is reused and the
+  keyed outcomes add nothing; a stop between the Decision and its outcomes is repaired.
+- **Feedback kinds:** `trackingFeedback.test.ts` runs KS-7's real reject and prune actions and asserts that the
+  knowledge kinds in `FEEDBACK_KINDS` are exactly the covered list.
+- **`duplicateOf`:** `POST …/knowledge/facts/:id/retract { duplicateOf? }` → `retractFactAsUser` (same-tree
+  check through `callerFact`; other tree = unknown = the same 404). Web: `retractAsDuplicate` + a draft field.
+- **Export ruling (§12 amended):** exposure split into runs / tasks / outputs; `exposedCause` resolves one level
+  through `provenance.evidenceOf` (the bound). A retrieval line is excluded for a USED exposed result, never for
+  a merely returned one. `exportTrainingDataWithSummary` counts exclusions by cause (`EXCLUSION_CAUSES`), and
+  `exportTrainingData` returns its JSONL. API: the `x-bif-export-summary` header and `/export/summary`. Web:
+  `logic/exportSummary.ts`, `useExportSummary`, Decision log.
+- **Bus events test:** KS-5 reviewer prompt reads now emit `retrieval` bus events (persisted by KS-6, ids only).

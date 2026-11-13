@@ -257,7 +257,7 @@ Criteria agents assign (each with reasoning + evidence links):
 - Calibration appendices are versioned (WP-B): every approved patch, import and revert is a row in `calibration_versions` (per business tree root and role, with actor and the approval Decision); the live text stays in `calibration/<role>.md`, and any earlier version can be restored. Approve and revert each have one path (`applyPromptPatchAsUser` / `revertCalibrationAsUser`, `src/core/feedback/actions.ts`) that writes the version row, an `apply_prompt_patch` / `revert_calibration` Decision by the acting user (`agentRunId` = `config.user.id`, never a `user` pseudo id) at the role's resulting prompt version, and a `prompt_patch_apply` / `prompt_patch_revert` feedback event. Both prompt versions (before and after) are stored in `prompt_versions`, so every hash resolves.
 - Per-prompt-version metrics (WP-B): rating agreement, mean delta, review pass rate, first-round pass rate, rounds and cost grouped by the prompt version of the run that produced the work, ordered by first use (trend).
 - Priority weights can be refit from the user's ratings (simple regression), proposed to the user, not auto-applied.
-- Export: decision log + ratings as JSONL for later model training.
+- Export: decision log + ratings as JSONL for later model training, under the upload rules of §10a.
 - Feedback provenance (learning-loop parity WP-A, migration 14): every human input records who
   (`config.user.id`), when and why; ratings record the agent run and prompt version they judged; an
   append-only `feedback_events` log (`src/core/feedback/events.ts`) records include overrides,
@@ -268,12 +268,55 @@ Criteria agents assign (each with reasoning + evidence links):
   unit proposal decisions on a 0–1 scale; items revised after a rating are re-queued for review. The
   export adds request answers, interview turns (linked to the interviewer run), feedback events and
   final review status, all under the upload exclusion.
-- **Decision outcomes (learning loop WP-C):** `decision_outcomes` labels agent decisions — or a non-decision subject such as a fact version — after the fact, all through one writer (`recordOutcome(store, RecordOutcomeInput)`, `src/core/learning/outcomes.ts`): task end (`confirmed`; unverified → `over-scoped` / `missed-evidence` / `weak-review`; `run-failed`), superseded outputs (`missed-evidence`), scheduled "what changed" (`stale`: claim no longer found for a re-researched subject, or a cited screenshot changed; one isolated hook, `src/core/learning/whatChangedOutcomes.ts`, which the knowledge store replaces with fact lineage), user include overrides on findings / recommendations / personas / competitors / hypotheses and unit-proposal rejects (`user-rejected`, plus `weak-review` on the passing review when a verified output is excluded; `confirmed` when an unverified output is included) and review disputes (`reviewer-false-positive`, `worker-miss`); `changed` and `retracted` are reserved for fact lineage. User outcomes come from one place: an `onFeedback` listener registered at boot (`src/core/learning/feedbackOutcomes.ts`) maps `include_override` / `proposal_reject` feedback events to outcomes, keyed by the feedback event, so each action writes its outcome once. A row has `decision_id` and/or `subject_type` + `subject_id` (CHECK: one is set), `run_id` when known, and `source_key`: rows are unique per (subject — else decision —, outcome, source key) — e.g. a fact observation id, or for `stale` the caller's `<factId>|stale|<lastConfirmedAt>`. Each row copies the judged decision's role, prompt version and task type; the outcomes report (`GET /api/workspaces/:id/outcomes`, Decision log table) counts labels per role / task type / prompt version, per workspace or per business tree.
+- **Decision outcomes (learning loop WP-C):** `decision_outcomes` labels agent decisions — or a non-decision subject such as a fact version — after the fact, all through one writer (`recordOutcome(store, RecordOutcomeInput)`, `src/core/learning/outcomes.ts`): task end (`confirmed`; unverified → `over-scoped` / `missed-evidence` / `weak-review`; `run-failed`), superseded outputs (`missed-evidence`), scheduled "what changed" (from fact lineage, one path; see §11 and §10a), user include overrides on findings / recommendations / personas / competitors / hypotheses and unit-proposal rejects (`user-rejected`, plus `weak-review` on the passing review when a verified output is excluded; `confirmed` when an unverified output is included) and review disputes (`reviewer-false-positive`, `worker-miss`); `changed` and `retracted` are reserved for fact lineage. User outcomes come from one place: an `onFeedback` listener registered at boot (`src/core/learning/feedbackOutcomes.ts`) maps `include_override` / `proposal_reject` feedback events to outcomes, keyed by the feedback event, so each action writes its outcome once. A row has `decision_id` and/or `subject_type` + `subject_id` (CHECK: one is set), `run_id` when known, and `source_key`: rows are unique per (subject — else decision —, outcome, source key) — e.g. a fact observation id, or for `stale` the caller's `<factId>|stale|<lastConfirmedAt>`. Each row copies the judged decision's role, prompt version and task type; the outcomes report (`GET /api/workspaces/:id/outcomes`, Decision log table) counts labels per role / task type / prompt version, per workspace or per business tree.
+
+## 10a. Knowledge store in prompts, tracking, export and the UI
+
+Details in `2026-11-13-knowledge-store-design.md`. This section describes how the parts work together.
+
+- **Briefings (§11 there).** Each role's prompt carries a fixed-size briefing built from cards, in place of the
+  "list every finding" sections: orchestrator (node card, entity index, changes since the last run of the
+  schedule, facts due for re-check), worker (task brief, cards of the entities it names, the facts it is asked
+  to re-check), synthesizer (usable current facts by entity) and tree context (one line per related node).
+  Each briefing fits the role's `briefing` budget. When it does not fit, it leaves items out by naming their
+  ids, then by counts, then as one count line. It is redacted before it is cut, fenced as untrusted, and
+  logged as a `prompt_context` read before the run starts. At company level the orchestrator also lists the
+  `causes` / `addresses` edges that cross nodes. They come from one rule (`causalEdgeShown`, used by
+  `crossNodeCausalEdges` and by the cards through `aroundVisible`), so a briefing never shows an edge that a
+  card hides. Uploads appear in prompts as metadata only.
+- **Tracking (§13 there).** Cited ids that a run was shown earlier are marked used (`retrieval_uses`; hit
+  rate). Fact lineage writes each outcome once: `confirmed`, `changed`, `retracted`, `stale`,
+  `user-rejected`, and `duplicate-saved` (a handshake answered `new` that the user later merges, or retracts
+  as a duplicate of another fact of the same tree). Human knowledge actions write feedback events with
+  the configured actor: `fact_scope_change`, `fact_retract`, `fact_replacement_accept`, `entity_merge`,
+  `entity_rename`, `entity_merge_reject` and `artifact_prune`. A test asserts that every one of these
+  kinds is covered. Blocked reads are `policy_events`. Retrieval bus events are persisted as ids only.
+  `GET /api/workspaces/:id/knowledge/metrics` and `/knowledge/signals` report store size, freshness,
+  hit and zero-result rates, and retrieved and used tokens per role, task type, prompt version and model.
+- **Export and uploads (§12 there, binding).** Unless `includeUploads` is set, the export leaves out
+  anything that cites an internal upload or an upload-derived item. It also leaves out the judgments of a
+  run that was *shown* upload-derived text (an upload-exposed run), and that run's **task**: its reviews,
+  deliverable decisions and outputs. Finally it leaves out later judgments that **reference** one of those
+  outputs, by id or through a record that cites it directly. It stops there: a later run that is only
+  shown such an output is not exposed by that. Exposure is computed from the retrieval log at each export
+  and never stored, so it cannot spread through cards or briefings, and briefings are not thinned to avoid
+  it. Every export reports how many judgments (and other lines) it left out, counted by cause: cites an
+  upload, exposed run, task of an exposed run, references an output of such a task. The report states
+  that `includeUploads` includes them. It is returned in the `x-bif-export-summary` header and from
+  `GET /api/workspaces/:id/export/summary`, and the Decision log shows it. Known limit: uncited text
+  paraphrased from such an output and carried on two tasks later is not caught.
+- **Knowledge view and gc (§14, §17 there).** The Knowledge page reads through the same engine as the
+  agents (`role: 'user'`, logged, no agent run). The user's actions go through `feedback/actions.ts`, and an
+  id from another tree answers exactly like an unknown id. That includes the `duplicateOf` of a retraction.
+  The storage report lists the files that no record references. Pruning is explicit and all-or-nothing,
+  removes only the file, and is logged.
 
 ## 11. Scheduler
 
 - Recurring jobs per workspace (e.g. weekly competitor flow re-walk, daily news scan), configured in the UI and stored in SQLite; run by the local server process while it is running (missed runs execute on next start).
-- Each run is diffed against the previous run of the same job (new findings, changed screenshots/flows, changed pricing) and surfaced as "What changed".
+- Each run is diffed against the previous run of the same job and schedule and surfaced as "What changed": the facts it replaced (old → new), retracted and confirmed, from its applied fact observations; new findings, matched by text only for facts saved as `new`; subjects no longer found; and changed screenshots (`scheduler/diff.ts`).
+- The same step (`recordWhatChanged`) records the decision outcomes through one path, `recordWhatChangedOutcomes`, passing the run's config. It writes the run's lineage outcomes (written at task end, never twice). For a previous fact the run neither confirmed, replaced nor retracted, it writes `contradicted` when the run saved a new fact on the same subject with another claim (`contradictedFindings`, the one text fallback), `changed` when a cited screenshot changed, and `stale` when the fact is past its TTL (shared with `list_changes` and the briefings). Every outcome is keyed, so a replayed step (pipeline resume) adds nothing, and a stop between the Decision and its outcomes is repaired on replay.
+- Recurring runs are planned as "confirm these": the orchestrator's briefing lists the facts due for re-check (stale, or reaching their TTL before the schedule's next run; manual runs: stale only), and `propose_tasks` accepts `recheck_fact_ids` per task (current facts of the tree, ≤ 50).
 
 ## 12. Configuration
 
@@ -307,7 +350,7 @@ rows (references only).
 
 ## 13. Web app (v1, minimal)
 
-Pages: **Business map** (workspace tree, mapping proposals, roll-up and cross-cutting issues) · **Workspaces** · **Interview** (+ optional uploads) · **Audience & Personas** · **Research** (live runs: orchestrator plan, task tree, review rounds/scores, pending user actions and approvals) · **Findings & Evidence** (screenshot flows, archived articles, documents) · **Strategy** (ranked recommendations with per-criterion rating) · **Review queue** · **Decision log** · **Schedule** · **Usage & prompts** (costs and budgets per role / model / prompt version / task, prompt-version trend with prompt text, calibration history with revert, agent runs with a paged event viewer) · **Settings**.
+Pages: **Business map** (workspace tree, mapping proposals, roll-up and cross-cutting issues) · **Workspaces** · **Interview** (+ optional uploads) · **Audience & Personas** · **Research** (live runs: orchestrator plan, task tree, review rounds/scores, pending user actions and approvals) · **Findings & Evidence** (screenshot flows, archived articles, documents) · **Strategy** (ranked recommendations with per-criterion rating) · **Review queue** · **Decision log** (with the export and its exclusion summary, §10a) · **Knowledge** (search with a "this part / whole business" toggle, entities and cards, fact history and evidence as plain text, merge suggestions, stale facts and conflicts, changes, your fact and entity actions, storage report and prune; §10a) · **Schedule** · **Usage & prompts** (costs and budgets per role / model / prompt version / task, prompt-version trend with prompt text, calibration history with revert, agent runs with a paged event viewer) · **Settings**.
 
 ## 14. Left to the builder
 

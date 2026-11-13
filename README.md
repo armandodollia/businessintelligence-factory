@@ -245,14 +245,26 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   default, a node-scoped `search` says how many more matches exist elsewhere in the business (counts
   only), and around a symptom or cause entity the `causes` / `addresses` relations of the whole
   business are listed, each labelled with the part it comes from.
+- **Knowledge in prompts and recurring runs (knowledge store).** Prompts no longer list every finding:
+  each role gets a fixed-size briefing built from cards (orchestrator 1 500 tokens, worker 1 500,
+  synthesizer 4 000; `knowledge.budgets`), which leaves items out by naming their ids, then by counts, and
+  is logged as a read before the run starts. The orchestrator sees the node card, an entity index,
+  changes since the last run of the schedule and the facts due for re-check (stale, or reaching their
+  TTL before the schedule's next run), and may give each task `recheck_fact_ids`, which the worker's
+  prompt shows with their claims; recurring runs therefore confirm, replace or retract facts instead of
+  saving them again. At company level the orchestrator also sees the causal edges that cross parts of
+  the business, from the same rule the cards use. Uploads appear in prompts as metadata only (id, type,
+  size, date). The scheduled "What changed" comes from the run's applied fact changes (new, replaced
+  old → new, retracted, confirmed count) plus the screenshot comparison, with text matching only for
+  facts saved as `new` (see Scheduler).
 - **Knowledge tracking (knowledge store).** When a run saves something citing ids it was shown by a
   read, those ids are marked used (`retrieval_uses`); hit rate = reads with a used result. Living facts
   write decision outcomes once each (`confirmed`, `changed`, `retracted`, `stale`, `user-rejected`, and
   `duplicate-saved` when you merge away a fact the agent saved as `new` after the duplicate check showed it
-  a match); the scheduled "what changed" outcomes now come from fact lineage, with text matching only
-  against facts saved as `new`. Blocked knowledge reads (outside a reviewer's slice, or another business's
-  ids) are policy events. The export leaves out by default every judgment of a run that was shown upload
-  text, even if it cited none, and adds retrieval events and fact observations under the same rules.
+  a match, or retract it as a duplicate of another fact); the scheduled "what changed" records them once,
+  through one path (see Scheduler). Blocked knowledge reads (outside a reviewer's slice, or another
+  business's ids) are policy events. The export adds retrieval events and fact observations, under the
+  upload rules (see Export and uploads).
   `GET /api/workspaces/:id/knowledge/metrics` (store size, freshness, hit and zero-result rates, retrieved /
   used tokens per role, task type, prompt version and model, share of input tokens that was retrieved
   knowledge) and `GET /api/workspaces/:id/knowledge/signals` (learning signals per role).
@@ -260,9 +272,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   the business" / "whole business"), lists entities and opens their cards, a fact's history and
   evidence (shown as plain text, never rendered), merge suggestions, stale facts, conflicts and
   unverified updates, and recent changes. Upload-derived items are marked with why the export leaves
-  them out. Retracting a fact, applying an unverified update, changing where a fact applies, merging
-  or renaming entities and rejecting a suggestion are your actions (feedback events, actor
-  `user.id`). The storage report shows, per part and age, the stored files no record references;
+  them out. Retracting a fact (optionally as a duplicate of another fact of the same business),
+  applying an unverified update, changing where a fact applies, merging or renaming entities and
+  rejecting a suggestion are your actions (feedback events, actor `user.id`). The storage report shows, per part and age, the stored files no record references;
   nothing is removed automatically. Pruning is your explicit action on files you pick, at least
   `knowledge.retention.pruneMinAgeDays` (default 90) days old: it is refused as a whole if any file
   is still cited (by any fact version, observation, record, the latest capture of a flow step, an
@@ -312,9 +324,26 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   rank among the prompt patch examples. When an agent revises an item after you rated it, the item
   returns to the review queue. The Decision log page lists the feedback with actor, time and reason.
   The export adds answered requests, the interview transcript (each turn linked to its interviewer
-  run), feedback events and each output's final review status, with the same upload exclusion. The
-  exclusion also covers anything the knowledge store marks upload-derived (a fact confirmed with an
-  upload, a later version of such a fact, or a record citing one); `explainUploadDerived` says why.
+  run), feedback events and each output's final review status, under the upload rules below.
+- **Export and uploads.** The JSONL export (`GET /api/workspaces/:id/export`) leaves out by default,
+  unless `?includeUploads=1`:
+  - everything that cites an internal upload or anything the knowledge store marks upload-derived (a
+    fact confirmed with an upload, a later version of such a fact, a record citing one;
+    `explainUploadDerived` says why);
+  - every judgment of an **upload-exposed run**, that is a run that was *shown* upload-derived text by
+    a read tool or its prompt, even if it cited none;
+  - the **task of such a run**: its reviews, deliverable decisions and outputs;
+  - later judgments that **reference one of those outputs**, by id or through a record that cites it
+    directly.
+
+  The exclusion stops there. A later run that is only shown one of those outputs is not exposed by
+  that, and its other judgments are exported. Exposure is computed at each export from the
+  retrieval log and never stored, so it cannot spread through cards or briefings. Each export reports
+  what it left out, counted by cause: cites an upload, exposed run, task of an exposed run,
+  references an output of such a task. The report comes in the `x-bif-export-summary` header and
+  from `GET /api/workspaces/:id/export/summary`, and the Decision log shows it with an "including
+  uploads" link. Known limit: uncited text paraphrased from such an output and carried on two tasks
+  later is not caught.
 - **Usage, cost and prompts.** Every agent run's token usage (input, output, cache read/write) is
   stored with its cost, computed from the dated price table `src/core/harness/pricing.json` (USD per
   1M tokens, editable — bump its `version` / `effectiveDate` when you change a price; the codex model
@@ -330,8 +359,13 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `GET /api/workspaces/:id/calibration/versions[?role=]`,
   `POST /api/workspaces/:id/calibration/versions/:versionId/revert`.
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is
-  diffed against the previous run of the same phase (new findings, subjects no longer found, changed
-  screenshots), shown on the Research page.
+  diffed against the previous run of the same phase and schedule, shown on the Research page. The
+  diff lists the facts the run replaced (old → new), retracted and confirmed (from its applied fact
+  changes), new findings (text matching only for facts saved as `new`), subjects no longer found and
+  changed screenshots. The same step records the decision outcomes once each through one path: the
+  run's lineage outcomes, `contradicted` (a previous fact the run neither confirmed, replaced nor
+  retracted, when it saved a new fact on the same subject with another claim), `changed` (a cited
+  screenshot changed) and `stale` (past its TTL). Replaying the step after a restart adds nothing.
 
 ## Where data lives
 
@@ -371,7 +405,7 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
 - **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
   overrides are runtime-only and are not written into `bif.config.json` when you save settings.)
 - **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
-- **"What changed" only compares artifacts that findings cite.**
+- **"What changed" only compares screenshots that findings or confirmations cite.**
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with
   `payload.actor` telling them apart. User decisions (weight changes, prompt patch approvals and
   calibration reverts) record your `user.id` as the run id; approvals and reverts also record the
