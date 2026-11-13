@@ -278,4 +278,8 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE tasks ADD COLUMN review_issues TEXT;
   ALTER TABLE agent_runs ADD COLUMN pid_started_at TEXT;
   `,
+  // 8: user override for using a finding in recommendation synthesis (NULL = default: verified only).
+  `
+  ALTER TABLE findings ADD COLUMN include_in_synthesis INTEGER;
+  `,
 ];

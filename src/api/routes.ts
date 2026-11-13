@@ -7,6 +7,7 @@ import { ConfigError, parseConfig } from '../core/config/load.js';
 import { ROLES, type BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
 import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
+import { setIncludeInSynthesis } from '../core/evidence/synthesis.js';
 import { resolveUserRequest } from '../core/harness/tools/handlers.js';
 import { uploadInternal } from '../core/internal/uploads.js';
 import { interviewCoverage, sendInterviewMessage, type InterviewerFake } from '../core/interview/interview.js';
@@ -117,6 +118,7 @@ const schemas = {
     patchText: z.string(),
     examples: z.array(z.unknown()).optional(),
   }),
+  includeFinding: z.object({ include: z.boolean() }),
   scoringWeights: z.object({
     weights: z.partialRecord(z.enum(RECOMMENDATION_KEYS), z.number().min(0)).optional(),
     personaWeight: z.number().min(0).optional(),
@@ -267,6 +269,13 @@ export function createApp(deps: AppDeps): Hono {
 
   // --- results --------------------------------------------------------------------------------
   app.get('/api/workspaces/:id/findings', (c) => c.json(store.findings.list({ workspaceId: workspace(c.req.param('id')).id })));
+  // User override (spec §7.2): include an unverified finding in synthesis, or exclude a verified one.
+  app.post('/api/findings/:id/include', async (c) => {
+    const id = c.req.param('id');
+    const { include } = await body(c, schemas.includeFinding);
+    if (!store.findings.get(id)) throw new HttpError(404, `finding '${id}' not found`);
+    return c.json(setIncludeInSynthesis(store, id, include));
+  });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
   app.get('/api/workspaces/:id/personas', (c) => c.json(store.personas.list({ workspaceId: workspace(c.req.param('id')).id })));
   app.get('/api/workspaces/:id/recommendations', (c) =>

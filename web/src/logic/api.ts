@@ -118,6 +118,7 @@ export const api = {
 
   // results
   listFindings: (id: string) => get<Finding[]>(`${ws(id)}/findings`),
+  setFindingInclude: (id: string, include: boolean) => post<Finding>(`/api/findings/${enc(id)}/include`, { include }),
   listSymptoms: (id: string) => get<Symptom[]>(`${ws(id)}/symptoms`),
   listPersonas: (id: string) => get<PersonaNode[]>(`${ws(id)}/personas`),
   listRecommendations: (id: string) => get<Recommendation[]>(`${ws(id)}/recommendations`),

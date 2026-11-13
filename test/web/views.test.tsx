@@ -45,6 +45,12 @@ function respond(path: string): unknown {
   if (path.endsWith('/calibration')) return { byCriterion: [] };
   if (path === '/api/config') return { scoring: { personaWeight: 0, weights: {} } };
   if (path.endsWith('/profile')) return { workspaceId: 'ws_1', data: {} };
+  if (path.endsWith('/findings')) {
+    return [
+      { id: 'fnd_v', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 'Rival', claim: 'Verified claim', criteria: {}, evidence: [], status: 'verified', createdAt: '' },
+      { id: 'fnd_u', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 'Rival', claim: 'Unverified claim', criteria: {}, evidence: [], status: 'unverified', createdAt: '' },
+    ];
+  }
   return [];
 }
 
@@ -106,6 +112,16 @@ describe('web views', () => {
     window.location.hash = '#/w/ws_1/research';
     render(<App />);
     expect(await screen.findByText('What changed')).toBeTruthy();
+  });
+
+  it('findings page shows a use-in-synthesis toggle (unverified excluded by default)', async () => {
+    window.location.hash = '#/w/ws_1/findings';
+    render(<App />);
+    const verified = (await screen.findByLabelText('use fnd_v in synthesis')) as HTMLInputElement;
+    const unverified = screen.getByLabelText('use fnd_u in synthesis') as HTMLInputElement;
+    expect(verified.checked).toBe(true);
+    expect(unverified.checked).toBe(false);
+    expect(screen.getByText(/excluded: not verified/)).toBeTruthy();
   });
 
   it('renders workspaces and settings', async () => {

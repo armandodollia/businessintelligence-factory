@@ -108,6 +108,11 @@ export interface Finding {
   evidence: string[];
   status: 'verified' | 'unverified' | 'pending';
   createdAt: string;
+  /**
+   * User override for recommendation synthesis (migration 8). Unset: only `verified` findings are
+   * used (spec §7.2). `true`: used even if unverified. `false`: excluded even if verified.
+   */
+  includeInSynthesis?: boolean;
 }
 
 export interface Task {

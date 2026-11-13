@@ -1,6 +1,7 @@
 import type { BifConfig } from '../config/schema.js';
 import { PROVIDER_IDS } from '../config/schema.js';
 import { AbortError } from '../events.js';
+import { synthesisFindingsSection } from '../evidence/synthesis.js';
 import { isOurProcessGroup } from '../harness/procinfo.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
 import { findReplay } from '../harness/tools/idempotency.js';
@@ -240,8 +241,12 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
   } as Workspace;
   const existing = store.tasks.list({ runId: rr.id });
   const remaining = Math.max(0, config.limits.maxTasksPerRun - existing.length);
+  // Synthesis may only build on verified (or user-included) findings: replace the findings list.
+  const context = workspaceContext(store, ws).map((section) =>
+    rr.phase === 'synthesis' && section.startsWith('## Existing findings') ? synthesisFindingsSection(store, ws.id) : section,
+  );
   const parts = [
-    ...workspaceContext(store, ws),
+    ...context,
     ...treeContext(store, ws),
     `## Phase: ${rr.phase} (orchestrator round ${round} of ${MAX_ORCHESTRATOR_ROUNDS})\nGoal: ${phaseGoal(rr.phase, ws)}`,
     `## Allowed task types\n${PHASE_TASK_TYPES[rr.phase].map((t) => `- ${t}`).join('\n') || '- (none)'}`,

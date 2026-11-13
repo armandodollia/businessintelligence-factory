@@ -5,6 +5,7 @@ import type { InterviewTurn, UserRequest } from '../../src/core/types.js';
 import {
   normalizeTree,
   useBusinessMap,
+  useFindings,
   useInterview,
   useRequests,
   useResearch,
@@ -238,6 +239,30 @@ describe('web logic hooks', () => {
       body: { action: 'accept', edits: { name: 'Payments EU' } },
     });
     await waitFor(() => expect(result.current.tree?.children).toHaveLength(1));
+  });
+
+  it('useFindings.setIncludeInSynthesis posts the override and reloads', async () => {
+    const stored: Array<Record<string, unknown>> = [
+      { id: 'f1', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 's', claim: 'c', criteria: {}, evidence: [], status: 'unverified', createdAt: '' },
+      { id: 'f2', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 's', claim: 'd', criteria: {}, evidence: [], status: 'verified', createdAt: '' },
+    ];
+    routes['GET /api/workspaces/ws_1/findings'] = () => stored;
+    routes['GET /api/workspaces/ws_1/symptoms'] = () => [];
+    routes['POST /api/findings/f1/include'] = (body) => {
+      stored[0] = { ...stored[0], includeInSynthesis: (body as { include: boolean }).include };
+      return stored[0];
+    };
+    const { result } = renderHook(() => useFindings('ws_1'));
+    await waitFor(() => expect(result.current.findings).toHaveLength(2));
+    const [f1, f2] = result.current.findings;
+    expect(result.current.usedInSynthesis(f1!)).toBe(false);
+    expect(result.current.usedInSynthesis(f2!)).toBe(true);
+
+    await act(async () => {
+      await result.current.setIncludeInSynthesis('f1', true);
+    });
+    expect(calls).toContainEqual({ method: 'POST', path: '/api/findings/f1/include', body: { include: true } });
+    await waitFor(() => expect(result.current.usedInSynthesis(result.current.findings[0]!)).toBe(true));
   });
 
   it('normalizeTree accepts nested or flat shapes', () => {

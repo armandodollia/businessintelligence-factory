@@ -93,8 +93,9 @@ work on start and runs scheduled jobs (missed runs execute once on the next star
   it 0–10 and lists issues (`blocking | substantive | nit | scope_expansion`). Score ≥ `passThreshold`
   (default 8) → *verified*. Otherwise the worker fixes or pushes back (pushback on nits and scope
   expansion is expected and logged) and resubmits, up to `maxRounds` (default 3); then it stays
-  *unverified* and is flagged with that status (the spec also keeps unverified work out of
-  synthesis unless you override; see Known limitations).
+  *unverified* and is flagged with that status. Only verified findings feed recommendation
+  synthesis; on the Findings page you can include an unverified finding (or exclude a verified
+  one) with the "Use in recommendations" toggle.
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.
@@ -139,15 +140,18 @@ or `interview` runs a subset; models are set with `BIF_SMOKE_CLAUDE_MODEL`, `BIF
 
 ## Known limitations
 
-- **OpenCode is unverified end to end.** No live OpenCode run has succeeded yet (free-tier 429s, which
-  OpenCode retries silently until the idle timeout). See [docs/smoke-results.md](docs/smoke-results.md).
+- **OpenCode is unverified end to end.** No live OpenCode run has succeeded yet. See
+  [docs/smoke-results.md](docs/smoke-results.md).
+- **OpenCode rate limits can hang a run until `limits.idleTimeoutMs`.** On the free tier OpenCode
+  retries 429s internally without printing anything to stdout (stderr output is not guaranteed), so
+  the idle watchdog ends the run (default 10 minutes), the run is marked failed (not rate-limit
+  retried) and the task's one retry applies. Rate-limit text that OpenCode does print on stderr is
+  detected, but it does not shorten the hang. Lower `idleTimeoutMs` if you use OpenCode's free tier.
 - **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth.
 - **Config changes** to worker/browser limits and the port need a restart. When started with
   `BIF_DATA_DIR`/`PORT`, saving the config from the UI persists those overridden values.
 - **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
 - **"What changed" only compares artifacts that findings cite.**
-- **Unverified results are not yet filtered out of synthesis** by the harness; only the status
-  is recorded (being worked on in the research pipeline).
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with
   `payload.actor` telling them apart.
 - **Local only, no authentication.**

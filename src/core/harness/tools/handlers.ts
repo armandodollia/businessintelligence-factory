@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import type { BifConfig } from '../../config/schema.js';
 import { AbortError, type EventBus } from '../../events.js';
 import type { ArtifactStore } from '../../evidence/artifacts.js';
+import { ineligibleFindingIds } from '../../evidence/synthesis.js';
 import { redactIdentitySecrets } from '../../identity/identities.js';
 import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
@@ -398,6 +399,16 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
 
       const extra = deps.extraHandlers?.[name];
       if (!extra) return announce(fail(`tool '${name}' is not available yet in this build`));
+      if (name === 'save_recommendation') {
+        // Spec §7.2: unverified results are excluded from synthesis unless the user overrides.
+        const ids = (parsed.data as ToolInput<'save_recommendation'>).finding_ids;
+        const blocked = ineligibleFindingIds(store, ctx.workspaceId, ids);
+        if (blocked.length) {
+          return announce(
+            fail(`finding_ids include findings that are not verified (and not included by the user): ${blocked.join(', ')}`),
+          );
+        }
+      }
       const result = await extra(ctx, parsed.data, deps, opts);
       const kind = EXTRA_DECISION_KIND[name];
       // A handler that recognised a replayed call (`duplicate: true`) already has its Decision.

@@ -122,6 +122,23 @@ describe('workspaces', () => {
   });
 });
 
+describe('findings synthesis override', () => {
+  it('POST /api/findings/:id/include sets the override', async () => {
+    const t = setup();
+    t.store.findings.insert({
+      id: 'fnd_u', workspaceId: t.ws.id, runId: 'r', taskId: 't', subject: 's', claim: 'c', criteria: {}, evidence: [],
+      status: 'unverified', createdAt: '',
+    });
+    const on = await t.json('POST', '/api/findings/fnd_u/include', { include: true });
+    expect(on).toMatchObject({ status: 200, body: { id: 'fnd_u', includeInSynthesis: true } });
+    expect(t.store.findings.get('fnd_u')!.includeInSynthesis).toBe(true);
+    const off = await t.json('POST', '/api/findings/fnd_u/include', { include: false });
+    expect(off.body.includeInSynthesis).toBe(false);
+    expect((await t.json('POST', '/api/findings/fnd_u/include', { include: 'yes' })).status).toBe(400);
+    expect((await t.json('POST', '/api/findings/fnd_nope/include', { include: true })).status).toBe(404);
+  });
+});
+
 describe('ratings and review', () => {
   it('POST /api/ratings with unknown criterion → 400', async () => {
     const t = setup();

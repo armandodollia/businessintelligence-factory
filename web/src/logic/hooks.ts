@@ -23,6 +23,7 @@ import type {
   Decision,
   EvidenceGroups,
   EvidenceItem,
+  Finding,
   InterviewState,
   InterviewTurn,
   NewSchedule,
@@ -448,11 +449,32 @@ export function useResearch(wsId: string | null | undefined) {
 // ---------------------------------------------------------------------------
 // findings & evidence
 
+/**
+ * Mirrors `isSynthesisEligible` in src/core/evidence/synthesis.ts: verified findings feed
+ * recommendation synthesis unless the user overrides per finding (`includeInSynthesis`).
+ */
+export function usedInSynthesis(f: Pick<Finding, 'status' | 'includeInSynthesis'>): boolean {
+  return f.includeInSynthesis ?? f.status === 'verified';
+}
+
 export function useFindings(wsId: string | null | undefined) {
   const findings = useResource(`findings:${wsId ?? ''}`, wsId ? () => api.listFindings(wsId) : null);
   const symptoms = useResource(`symptoms:${wsId ?? ''}`, wsId ? () => api.listSymptoms(wsId) : null);
+  const action = useAction();
+  const setIncludeInSynthesis = useCallback(
+    async (findingId: string, include: boolean) => {
+      await action.run(() => api.setFindingInclude(findingId, include));
+      await findings.reload();
+    },
+    [action.run, findings.reload],
+  );
   return {
     findings: findings.data ?? [],
+    /** Spec §7.2: verified findings feed synthesis unless the user overrides per finding. */
+    usedInSynthesis,
+    setIncludeInSynthesis,
+    saving: action.busy,
+    actionError: action.error,
     symptoms: (symptoms.data ?? []).filter((s) => s.kind === 'symptom'),
     strengths: (symptoms.data ?? []).filter((s) => s.kind === 'strength'),
     loading: findings.loading || symptoms.loading,

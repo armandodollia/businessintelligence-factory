@@ -221,7 +221,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', runId: 'text', taskId: 'text', subject: 'text', claim: 'text',
-      criteria: 'json', evidence: 'json', status: 'text', createdAt: 'text',
+      criteria: 'json', evidence: 'json', status: 'text', createdAt: 'text', includeInSynthesis: 'bool',
     },
   } satisfies TableSpec<Finding>,
   tasks: {

@@ -1,5 +1,6 @@
 import type { BifConfig } from '../config/schema.js';
 import { reviewerFor } from '../config/load.js';
+import { synthesisFindingsSection } from '../evidence/synthesis.js';
 import { AbortError } from '../events.js';
 import type { RunOutcome } from '../harness/supervisor.js';
 import { getRunOutputs, type ReviewIssue } from '../harness/tools/handlers.js';
@@ -75,6 +76,7 @@ export function workPrompt(deps: Pick<ResearchDeps, 'store'>, task: Task): strin
     `## Brief\n${task.brief}`,
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
   ];
+  if (task.phase === 'synthesis') parts.push(synthesisFindingsSection(deps.store, task.workspaceId));
   const answered = answeredRequestsSection(deps, task);
   if (answered) parts.push(answered);
   parts.push('Finish by calling `submit_result` with your deliverable.');
@@ -94,6 +96,7 @@ export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<Rese
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     `## Your current deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     `## Review issues\n${issueLines.join('\n') || '- (none)'}`,
+    deps && task.phase === 'synthesis' ? synthesisFindingsSection(deps.store, task.workspaceId) : '',
     deps ? answeredRequestsSection(deps, task) : '',
   ]
     .filter(Boolean)
