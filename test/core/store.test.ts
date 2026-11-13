@@ -72,7 +72,11 @@ describe('store', () => {
     const store = open(tmpDb());
     const f = finding('ws_1');
     store.findings.insert(f);
-    expect(store.findings.get(f.id)).toEqual(f);
+    // Columns added in migration 18 (knowledge store) come back with their defaults / trigger values.
+    expect(store.findings.get(f.id)).toEqual({
+      ...f, lineageId: f.id, version: 1, lifecycle: 'current', firstSeenAt: f.createdAt, confirmCount: 0,
+      uploadDerived: false, lineageConflict: false,
+    });
     const updated = store.findings.update(f.id, { status: 'verified', criteria: { impact: 9 } });
     expect(updated.status).toBe('verified');
     expect(store.findings.get(f.id)?.criteria).toEqual({ impact: 9 });
@@ -221,7 +225,7 @@ describe('store', () => {
       scope: { level: 'company', name: '', description: '' },
       audiences: ['external'],
     });
-    expect(store.artifacts.get(artifact.id)).toEqual(artifact);
+    expect(store.artifacts.get(artifact.id)).toEqual({ ...artifact, uploadDerived: false }); // migration 18 default
     expect(store.tasks.get(task.id)).toEqual(task);
     expect(store.researchRuns.get(researchRun.id)).toEqual(researchRun);
     expect(store.agentRuns.get(agentRun.id)).toEqual(agentRun);

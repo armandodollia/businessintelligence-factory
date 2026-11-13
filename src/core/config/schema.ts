@@ -149,6 +149,106 @@ export const telemetryConfigSchema = z.strictObject({
   otlp: otlpConfigSchema.optional(),
 });
 
+// ---------------------------------------------------------------------------
+// Knowledge store KS-0: `config.knowledge` (design 2026-11-13-knowledge-store-design.md §16).
+// Optional; every field defaulted. Read it through `knowledgeSettings` (src/core/knowledge/config.ts),
+// which applies `KNOWLEDGE_DEFAULTS`.
+
+/** Kinds of knowledge-store entities (design §7). */
+export const ENTITY_KINDS = [
+  'company', 'competitor', 'product', 'feature', 'flow', 'persona', 'segment', 'pain_point', 'symptom', 'cause', 'topic',
+] as const;
+export type EntityKind = (typeof ENTITY_KINDS)[number];
+export const entityKindSchema = z.enum(ENTITY_KINDS);
+
+/** Response budgets per kind of read (tokens). `read_artifact` uses `expand`, `list_changes` uses `search`. */
+export const KNOWLEDGE_BUDGET_KINDS = ['search', 'card', 'expand', 'briefing'] as const;
+export type KnowledgeBudgetKind = (typeof KNOWLEDGE_BUDGET_KINDS)[number];
+
+const budgetTokens = z.number().int().min(1);
+export const knowledgeBudgetSetSchema = z.strictObject({
+  search: budgetTokens.optional(),
+  card: budgetTokens.optional(),
+  expand: budgetTokens.optional(),
+  briefing: budgetTokens.optional(),
+});
+
+export const knowledgeConfigSchema = z.strictObject({
+  budgets: z
+    .strictObject({
+      default: knowledgeBudgetSetSchema.optional(),
+      /** Per-role overrides (merged over `default` per kind). */
+      roles: z.partialRecord(roleSchema, knowledgeBudgetSetSchema).optional(),
+      /** Per-provider scale (e.g. 0.5 for a CLI with a small tool-output limit). */
+      providers: z.partialRecord(providerIdSchema, z.number().positive()).optional(),
+    })
+    .optional(),
+  /** Cap on any single knowledge response, whatever the caller asks. */
+  hardMaxTokens: budgetTokens.optional(),
+  freshness: z
+    .strictObject({
+      defaultDays: z.number().int().min(1).optional(),
+      byEntityKind: z.partialRecord(entityKindSchema, z.number().int().min(1)).optional(),
+    })
+    .optional(),
+  extraction: z
+    .strictObject({
+      maxTextChars: z.number().int().min(1).optional(),
+      chunkTokens: z.number().int().min(1).optional(),
+      maxChunkTokens: z.number().int().min(1).optional(),
+      xlsxMaxRows: z.number().int().min(1).optional(),
+      /** Artifacts up to this size are extracted inline at save; larger ones are queued. */
+      inlineMaxBytes: z.number().int().min(0).optional(),
+      concurrency: z.number().int().min(1).optional(),
+    })
+    .optional(),
+  captions: z
+    .strictObject({
+      /** Agents must describe image artifacts when saving them. */
+      required: z.boolean().optional(),
+      minChars: z.number().int().min(0).optional(),
+    })
+    .optional(),
+  dedupe: z
+    .strictObject({
+      /** Duplicate-handshake candidates returned to the saving agent. */
+      candidateLimit: z.number().int().min(1).max(20).optional(),
+      /** Minimum normalized similarity (0–1) for a candidate. */
+      similarityFloor: z.number().min(0).max(1).optional(),
+    })
+    .optional(),
+  retention: z
+    .strictObject({
+      /** Prune never touches artifacts younger than this. */
+      pruneMinAgeDays: z.number().int().min(0).optional(),
+    })
+    .optional(),
+});
+export type KnowledgeConfig = z.infer<typeof knowledgeConfigSchema>;
+
+/** Defaults of `config.knowledge` (design §8.2, §8.3, §9, §16). */
+export const KNOWLEDGE_DEFAULTS = {
+  budgets: {
+    default: { search: 1200, card: 800, expand: 2000, briefing: 1500 },
+    roles: { reviewer: { expand: 3000 }, synthesizer: { briefing: 4000 } },
+    providers: {},
+  },
+  hardMaxTokens: 8000,
+  freshness: { defaultDays: 90, byEntityKind: {} },
+  extraction: {
+    maxTextChars: 2_000_000,
+    chunkTokens: 400,
+    maxChunkTokens: 600,
+    xlsxMaxRows: 2000,
+    inlineMaxBytes: 1_048_576,
+    concurrency: 1,
+  },
+  captions: { required: true, minChars: 20 },
+  dedupe: { candidateLimit: 3, similarityFloor: 0.5 },
+  retention: { pruneMinAgeDays: 90 },
+} as const;
+// --- end knowledge store KS-0 config ---------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -219,6 +319,8 @@ export const bifConfigSchema = z
     // WP-D (learning loop): structured escalations, bus-event persistence, optional OTLP export.
     escalation: escalationConfigSchema.optional(),
     telemetry: telemetryConfigSchema.optional(),
+    /** Knowledge store KS-0: budgets, freshness, extraction, captions, dedupe, retention (all defaulted). */
+    knowledge: knowledgeConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -242,6 +344,11 @@ export const bifConfigSchema = z
       check(ref as ModelRef | undefined, ['roles', 'workers', key]);
     }
     check(cfg.escalation?.model, ['escalation', 'model']); // WP-D
+    // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).
+    const ex = cfg.knowledge?.extraction;
+    if (ex && (ex.chunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.chunkTokens) > (ex.maxChunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.maxChunkTokens)) {
+      ctx.addIssue({ code: 'custom', path: ['knowledge', 'extraction', 'chunkTokens'], message: 'must not exceed maxChunkTokens' });
+    }
     if (cfg.identity.emailProvider === 'catchall' && !cfg.identity.catchallDomain) {
       ctx.addIssue({
         code: 'custom',

@@ -4,6 +4,9 @@
  */
 export type { ModelRef, ProviderId, Role, TaskType } from './config/schema.js';
 import type { ModelRef, Role, TaskType } from './config/schema.js';
+// Knowledge store KS-0
+export type { EntityKind } from './config/schema.js';
+import type { EntityKind } from './config/schema.js';
 
 export type Phase =
   /** Optional; runs first when present; not in the default pipeline (Task 10b). */
@@ -106,6 +109,13 @@ export interface Artifact {
   step?: number;
   note?: string;
   capturedAt: string;
+  // Knowledge store KS-0 (migration 18)
+  /** Caption / description (required for agent screenshots, design §8.1); first save sets it. */
+  description?: string;
+  /** Normalized `sourceUrl` (design §8.1, `urlKey`). */
+  urlKey?: string;
+  /** Upload-derived (design §12): sticky, set by triggers / backfill. Optional on insert (DB default 0). */
+  uploadDerived?: boolean;
 }
 
 /**
@@ -135,6 +145,25 @@ export interface Finding {
    * used (spec §7.2). `true`: used even if unverified. `false`: excluded even if verified.
    */
   includeInSynthesis?: boolean;
+  // Knowledge store KS-0 (migration 18): living facts (design §7.2). All optional on insert: the
+  // columns have defaults, and triggers set `lineageId` (= id) and `firstSeenAt` (= createdAt).
+  /** Stable identity across versions; the first version's id. */
+  lineageId?: string;
+  /** 1 for the first version of a lineage. */
+  version?: number;
+  /** The version this one replaces (`relation: replaces`). */
+  replacesId?: string;
+  lifecycle?: FactLifecycle;
+  entityId?: string;
+  firstSeenAt?: string;
+  lastConfirmedAt?: string;
+  confirmCount?: number;
+  /** Agent-set freshness TTL; else config by entity kind, else `knowledge.freshness.defaultDays`. */
+  ttlDays?: number;
+  /** Upload-derived (design §12): sticky along the lineage, set by triggers. */
+  uploadDerived?: boolean;
+  /** A replacement was applied onto a newer head than it named (design §7.2); for the review queue. */
+  lineageConflict?: boolean;
 }
 
 export interface Task {
@@ -364,6 +393,8 @@ export interface Persona {
   taskRound?: number;
   /** User override for the persona panel (migration 11); same semantics as `Recommendation.includeOverride`. */
   includeOverride?: boolean;
+  /** Knowledge store entity (KS-0, migration 18). */
+  entityId?: string;
 }
 
 export interface Symptom {
@@ -374,6 +405,8 @@ export interface Symptom {
   detail: string;
   criteria: Criteria;
   evidence: string[];
+  /** Knowledge store entity (KS-0, migration 18). */
+  entityId?: string;
 }
 
 /** Per-area comparison of a competitor vs. the business in scope, each 1–5 (5 = competitor much better). */
@@ -411,6 +444,8 @@ export interface Competitor {
   taskRound?: number;
   /** User override (migration 13); same semantics as `Recommendation.includeOverride`. */
   includeOverride?: boolean;
+  /** Knowledge store entity (KS-0, migration 18). */
+  entityId?: string;
 }
 
 /** A research hypothesis about the cause of an interview symptom (spec §8 drill-down; migration 12). */
@@ -431,6 +466,8 @@ export interface SymptomHypothesis {
   taskRound?: number;
   /** User override (migration 13); same semantics as `Recommendation.includeOverride`. */
   includeOverride?: boolean;
+  /** Knowledge store entity (KS-0, migration 18). */
+  entityId?: string;
 }
 
 export interface Schedule {
@@ -553,5 +590,214 @@ export interface CalibrationVersion {
   revertedFrom?: string;
   decisionId?: string;
   actor: string;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-0 (migration 18): rows of the knowledge-store tables
+// (docs/superpowers/specs/2026-11-13-knowledge-store-design.md §7, §8, §13, §15).
+
+/** Across-run lifecycle of a fact (design §7.2); independent of the review `status`. */
+export type FactLifecycle = 'candidate' | 'current' | 'replaced' | 'retracted';
+
+/** `artifact_texts.status`: `pending` until extraction ran, then the extractor's status (KS-1a). */
+export type ExtractionState = 'pending' | 'ok' | 'empty' | 'unsupported' | 'too_large' | 'failed';
+
+/** One act of saving an artifact (design §8.1). Bytes dedupe; captures never do. */
+export interface ArtifactCapture {
+  id: string;
+  artifactId: string;
+  /** Home node of the saving run. */
+  workspaceId: string;
+  agentRunId?: string;
+  taskId?: string;
+  /** Research run. */
+  runId?: string;
+  sourceUrl?: string;
+  urlKey?: string;
+  title?: string;
+  flow?: string;
+  step?: number;
+  note?: string;
+  description?: string;
+  entityId?: string;
+  capturedAt: string;
+}
+
+/** Extraction state and text identity of an artifact (one row per artifact). */
+export interface ArtifactText {
+  artifactId: string;
+  workspaceId: string;
+  status: ExtractionState;
+  /** `name@n` of the extractor that produced the text. */
+  extractor?: string;
+  error?: string;
+  charCount: number;
+  tokenEstimate: number;
+  /** sha256 of the normalized text (`contentHash`, KS-1a). */
+  contentSha256?: string;
+  /** Canonical artifact with the same text in the tree; this artifact then has no chunks (design §8.4). */
+  duplicateOf?: string;
+  extractedAt?: string;
+}
+
+/** A passage of extracted text (design §8.3). Named `TextChunk` to avoid clashing with KS-1a's `Chunk`. */
+export interface TextChunk {
+  id: string;
+  artifactId: string;
+  workspaceId: string;
+  seq: number;
+  headingPath: string;
+  locator?: string;
+  text: string;
+  charStart: number;
+  charEnd: number;
+  tokenEstimate: number;
+  /** Optional on insert (DB default 0; a trigger copies the artifact's flag). */
+  uploadDerived?: boolean;
+}
+
+/** A finding's cited evidence with an optional verified quote (design §7.3, `evidence_refs`). */
+export interface FindingEvidence {
+  findingId: string;
+  seq: number;
+  artifactId: string;
+  /** Locator hint only; re-resolved by substring search after re-extraction. */
+  chunkId?: string;
+  quote?: string;
+  charStart?: number;
+  charEnd?: number;
+}
+
+export type ObservationKind = 'create' | 'confirm' | 'replace' | 'retract';
+/** `pending` until the task ends; `applied` / `rejected` by its outcome; `superseded` when not re-submitted in the final round. */
+export type ObservationStatus = 'pending' | 'applied' | 'rejected' | 'superseded';
+
+/** One run's statement about a fact (design §7.2). */
+export interface FactObservation {
+  id: string;
+  workspaceId: string;
+  lineageId: string;
+  /** The fact the observation is about (`replace`: the new version). */
+  findingId: string;
+  /** `replace`: the version it replaces. */
+  priorFindingId?: string;
+  kind: ObservationKind;
+  /** Research run. */
+  runId?: string;
+  taskId?: string;
+  agentRunId?: string;
+  taskRound?: number;
+  /** Artifact ids (confirm / retract must cite ≥ 1 captured by the same task). */
+  evidence: string[];
+  reason?: string;
+  status: ObservationStatus;
+  createdAt: string;
+  appliedAt?: string;
+}
+
+/** Items with their own scope rows; typed records use their `workspace_id` (design §7.1). */
+export type ScopedItemKind = 'fact' | 'artifact';
+export type ScopeSource = 'home' | 'agent' | 'user';
+
+/** "Item applies to node" label (design §7.1). */
+export interface ItemScope {
+  itemKind: ScopedItemKind;
+  itemId: string;
+  workspaceId: string;
+  source: ScopeSource;
+}
+
+/** A named thing in one business tree (design §7.4). Unique on (root, kind, nameKey). */
+export interface Entity {
+  id: string;
+  rootWorkspaceId: string;
+  /** Home node of the record that created it. */
+  workspaceId: string;
+  kind: EntityKind;
+  /** Display name. */
+  name: string;
+  /** `entityNameKey(name)` (titleKey: trimmed, lowercased, whitespace collapsed). */
+  nameKey: string;
+  /** Other display names (merged losers keep their name here). */
+  aliases: string[];
+  /** Set on a merged loser: the survivor. */
+  mergedIntoId?: string;
+  createdByRun?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Closed list of relation types (design §7.4). */
+export type RelationType = 'competes_with' | 'offers' | 'has_flow' | 'targets' | 'experiences' | 'causes' | 'addresses' | 'part_of';
+/** Kind of record that asserts an edge; the edge is live only while that record is usable. */
+export type RelationSourceKind = 'fact' | 'competitor' | 'persona' | 'symptom' | 'hypothesis' | 'artifact';
+
+export interface Relation {
+  id: string;
+  rootWorkspaceId: string;
+  fromEntityId: string;
+  type: RelationType;
+  toEntityId: string;
+  sourceKind: RelationSourceKind;
+  sourceId: string;
+  createdAt: string;
+}
+
+export type MergeSuggestionStatus = 'open' | 'accepted' | 'rejected';
+
+export interface EntityMergeSuggestion {
+  id: string;
+  rootWorkspaceId: string;
+  entityId: string;
+  candidateId: string;
+  score: number;
+  status: MergeSuggestionStatus;
+  createdAt: string;
+  decidedAt?: string;
+  actor?: string;
+}
+
+/** Read tools (design §9) plus `prompt_context` (assembled briefings, design §11). */
+export type RetrievalTool = 'search' | 'get_card' | 'expand' | 'read_artifact' | 'list_changes' | 'read_workspace' | 'prompt_context';
+/** Who retrieved: an agent role, or the user through the API (design §17). */
+export type RetrievalRole = Role | 'user';
+/** One returned item, in response order. `kind`: fact, passage, chunk, artifact, entity, record, card, ... */
+export type RetrievalResultRef = { id: string; kind: string };
+
+/** Append-only log of every retrieval (design §13). */
+export interface RetrievalEvent {
+  id: string;
+  workspaceId: string;
+  rootWorkspaceId: string;
+  agentRunId?: string;
+  taskId?: string;
+  role: RetrievalRole;
+  provider?: string;
+  model?: string;
+  promptVersion?: string;
+  tool: RetrievalTool;
+  /** Redacted query text (JSON of the input for non-search tools is fine). */
+  query: string;
+  /** `node` | `tree`, optionally `node:<workspaceId>` when narrowed with `workspace_id`. */
+  scope: string;
+  resultIds: RetrievalResultRef[];
+  resultCount: number;
+  tokensReturned: number;
+  truncated: boolean;
+  relaxed: boolean;
+  latencyMs: number;
+  /** The response contained upload-derived text: the run is upload-exposed (design §12). */
+  uploadDerived: boolean;
+  createdAt: string;
+}
+
+/** A retrieved item that a later save of the same run cited (design §13 "use linkage"). */
+export interface RetrievalUse {
+  retrievalEventId: string;
+  itemId: string;
+  /** finding, recommendation, persona, competitor, hypothesis, observation, ... */
+  usedByKind: string;
+  usedById: string;
   createdAt: string;
 }

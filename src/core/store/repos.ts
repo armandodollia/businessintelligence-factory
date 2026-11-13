@@ -22,6 +22,20 @@ import type {
   UserRequest,
   Workspace,
 } from '../types.js';
+// Knowledge store KS-0 (migration 18): see the delimited block at the end of this file.
+import type {
+  ArtifactCapture,
+  ArtifactText,
+  Entity,
+  EntityMergeSuggestion,
+  FactObservation,
+  FindingEvidence,
+  ItemScope,
+  Relation,
+  RetrievalEvent,
+  RetrievalUse,
+  TextChunk,
+} from '../types.js';
 
 // ---------------------------------------------------------------------------
 // ids
@@ -217,6 +231,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', kind: 'text', path: 'text', sha256: 'text', mime: 'text',
       sourceUrl: 'text', title: 'text', flow: 'text', step: 'int', note: 'text', capturedAt: 'text',
+      description: 'text', urlKey: 'text', uploadDerived: 'bool', // KS-0 (migration 18)
     },
   } satisfies TableSpec<Artifact>,
   findings: {
@@ -226,6 +241,9 @@ export const specs = {
       id: 'text', workspaceId: 'text', runId: 'text', taskId: 'text', subject: 'text', claim: 'text',
       criteria: 'json', evidence: 'json', status: 'text', createdAt: 'text', includeInSynthesis: 'bool',
       taskRound: 'int',
+      // KS-0 (migration 18)
+      lineageId: 'text', version: 'int', replacesId: 'text', lifecycle: 'text', entityId: 'text', firstSeenAt: 'text',
+      lastConfirmedAt: 'text', confirmCount: 'int', ttlDays: 'int', uploadDerived: 'bool', lineageConflict: 'bool',
     },
   } satisfies TableSpec<Finding>,
   tasks: {
@@ -300,6 +318,7 @@ export const specs = {
       id: 'text', workspaceId: 'text', slug: 'text', segment: 'text', profile: 'json',
       agentMdPath: 'text', version: 'int', audience: 'text', taskId: 'text', status: 'text', taskRound: 'int',
       includeOverride: 'bool',
+      entityId: 'text', // KS-0 (migration 18)
     },
   } satisfies TableSpec<Persona>,
   symptoms: {
@@ -308,6 +327,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', kind: 'text', title: 'text', detail: 'text', criteria: 'json',
       evidence: 'json',
+      entityId: 'text', // KS-0 (migration 18)
     },
   } satisfies TableSpec<Symptom>,
   schedules: {
@@ -364,6 +384,7 @@ export const specs = {
       id: 'text', workspaceId: 'text', name: 'text', site: 'text', threat: 'int', directness: 'int', comparison: 'json',
       evidence: 'json', taskId: 'text', createdAt: 'text', updatedAt: 'text', status: 'text', taskRound: 'int',
       includeOverride: 'bool',
+      entityId: 'text', // KS-0 (migration 18)
     },
   } satisfies TableSpec<Competitor>,
   symptomHypotheses: {
@@ -372,6 +393,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', symptomId: 'text', hypothesis: 'text', confidence: 'real', evidence: 'json',
       taskId: 'text', createdAt: 'text', status: 'text', taskRound: 'int', includeOverride: 'bool',
+      entityId: 'text', // KS-0 (migration 18)
     },
   } satisfies TableSpec<SymptomHypothesis>,
 } as const;
@@ -402,3 +424,197 @@ export function createRepos(db: DatabaseSync) {
 }
 
 export type Repos = ReturnType<typeof createRepos>;
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-0 (migration 18): repositories of the knowledge-store tables. Kept out of
+// `createRepos` (so `Store` and parallel branches are untouched); `knowledgeRepos(store)` returns
+// one set per database connection. Tables with a composite primary key get a `LinkRepo`
+// (insert / list / delete by filter; no get / update by id).
+
+/** Spec of a table with a composite primary key. Only scalar column types. */
+export interface LinkSpec<T> {
+  table: string;
+  keys: ReadonlyArray<keyof T & string>;
+  fields: { [P in keyof T]-?: FieldSpec };
+}
+
+export class LinkRepo<T> {
+  private readonly cols: Record<string, string>;
+  private readonly inner: Repo<T, keyof T & string>;
+
+  constructor(
+    private readonly db: DatabaseSync,
+    private readonly spec: LinkSpec<T>,
+  ) {
+    for (const [f, t] of Object.entries(spec.fields) as [string, FieldSpec][]) {
+      if (!SCALAR.has(colType(t))) throw new Error(`${spec.table}: LinkRepo supports scalar columns only ('${f}')`);
+    }
+    this.cols = Object.fromEntries(Object.keys(spec.fields).map((f) => [f, toSnake(f)]));
+    this.inner = new Repo<T, keyof T & string>(db, { table: spec.table, key: spec.keys[0]!, fields: spec.fields });
+  }
+
+  private encode(field: string, v: unknown): SQLInputValue {
+    if (v === undefined || v === null) return null;
+    return colType(this.spec.fields[field as keyof T] as FieldSpec) === 'bool' ? (v ? 1 : 0) : (v as SQLInputValue);
+  }
+
+  private where(filter: Record<string, unknown>): { sql: string; params: SQLInputValue[] } {
+    const where: string[] = [];
+    const params: SQLInputValue[] = [];
+    for (const [f, v] of Object.entries(filter)) {
+      if (v === undefined) continue;
+      if (!Object.hasOwn(this.cols, f)) throw new Error(`${this.spec.table}: cannot filter on field '${f}'`);
+      if (v === null) where.push(`${this.cols[f]} IS NULL`);
+      else {
+        where.push(`${this.cols[f]} = ?`);
+        params.push(this.encode(f, v));
+      }
+    }
+    return { sql: where.length ? ` WHERE ${where.join(' AND ')}` : '', params };
+  }
+
+  /** Inserts a row; throws on a duplicate key. */
+  insert(row: T): T {
+    return this.inner.insert(row);
+  }
+
+  /** Inserts a row unless its key exists; true when inserted. */
+  insertIgnore(row: T): boolean {
+    const r = row as Record<string, unknown>;
+    const fields = Object.keys(this.spec.fields).filter((f) => r[f] !== undefined);
+    const sql = `INSERT OR IGNORE INTO ${this.spec.table} (${fields.map((f) => this.cols[f]).join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`;
+    return Number(this.db.prepare(sql).run(...fields.map((f) => this.encode(f, r[f]))).changes) > 0;
+  }
+
+  /** Rows in insertion order, filtered by equality. */
+  list(filter: Filter<T> = {}): T[] {
+    return this.inner.list(filter);
+  }
+
+  /** Deletes the rows matching `filter` (at least one field required); returns the count. */
+  delete(filter: Filter<T>): number {
+    const w = this.where(filter as Record<string, unknown>);
+    if (!w.params.length && !w.sql) throw new Error(`${this.spec.table}: delete needs a filter`);
+    return Number(this.db.prepare(`DELETE FROM ${this.spec.table}${w.sql}`).run(...w.params).changes);
+  }
+}
+
+export const knowledgeSpecs = {
+  artifactCaptures: {
+    table: 'artifact_captures',
+    key: 'id',
+    fields: {
+      id: 'text', artifactId: 'text', workspaceId: 'text', agentRunId: 'text', taskId: 'text', runId: 'text', sourceUrl: 'text',
+      urlKey: 'text', title: 'text', flow: 'text', step: 'int', note: 'text', description: 'text', entityId: 'text',
+      capturedAt: 'text',
+    },
+  } satisfies TableSpec<ArtifactCapture>,
+  artifactTexts: {
+    table: 'artifact_texts',
+    key: 'artifactId',
+    fields: {
+      artifactId: 'text', workspaceId: 'text', status: 'text', extractor: 'text', error: 'text', charCount: 'int',
+      tokenEstimate: 'int', contentSha256: 'text', duplicateOf: 'text', extractedAt: 'text',
+    },
+  } satisfies TableSpec<ArtifactText>,
+  chunks: {
+    table: 'chunks',
+    key: 'id',
+    fields: {
+      id: 'text', artifactId: 'text', workspaceId: 'text', seq: 'int', headingPath: 'text', locator: 'text', text: 'text',
+      charStart: 'int', charEnd: 'int', tokenEstimate: 'int', uploadDerived: 'bool',
+    },
+  } satisfies TableSpec<TextChunk>,
+  findingEvidence: {
+    table: 'finding_evidence',
+    keys: ['findingId', 'seq'],
+    fields: {
+      findingId: 'text', seq: 'int', artifactId: 'text', chunkId: 'text', quote: 'text', charStart: 'int', charEnd: 'int',
+    },
+  } satisfies LinkSpec<FindingEvidence>,
+  factObservations: {
+    table: 'fact_observations',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', lineageId: 'text', findingId: 'text', priorFindingId: 'text', kind: 'text', runId: 'text',
+      taskId: 'text', agentRunId: 'text', taskRound: 'int', evidence: 'json', reason: 'text', status: 'text', createdAt: 'text',
+      appliedAt: 'text',
+    },
+  } satisfies TableSpec<FactObservation>,
+  itemScopes: {
+    table: 'item_scopes',
+    keys: ['itemKind', 'itemId', 'workspaceId'],
+    fields: { itemKind: 'text', itemId: 'text', workspaceId: 'text', source: 'text' },
+  } satisfies LinkSpec<ItemScope>,
+  entities: {
+    table: 'entities',
+    key: 'id',
+    fields: {
+      id: 'text', rootWorkspaceId: 'text', workspaceId: 'text', kind: 'text', name: 'text', nameKey: 'text', aliases: 'json',
+      mergedIntoId: 'text', createdByRun: 'text', createdAt: 'text', updatedAt: 'text',
+    },
+  } satisfies TableSpec<Entity>,
+  relations: {
+    table: 'relations',
+    key: 'id',
+    fields: {
+      id: 'text', rootWorkspaceId: 'text', fromEntityId: 'text', type: 'text', toEntityId: 'text', sourceKind: 'text',
+      sourceId: 'text', createdAt: 'text',
+    },
+  } satisfies TableSpec<Relation>,
+  entityMergeSuggestions: {
+    table: 'entity_merge_suggestions',
+    key: 'id',
+    fields: {
+      id: 'text', rootWorkspaceId: 'text', entityId: 'text', candidateId: 'text', score: 'real', status: 'text',
+      createdAt: 'text', decidedAt: 'text', actor: 'text',
+    },
+  } satisfies TableSpec<EntityMergeSuggestion>,
+  retrievalEvents: {
+    table: 'retrieval_events',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', rootWorkspaceId: 'text', agentRunId: 'text', taskId: 'text', role: 'text',
+      provider: 'text', model: 'text', promptVersion: 'text', tool: 'text', query: 'text', scope: 'text', resultIds: 'json',
+      resultCount: 'int', tokensReturned: 'int', truncated: 'bool', relaxed: 'bool', latencyMs: 'int', uploadDerived: 'bool',
+      createdAt: 'text',
+    },
+  } satisfies TableSpec<RetrievalEvent>,
+  retrievalUses: {
+    table: 'retrieval_uses',
+    keys: ['retrievalEventId', 'itemId', 'usedById'],
+    fields: { retrievalEventId: 'text', itemId: 'text', usedByKind: 'text', usedById: 'text', createdAt: 'text' },
+  } satisfies LinkSpec<RetrievalUse>,
+} as const;
+
+function createKnowledgeRepos(db: DatabaseSync) {
+  return {
+    artifactCaptures: new Repo<ArtifactCapture, 'id'>(db, knowledgeSpecs.artifactCaptures),
+    artifactTexts: new Repo<ArtifactText, 'artifactId'>(db, knowledgeSpecs.artifactTexts),
+    chunks: new Repo<TextChunk, 'id'>(db, knowledgeSpecs.chunks),
+    findingEvidence: new LinkRepo<FindingEvidence>(db, knowledgeSpecs.findingEvidence),
+    factObservations: new Repo<FactObservation, 'id'>(db, knowledgeSpecs.factObservations),
+    itemScopes: new LinkRepo<ItemScope>(db, knowledgeSpecs.itemScopes),
+    entities: new Repo<Entity, 'id'>(db, knowledgeSpecs.entities),
+    relations: new Repo<Relation, 'id'>(db, knowledgeSpecs.relations),
+    entityMergeSuggestions: new Repo<EntityMergeSuggestion, 'id'>(db, knowledgeSpecs.entityMergeSuggestions),
+    /** Append-only (triggers refuse UPDATE / DELETE). */
+    retrievalEvents: new Repo<RetrievalEvent, 'id'>(db, knowledgeSpecs.retrievalEvents),
+    retrievalUses: new LinkRepo<RetrievalUse>(db, knowledgeSpecs.retrievalUses),
+  };
+}
+
+export type KnowledgeRepos = ReturnType<typeof createKnowledgeRepos>;
+
+const knowledgeRepoCache = new WeakMap<DatabaseSync, KnowledgeRepos>();
+
+/** The knowledge-store repositories of a store (one set per database connection). */
+export function knowledgeRepos(store: { readonly db: DatabaseSync }): KnowledgeRepos {
+  let r = knowledgeRepoCache.get(store.db);
+  if (!r) {
+    r = createKnowledgeRepos(store.db);
+    knowledgeRepoCache.set(store.db, r);
+  }
+  return r;
+}
+// --- end knowledge store KS-0 repositories -------------------------------------------------------

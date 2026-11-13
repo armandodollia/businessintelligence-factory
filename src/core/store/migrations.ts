@@ -618,4 +618,368 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX bus_events_ws ON bus_events (workspace_id, seq);
   CREATE INDEX bus_events_created ON bus_events (created_at);
   `,
+  // 18: knowledge store — KS-0 foundation (docs/superpowers/specs/2026-11-13-knowledge-store-design.md
+  // §15, DDL in the build plan): captures, extracted texts and chunks of artifacts; living-fact
+  // columns on findings (lineage, version, lifecycle, freshness), quoted evidence and per-run
+  // observations; item scope labels; per-tree entities, relations and merge suggestions; retrieval
+  // log and use linkage; FTS5 indexes kept in sync by triggers. Invariant triggers: every finding
+  // has a lineage and a `home` scope row from its insert, every artifact a `home` scope row and an
+  // `artifact_texts` row (status `pending`); `upload_derived` (§12) is materialized and sticky —
+  // set from kind `upload`, profile-linked uploads, cited evidence and earlier lineage versions,
+  // never reset to 0. SQL backfills here; the rest (entities, url keys, profile-linked uploads of
+  // existing rows) is `src/core/knowledge/backfill.ts`, run at startup.
+  `
+  ALTER TABLE artifacts ADD COLUMN description TEXT;
+  ALTER TABLE artifacts ADD COLUMN url_key TEXT;
+  ALTER TABLE artifacts ADD COLUMN upload_derived INTEGER NOT NULL DEFAULT 0;
+  UPDATE artifacts SET upload_derived = 1 WHERE kind = 'upload';
+  CREATE INDEX artifacts_ws_urlkey ON artifacts (workspace_id, url_key);
+
+  CREATE TABLE artifact_captures (
+    id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    agent_run_id TEXT,
+    task_id TEXT,
+    run_id TEXT,
+    source_url TEXT,
+    url_key TEXT,
+    title TEXT,
+    flow TEXT,
+    step INTEGER,
+    note TEXT,
+    description TEXT,
+    entity_id TEXT,
+    captured_at TEXT NOT NULL
+  );
+  CREATE INDEX artifact_captures_art ON artifact_captures (artifact_id);
+  CREATE INDEX artifact_captures_url ON artifact_captures (workspace_id, url_key, captured_at);
+  CREATE INDEX artifact_captures_run ON artifact_captures (run_id);
+  INSERT INTO artifact_captures (id, artifact_id, workspace_id, source_url, title, flow, step, note, captured_at)
+    SELECT CASE WHEN id LIKE 'art!_%' ESCAPE '!' THEN 'cap_' || substr(id, 5) ELSE 'cap_' || id END,
+      id, workspace_id, source_url, title, flow, step, note, captured_at
+    FROM artifacts ORDER BY rowid;
+
+  CREATE TABLE artifact_texts (
+    artifact_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    extractor TEXT,
+    error TEXT,
+    char_count INTEGER NOT NULL DEFAULT 0,
+    token_estimate INTEGER NOT NULL DEFAULT 0,
+    content_sha256 TEXT,
+    duplicate_of TEXT,
+    extracted_at TEXT
+  );
+  CREATE INDEX artifact_texts_hash ON artifact_texts (content_sha256);
+  CREATE INDEX artifact_texts_status ON artifact_texts (status);
+  INSERT INTO artifact_texts (artifact_id, workspace_id, status) SELECT id, workspace_id, 'pending' FROM artifacts ORDER BY rowid;
+
+  CREATE TABLE chunks (
+    id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    heading_path TEXT NOT NULL DEFAULT '',
+    locator TEXT,
+    text TEXT NOT NULL,
+    char_start INTEGER NOT NULL,
+    char_end INTEGER NOT NULL,
+    token_estimate INTEGER NOT NULL,
+    upload_derived INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE UNIQUE INDEX chunks_art_seq ON chunks (artifact_id, seq);
+
+  ALTER TABLE findings ADD COLUMN lineage_id TEXT;
+  ALTER TABLE findings ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE findings ADD COLUMN replaces_id TEXT;
+  ALTER TABLE findings ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'current';
+  ALTER TABLE findings ADD COLUMN entity_id TEXT;
+  ALTER TABLE findings ADD COLUMN first_seen_at TEXT;
+  ALTER TABLE findings ADD COLUMN last_confirmed_at TEXT;
+  ALTER TABLE findings ADD COLUMN confirm_count INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE findings ADD COLUMN ttl_days INTEGER;
+  ALTER TABLE findings ADD COLUMN upload_derived INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE findings ADD COLUMN lineage_conflict INTEGER NOT NULL DEFAULT 0;
+  UPDATE findings SET lineage_id = id, first_seen_at = created_at,
+    last_confirmed_at = CASE WHEN status = 'verified' THEN created_at END;
+  CREATE INDEX findings_lineage ON findings (lineage_id);
+  CREATE INDEX findings_entity ON findings (entity_id, lifecycle);
+
+  CREATE TABLE finding_evidence (
+    finding_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    artifact_id TEXT NOT NULL,
+    chunk_id TEXT,
+    quote TEXT,
+    char_start INTEGER,
+    char_end INTEGER,
+    PRIMARY KEY (finding_id, seq)
+  );
+  CREATE INDEX finding_evidence_art ON finding_evidence (artifact_id);
+
+  CREATE TABLE fact_observations (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    prior_finding_id TEXT,
+    kind TEXT NOT NULL,
+    run_id TEXT,
+    task_id TEXT,
+    agent_run_id TEXT,
+    task_round INTEGER,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    reason TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    applied_at TEXT
+  );
+  CREATE INDEX fact_observations_task ON fact_observations (task_id);
+  CREATE INDEX fact_observations_lineage ON fact_observations (lineage_id);
+  CREATE INDEX fact_observations_run ON fact_observations (run_id);
+
+  CREATE TABLE item_scopes (
+    item_kind TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'home',
+    PRIMARY KEY (item_kind, item_id, workspace_id)
+  );
+  CREATE INDEX item_scopes_ws ON item_scopes (workspace_id, item_kind);
+  INSERT INTO item_scopes (item_kind, item_id, workspace_id) SELECT 'fact', id, workspace_id FROM findings ORDER BY rowid;
+  INSERT INTO item_scopes (item_kind, item_id, workspace_id) SELECT 'artifact', id, workspace_id FROM artifacts ORDER BY rowid;
+
+  CREATE TABLE entities (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '[]',
+    merged_into_id TEXT,
+    created_by_run TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX entities_root_kind_key ON entities (root_workspace_id, kind, name_key);
+  ALTER TABLE competitors ADD COLUMN entity_id TEXT;
+  ALTER TABLE personas ADD COLUMN entity_id TEXT;
+  ALTER TABLE symptoms ADD COLUMN entity_id TEXT;
+  ALTER TABLE symptom_hypotheses ADD COLUMN entity_id TEXT;
+
+  CREATE TABLE relations (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    from_entity_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    to_entity_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX relations_uniq ON relations (from_entity_id, type, to_entity_id, source_kind, source_id);
+  CREATE INDEX relations_to ON relations (to_entity_id, type);
+
+  CREATE TABLE entity_merge_suggestions (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    score REAL NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    actor TEXT
+  );
+  CREATE INDEX entity_merge_suggestions_root ON entity_merge_suggestions (root_workspace_id, status);
+
+  CREATE TABLE retrieval_events (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    agent_run_id TEXT,
+    task_id TEXT,
+    role TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    prompt_version TEXT,
+    tool TEXT NOT NULL,
+    query TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    result_ids TEXT NOT NULL,
+    result_count INTEGER NOT NULL,
+    tokens_returned INTEGER NOT NULL,
+    truncated INTEGER NOT NULL DEFAULT 0,
+    relaxed INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL,
+    upload_derived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX retrieval_events_run ON retrieval_events (agent_run_id);
+  CREATE INDEX retrieval_events_ws ON retrieval_events (workspace_id, created_at);
+  CREATE TRIGGER retrieval_events_no_update BEFORE UPDATE ON retrieval_events
+    BEGIN SELECT RAISE(ABORT, 'retrieval_events is append-only'); END;
+  CREATE TRIGGER retrieval_events_no_delete BEFORE DELETE ON retrieval_events
+    BEGIN SELECT RAISE(ABORT, 'retrieval_events is append-only'); END;
+
+  CREATE TABLE retrieval_uses (
+    retrieval_event_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    used_by_kind TEXT NOT NULL,
+    used_by_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (retrieval_event_id, item_id, used_by_id)
+  );
+
+  -- Full-text indexes (external content; rowids of the content tables). Never VACUUM the database
+  -- without a 'rebuild' of these afterwards: VACUUM may renumber rowids of tables without an
+  -- INTEGER PRIMARY KEY.
+  CREATE VIRTUAL TABLE findings_fts USING fts5(subject, claim, content='findings', content_rowid='rowid',
+    tokenize='porter unicode61 remove_diacritics 2');
+  CREATE VIRTUAL TABLE chunks_fts USING fts5(heading_path, text, content='chunks', content_rowid='rowid',
+    tokenize='porter unicode61 remove_diacritics 2');
+  CREATE VIRTUAL TABLE artifacts_fts USING fts5(title, description, note, source_url, flow, content='artifacts',
+    content_rowid='rowid', tokenize='porter unicode61 remove_diacritics 2');
+  CREATE VIRTUAL TABLE entities_fts USING fts5(name, aliases, content='entities', content_rowid='rowid', tokenize='trigram');
+
+  CREATE TRIGGER findings_fts_ai AFTER INSERT ON findings BEGIN
+    INSERT INTO findings_fts (rowid, subject, claim) VALUES (new.rowid, new.subject, new.claim);
+  END;
+  CREATE TRIGGER findings_fts_ad AFTER DELETE ON findings BEGIN
+    INSERT INTO findings_fts (findings_fts, rowid, subject, claim) VALUES ('delete', old.rowid, old.subject, old.claim);
+  END;
+  CREATE TRIGGER findings_fts_au AFTER UPDATE OF subject, claim ON findings BEGIN
+    INSERT INTO findings_fts (findings_fts, rowid, subject, claim) VALUES ('delete', old.rowid, old.subject, old.claim);
+    INSERT INTO findings_fts (rowid, subject, claim) VALUES (new.rowid, new.subject, new.claim);
+  END;
+
+  CREATE TRIGGER chunks_fts_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts (rowid, heading_path, text) VALUES (new.rowid, new.heading_path, new.text);
+  END;
+  CREATE TRIGGER chunks_fts_ad AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts (chunks_fts, rowid, heading_path, text) VALUES ('delete', old.rowid, old.heading_path, old.text);
+  END;
+  CREATE TRIGGER chunks_fts_au AFTER UPDATE OF heading_path, text ON chunks BEGIN
+    INSERT INTO chunks_fts (chunks_fts, rowid, heading_path, text) VALUES ('delete', old.rowid, old.heading_path, old.text);
+    INSERT INTO chunks_fts (rowid, heading_path, text) VALUES (new.rowid, new.heading_path, new.text);
+  END;
+
+  CREATE TRIGGER artifacts_fts_ai AFTER INSERT ON artifacts BEGIN
+    INSERT INTO artifacts_fts (rowid, title, description, note, source_url, flow)
+      VALUES (new.rowid, new.title, new.description, new.note, new.source_url, new.flow);
+  END;
+  CREATE TRIGGER artifacts_fts_ad AFTER DELETE ON artifacts BEGIN
+    INSERT INTO artifacts_fts (artifacts_fts, rowid, title, description, note, source_url, flow)
+      VALUES ('delete', old.rowid, old.title, old.description, old.note, old.source_url, old.flow);
+  END;
+  CREATE TRIGGER artifacts_fts_au AFTER UPDATE OF title, description, note, source_url, flow ON artifacts BEGIN
+    INSERT INTO artifacts_fts (artifacts_fts, rowid, title, description, note, source_url, flow)
+      VALUES ('delete', old.rowid, old.title, old.description, old.note, old.source_url, old.flow);
+    INSERT INTO artifacts_fts (rowid, title, description, note, source_url, flow)
+      VALUES (new.rowid, new.title, new.description, new.note, new.source_url, new.flow);
+  END;
+
+  CREATE TRIGGER entities_fts_ai AFTER INSERT ON entities BEGIN
+    INSERT INTO entities_fts (rowid, name, aliases) VALUES (new.rowid, new.name, new.aliases);
+  END;
+  CREATE TRIGGER entities_fts_ad AFTER DELETE ON entities BEGIN
+    INSERT INTO entities_fts (entities_fts, rowid, name, aliases) VALUES ('delete', old.rowid, old.name, old.aliases);
+  END;
+  CREATE TRIGGER entities_fts_au AFTER UPDATE OF name, aliases ON entities BEGIN
+    INSERT INTO entities_fts (entities_fts, rowid, name, aliases) VALUES ('delete', old.rowid, old.name, old.aliases);
+    INSERT INTO entities_fts (rowid, name, aliases) VALUES (new.rowid, new.name, new.aliases);
+  END;
+
+  INSERT INTO findings_fts (findings_fts) VALUES ('rebuild');
+  INSERT INTO artifacts_fts (artifacts_fts) VALUES ('rebuild');
+
+  -- Invariants for rows written by any code path.
+  CREATE TRIGGER findings_ks_insert AFTER INSERT ON findings BEGIN
+    UPDATE findings SET lineage_id = COALESCE(lineage_id, id), first_seen_at = COALESCE(first_seen_at, created_at)
+      WHERE rowid = new.rowid AND (lineage_id IS NULL OR first_seen_at IS NULL);
+    INSERT OR IGNORE INTO item_scopes (item_kind, item_id, workspace_id, source) VALUES ('fact', new.id, new.workspace_id, 'home');
+    UPDATE findings SET upload_derived = 1
+      WHERE rowid = new.rowid AND upload_derived = 0 AND (
+        EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+                JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1)
+        OR EXISTS (SELECT 1 FROM findings p WHERE p.lineage_id = new.lineage_id AND p.version < new.version AND p.upload_derived = 1)
+      );
+  END;
+  CREATE TRIGGER artifacts_ks_insert AFTER INSERT ON artifacts BEGIN
+    INSERT OR IGNORE INTO item_scopes (item_kind, item_id, workspace_id, source) VALUES ('artifact', new.id, new.workspace_id, 'home');
+    INSERT OR IGNORE INTO artifact_texts (artifact_id, workspace_id, status) VALUES (new.id, new.workspace_id, 'pending');
+    UPDATE artifacts SET upload_derived = 1 WHERE rowid = new.rowid AND new.kind = 'upload' AND upload_derived = 0;
+  END;
+
+  -- upload_derived: sticky (never reset) and propagated.
+  CREATE TRIGGER artifacts_upload_sticky BEFORE UPDATE OF upload_derived ON artifacts
+    WHEN old.upload_derived = 1 AND new.upload_derived IS NOT 1
+    BEGIN SELECT RAISE(ABORT, 'upload_derived is sticky'); END;
+  CREATE TRIGGER findings_upload_sticky BEFORE UPDATE OF upload_derived ON findings
+    WHEN old.upload_derived = 1 AND new.upload_derived IS NOT 1
+    BEGIN SELECT RAISE(ABORT, 'upload_derived is sticky'); END;
+  CREATE TRIGGER chunks_upload_sticky BEFORE UPDATE OF upload_derived ON chunks
+    WHEN old.upload_derived = 1 AND new.upload_derived IS NOT 1
+    BEGIN SELECT RAISE(ABORT, 'upload_derived is sticky'); END;
+  CREATE TRIGGER artifacts_upload_cascade AFTER UPDATE OF upload_derived ON artifacts
+    WHEN new.upload_derived = 1 AND old.upload_derived = 0
+  BEGIN
+    UPDATE chunks SET upload_derived = 1 WHERE artifact_id = new.id AND upload_derived = 0;
+    UPDATE findings SET upload_derived = 1
+      WHERE upload_derived = 0 AND (
+        (instr(findings.evidence, new.id) > 0 AND EXISTS (
+          SELECT 1 FROM json_each(CASE WHEN json_valid(findings.evidence) THEN findings.evidence ELSE '[]' END) j WHERE j.value = new.id))
+        OR EXISTS (SELECT 1 FROM finding_evidence fe WHERE fe.finding_id = findings.id AND fe.artifact_id = new.id)
+      );
+  END;
+  CREATE TRIGGER findings_upload_evidence AFTER UPDATE OF evidence ON findings
+    WHEN new.upload_derived = 0
+  BEGIN
+    UPDATE findings SET upload_derived = 1
+      WHERE rowid = new.rowid AND EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
+  END;
+  CREATE TRIGGER findings_upload_lineage AFTER UPDATE OF upload_derived ON findings
+    WHEN new.upload_derived = 1 AND old.upload_derived = 0
+  BEGIN
+    UPDATE findings SET upload_derived = 1 WHERE lineage_id = new.lineage_id AND version > new.version AND upload_derived = 0;
+  END;
+  CREATE TRIGGER finding_evidence_upload AFTER INSERT ON finding_evidence BEGIN
+    UPDATE findings SET upload_derived = 1
+      WHERE id = new.finding_id AND upload_derived = 0
+        AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = new.artifact_id AND a.upload_derived = 1);
+  END;
+  CREATE TRIGGER fact_observations_upload AFTER INSERT ON fact_observations
+    WHEN new.kind = 'confirm'
+  BEGIN
+    UPDATE findings SET upload_derived = 1
+      WHERE id = new.finding_id AND upload_derived = 0 AND EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(new.evidence) THEN new.evidence ELSE '[]' END) j
+        JOIN artifacts a ON a.id = j.value WHERE a.upload_derived = 1);
+  END;
+  CREATE TRIGGER chunks_upload_insert AFTER INSERT ON chunks
+    WHEN new.upload_derived = 0
+  BEGIN
+    UPDATE chunks SET upload_derived = 1
+      WHERE rowid = new.rowid AND EXISTS (SELECT 1 FROM artifacts a WHERE a.id = new.artifact_id AND a.upload_derived = 1);
+  END;
+  CREATE TRIGGER profiles_uploads_insert AFTER INSERT ON profiles BEGIN
+    UPDATE artifacts SET upload_derived = 1
+      WHERE upload_derived = 0 AND id IN (SELECT value FROM json_each(
+        CASE WHEN json_valid(new.data)
+          THEN (CASE WHEN json_type(new.data, '$.uploads') = 'array' THEN json_extract(new.data, '$.uploads') ELSE '[]' END)
+          ELSE '[]' END));
+  END;
+  CREATE TRIGGER profiles_uploads_update AFTER UPDATE OF data ON profiles BEGIN
+    UPDATE artifacts SET upload_derived = 1
+      WHERE upload_derived = 0 AND id IN (SELECT value FROM json_each(
+        CASE WHEN json_valid(new.data)
+          THEN (CASE WHEN json_type(new.data, '$.uploads') = 'array' THEN json_extract(new.data, '$.uploads') ELSE '[]' END)
+          ELSE '[]' END));
+  END;
+  `,
 ];

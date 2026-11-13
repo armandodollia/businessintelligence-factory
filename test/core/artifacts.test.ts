@@ -40,7 +40,7 @@ describe('ArtifactStore', () => {
     expect(a.path).toBe(join('ws_1', 'artifacts', a.sha256.slice(0, 2), `${a.sha256}.png`));
     expect(existsSync(join(dir, 'data', a.path))).toBe(true);
     const got = artifacts.read(a.id);
-    expect(got.artifact).toEqual(a);
+    expect(got.artifact).toEqual({ ...a, uploadDerived: false }); // migration 18 default
     expect(Buffer.compare(got.bytes, Buffer.from(bytes))).toBe(0);
 
     const t = artifacts.save({ workspaceId: 'ws_1', kind: 'text', bytes: 'héllo', mime: 'text/plain' });
