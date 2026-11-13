@@ -21,7 +21,7 @@ codex-cli 0.167.2).
 | Check | Result | Detail |
 |---|---|---|
 | knowledge/codex (gpt-6.1-sol) | **PASS**, 7 of 7 steps | 72.7 s, 16 bif tool calls, 9 `retrieval_events`, `promptStoreGaps` `[]`, $0.1749; step 6 at `max_tokens` 250: 6 pages, header on 1, 1 piece cut, 0 placeholders, 8 of 8 passages whole, 0 characters never served; step 7: quote rejected once, then saved "Enterprise plan has custom pricing" |
-| knowledge/claude (haiku) | steps 1–6 PASS, step 7 **not exercised** (reported FAIL) | 23.6 s, 15 calls, 10 `retrieval_events`, `promptStoreGaps` `[]`, $0.0140; step 6 identical to codex (8 of 8 whole, 0 characters never served). Haiku read the page first and saved the true Enterprise claim directly, without trying the colleague's quote, so no quote was rejected — the same agent choice recorded under "Found and fixed while re-running" below. The harness behaved correctly. |
+| knowledge/claude (haiku) | **PASS**, steps 1–6; step 7 **not exercised** | 23.6 s, 15 calls, 10 `retrieval_events`, `promptStoreGaps` `[]`, $0.0140; step 6 identical to codex (8 of 8 whole, 0 characters never served). Step 7 (rejected quote, then recovery) was not exercised, not failed: haiku read the page first and saved the true Enterprise claim directly, without trying the colleague's quote, so the harness had no quote to reject. That is the same agent choice recorded under "Found and fixed while re-running" below. The script's own line for this run says FAIL because it requires a rejection; read it as "not exercised". |
 | worker / browser / interview (claude, codex) | PASS on 2026-11-12 (below) | not re-run at KS-8: those paths did not change |
 | opencode | not run | free tier 429, Copilot models 404 (below) |
 
