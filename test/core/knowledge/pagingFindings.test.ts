@@ -142,3 +142,53 @@ describe('review findings at dadcd82', () => {
     }
   });
 });
+
+describe('floors (paging rework, binding floor invariant)', () => {
+  it('at budget 1 every tool serves an item within its floor, even with the largest header and every first-page note', async () => {
+    const t = ks4(opened);
+    const k = knowledgeRepos(t.store);
+    const Q = '"'.repeat(400); // JSON-escaped two-fold: every bounded name at its bound
+    t.store.db.prepare('UPDATE workspaces SET name = ? WHERE id = ?').run(Q, 'ws_d');
+    const a = await t.page('ws_d', `Body ${'text '.repeat(300)}`, { title: Q, sourceUrl: `https://x.test/${'p'.repeat(300)}`, description: Q } as never);
+    t.store.db.prepare("UPDATE artifact_texts SET status = 'too_large', char_count = 10 WHERE artifact_id = ?").run(a.id);
+    const ch = k.chunks.list({ artifactId: a.id })[0]!;
+    t.store.db.prepare('UPDATE chunks SET heading_path = ? WHERE id = ?').run(Q, ch.id);
+    const e = (await import('../../../src/core/knowledge/entities.js')).resolveEntity(t.store, (await import('../../../src/core/knowledge/scope.js')).scopeFor(t.store, 'ws_d'), { kind: 'competitor', name: 'Q'.repeat(150) });
+    t.store.db.prepare('UPDATE entities SET name = ? WHERE id = ?').run(Q, e.id);
+    const f = t.fact('ws_d', `${'\u0001'.repeat(400)}`, { subject: Q, entityId: e.id, evidence: [a.id] });
+    t.fact('ws_c', 'v2', { lineageId: f.id, version: 2, replacesId: f.id, lifecycle: 'candidate', status: 'pending' } as never); // outside node scope of ws_d
+    k.factObservations.insert({ id: newId('obs'), workspaceId: 'ws_d', lineageId: f.id, findingId: f.id, kind: 'create', evidence: [], status: 'applied', createdAt: new Date().toISOString(), appliedAt: new Date().toISOString() });
+    t.store.profiles.insert({ workspaceId: 'ws_d', data: { ['\u0001'.repeat(200)]: 1 } });
+    t.store.recommendations.insert({ id: 'rec_q', workspaceId: 'ws_d', title: Q, summary: '\u0001'.repeat(3000), criteria: {}, findingIds: [], personaFeedback: [], priority: 0, createdAt: T0, status: 'verified' } as never);
+    for (const role of ['worker', 'synthesizer'] as const) {
+      const c = t.ctx('ws_d', role);
+      const calls: Array<[ToolName, Record<string, unknown>, string]> = [
+        ['search', { query: `${'zz '.repeat(600)}`.trim(), include_unverified: true, include_history: true }, 'hits'],
+        ['search', { query: 'body', include_unverified: true }, 'hits'],
+        ['get_card', { entity_id: e.id, scope: 'tree' }, 'lines'],
+        ['get_card', { workspace_id: 'ws_d', scope: 'tree' }, 'lines'],
+        ['read_workspace', { workspace_id: 'ws_d', scope: 'tree' }, 'lines'],
+        ['list_changes', { since: '2026-10-01', entity_id: e.id, scope: 'tree' }, 'changes'],
+        ['expand', { id: f.id, scope: 'tree' }, 'items'],
+        ['expand', { id: f.id }, 'items'],
+        ['expand', { id: a.id, scope: 'tree' }, 'items'],
+        ['expand', { id: ch.id, around: 3, scope: 'tree' }, 'items'],
+        ['expand', { id: e.id, scope: 'tree' }, 'items'],
+        ['expand', { id: 'ws_d', scope: 'tree' }, 'items'],
+        ['expand', { id: 'rec_q', scope: 'tree' }, 'items'],
+        ['read_artifact', { artifact_id: a.id, mode: 'text', scope: 'tree' }, 'items'],
+        ['read_artifact', { artifact_id: a.id, mode: 'raw', scope: 'tree' }, 'items'],
+      ];
+      for (const [tool, input, key] of calls) {
+        const r = await t.handle(c, tool, { ...input, max_tokens: 1 });
+        if (!r.ok) continue; // a record the synthesizer may not read
+        const p = (r as { data: Page }).data;
+        const label = `${role} ${tool} ${JSON.stringify(input).slice(0, 60)}`;
+        expect(JSON.stringify(p.notes ?? []), label).not.toMatch(/raised|nothing/);
+        expect(p.tokens, label).toBeLessThanOrEqual(READ_FLOOR_TOKENS[tool as keyof typeof READ_FLOOR_TOKENS]);
+        const items = (p[key] as unknown[]) ?? [];
+        if (p.cursor || p.truncated) expect(items.length, label).toBeGreaterThan(0);
+      }
+    }
+  });
+});
