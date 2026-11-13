@@ -1316,6 +1316,8 @@ target serves. Design §7.3 and §9 ("Paging") state the binding rules; the choi
   their bound, every first-page note, role note): search ≤ 100, list_changes 132, read_workspace 149,
   get_card 168, read_artifact 213, expand 270. `max_tokens` schema minimum is 1 (raised to the floor).
   Below a floor `assemblePage` would raise the page's budget with a note; the sweep fails if it ever does.
+  Gate follow-up: the floors live in `floors.ts` (no imports); the config schema refuses a
+  `knowledge.hardMaxTokens` below `HIGHEST_READ_FLOOR` (300). A provider scale under a floor: the floor wins.
 - **Quote cap.** `QUOTE_MAX_CHARS` = 1 200 (`factTools.ts`), enforced by the tool schema and by
   `verifyEvidenceRefs` ("cite a shorter span or several quotes").
 - **Elsewhere note (gate follow-up ruling).** Always on page 1 of a node-scoped search with matches

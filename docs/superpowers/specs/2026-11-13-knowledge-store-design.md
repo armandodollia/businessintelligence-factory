@@ -491,7 +491,9 @@ sections degrade instead (left-out ids → counts → one count line → empty o
   (`READ_FLOOR_TOKENS`), which holds the bounded header, every first-page note, the envelope and the
   barest cut item with its pointer: **search 200, get_card 200, list_changes 200, read_workspace
   200, expand 300, read_artifact 300** tokens (measured worst cases: 100, 168, 132, 149, 270, 213).
-  `max_tokens` accepts any positive value; below the floor it is raised to it. A "nothing fits"
+  `max_tokens` accepts any positive value; below the floor it is raised to it. `knowledge.hardMaxTokens`
+  may not be set below the highest floor (300): the config is refused at load with that reason. A
+  provider scale that brings the hard maximum under a tool's floor does not lower the floor: the floor wins. A "nothing fits"
   answer no longer exists; should a request ever not fit its floor, the page is assembled at the
   smallest budget that serves an item, with a note saying so (never seen in the sweep).
 - **Kept:** redaction before every cut; no cut inside a fence marker; cursors are compact strings

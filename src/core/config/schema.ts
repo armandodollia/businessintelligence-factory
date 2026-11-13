@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { HIGHEST_READ_FLOOR } from '../knowledge/floors.js';
 
 export const PROVIDER_IDS = ['claude', 'codex', 'opencode'] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
@@ -217,8 +218,13 @@ export const knowledgeConfigSchema = z.strictObject({
       providers: z.partialRecord(providerIdSchema, z.number().positive()).optional(),
     })
     .optional(),
-  /** Cap on any single knowledge response, whatever the caller asks. */
-  hardMaxTokens: budgetTokens.optional(),
+  /**
+   * Cap on any single knowledge response, whatever the caller asks. At least the highest read-tool floor
+   * (a read never answers with less than its floor, so a smaller cap could not hold).
+   */
+  hardMaxTokens: budgetTokens
+    .min(HIGHEST_READ_FLOOR, `must be at least ${HIGHEST_READ_FLOOR}: the highest read-tool floor (a knowledge read never returns less than its floor)`)
+    .optional(),
   freshness: z
     .strictObject({
       defaultDays: z.number().int().min(1).optional(),

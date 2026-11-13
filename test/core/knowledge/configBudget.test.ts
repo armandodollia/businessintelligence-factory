@@ -26,6 +26,20 @@ function writeConfig(content: unknown): string {
 const withKnowledge = (knowledge: BifConfig['knowledge']): BifConfig => ({ ...structuredClone(defaultConfig), knowledge });
 
 describe('config.knowledge (KS-0)', () => {
+  it('refuses a hardMaxTokens below the highest read-tool floor at load, with a clear error', async () => {
+    const { READ_FLOOR_TOKENS } = await import('../../../src/core/knowledge/floors.js');
+    const highest = Math.max(...Object.values(READ_FLOOR_TOKENS));
+    let err: unknown;
+    try {
+      loadConfig(writeConfig({ knowledge: { hardMaxTokens: highest - 1 } }));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConfigError);
+    expect((err as ConfigError).issues).toEqual([{ path: 'knowledge.hardMaxTokens', message: expect.stringMatching(new RegExp(`at least ${highest}.*floor`)) }]);
+    expect(loadConfig(writeConfig({ knowledge: { hardMaxTokens: highest } })).knowledge?.hardMaxTokens).toBe(highest);
+  });
+
   it('is optional: existing configs (defaults, the example file) load unchanged and get every default', () => {
     expect(loadConfig().knowledge).toBeUndefined();
     const example = JSON.parse(readFileSync(join(process.cwd(), 'bif.config.example.json'), 'utf8')) as Record<string, unknown>;

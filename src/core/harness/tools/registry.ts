@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { entityKindSchema, modelRefSchema, taskTypeSchema } from '../../config/schema.js';
 // knowledge store KS-3
-import { READ_FLOOR_TOKENS } from '../../knowledge/budget.js';
+import { READ_FLOOR_TOKENS } from '../../knowledge/floors.js';
 import { QUOTE_MAX_CHARS, QUOTE_TOO_LONG } from '../../knowledge/factTools.js';
 import { RELATION_TYPES } from '../../knowledge/relations.js';
 import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
