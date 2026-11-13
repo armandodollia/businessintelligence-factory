@@ -40,7 +40,7 @@ describe('R5: auditors run without lessons', () => {
     expect(auditReq.systemPrompt).not.toContain(LESSONS_HEADING);
     expect(auditReq.runTags).toMatchObject({ auditId: audit!.id, lessonsOff: true });
     expect(runTags(s.store, audit!.auditRunId!)).toMatchObject({ auditId: audit!.id, lessonsOff: true });
-    expect(audit!.auditPromptVersion).not.toBe(reviewReq.promptVersion);
+    expect(audit!.auditPromptVersion).not.toBe((reviewReq as typeof reviewReq & { promptVersion: string }).promptVersion);
 
     // The audited task is not switched to lessons-off by its audit run.
     expect(lessonsOff(s.store, { taskId: task.id })).toBe(false);
