@@ -190,8 +190,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   and must accept or reassert each; after `loop.maxReasserts` reasserts the worker is told to fix it.
 - **Decision outcomes.** Agent decisions get labels after the fact (`decision_outcomes`): `confirmed`
   (task verified), `over-scoped` / `missed-evidence` / `weak-review` (task unverified),
-  `run-failed`, `missed-evidence` (output superseded by a later round), `stale` (a scheduled re-run
-  changed or no longer found a finding), `user-rejected` (you excluded an output — finding,
+  `run-failed`, `missed-evidence` (output superseded by a later round), `stale` (a scheduled
+  re-run saved a new fact on the same subject with another claim, or a screenshot the finding cites
+  changed, or the fact passed its TTL without a re-check), `user-rejected` (you excluded an output — finding,
   recommendation, persona, competitor or symptom hypothesis — or rejected a unit proposal; excluding
   a verified output also marks the passing review `weak-review`), `confirmed` (you included an output
   the review did not verify), `reviewer-false-positive` (an issue dropped after a pushback) and
@@ -214,9 +215,12 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   (`competes_with`, `offers`, `has_flow`, `causes`, …) each name the record that asserts them and
   count only while that record is usable. An entity name that only uploads mention is treated like
   upload text (the same export and exposure rules), and keeps that status as an alias after a merge.
-- **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
-  archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
-  recommendation → findings → artifacts.
+- **Evidence rule.** Every finding cites at least one stored artifact of its business: screenshots
+  per flow step, archived pages, documents or uploads. A confirmation or retraction cites an artifact
+  its own task saved (see Living facts); a quote in `evidence_refs` must occur in the artifact's text;
+  screenshots need a description (see Evidence text). Recommendations cite only usable findings (the
+  current, verified or included version; a replaced, retracted or excluded fact is refused), so the UI
+  can trace recommendation → findings → artifacts.
 - **Evidence text (knowledge store).** Every save of an artifact (and every upload) is recorded as a
   capture (who, which run and task, URL, flow step), even when the bytes are identical to an earlier
   save. Text is extracted in-process from HTML, PDF, docx, pptx, xlsx, csv, markdown, JSON and text
@@ -234,9 +238,12 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   what it inherits from its parents; the rest of the business only with `scope: "tree"`; other
   businesses never (their ids answer exactly like unknown ids). A read by id returns the named item
   from any part of the business, labelled with its source, while what it lists around the item (card
-  facts, relations, neighbours) follows the same node scope unless `scope: "tree"` is passed. Every response fits a token budget
-  per role (`knowledge.budgets`, capped by `hardMaxTokens`) and continues with a `cursor`; evidence
-  text is redacted and served inside `<<<EVIDENCE … >>>` fences as untrusted data. Reviewers (and
+  facts, relations, neighbours) follows the same node scope unless `scope: "tree"` is passed. Every
+  response fits a token budget per role (`knowledge.budgets`, capped by `hardMaxTokens`) and continues
+  with a `cursor` that never skips anything: a text page that ends mid-passage says `cut: true` and the
+  next page continues from that character; a list item too large for a page is shortened (`cut: true`;
+  `expand` gives it whole). Evidence text is redacted and served inside `<<<EVIDENCE … >>>` fences as
+  untrusted data. Reviewers (and
   escalation agents) can only `expand` / `read_artifact` the ids of their task's review slice.
   Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,
   logged before the run starts — is recorded in `retrieval_events`; a run shown upload-derived text
@@ -389,7 +396,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `minEffectTasks`, `maxRulesPerRole` ≤ 15, `retro: { enabled, cron, model, windowDays, maxProposals }`).
   `lessons.enabled: false` is a kill switch: no proposals, no retro, and accepted rules leave every
   prompt (the new prompt versions are recorded). Runs that must not see lessons (experiment arms,
-  reviewer audits) carry a stored lessons-off flag, so they keep it after a restart.
+  reviewer audits) carry a stored lessons-off flag, so they keep it after a restart, and they feed no
+  lessons either: their outcomes, ratings, feedback, failures and denials are not signals (reviewer
+  audit misses count once, as described below).
 - **Reviewer audits and experiments (learning loop WP-F).** *Audits:* a different model (another
   enabled provider than the original reviewer when there is one; `audit.model` in config overrides)
   re-reviews the N most recently verified tasks of one business tree that were not audited yet, with
@@ -439,7 +448,7 @@ Under `dataDir` (default `./data`, gitignored):
 
 | Path | Contents |
 |---|---|
-| `data/bif.db` | SQLite: workspaces, interview, tasks, runs, findings, decisions, ratings, schedules, ... |
+| `data/bif.db` | SQLite, one database for every business: workspaces, interview, runs, decisions, outputs, the learning-loop tables and the knowledge store (tables by area: design spec §5.1) |
 | `data/<workspaceId>/artifacts/` | screenshots, page snapshots, documents and uploads (content-addressed by sha256) |
 | `data/<workspaceId>/personas/<persona>.md` | compiled persona prompt (latest version; `<persona>.v<N>.md` keeps each version) |
 | `data/<workspaceId>/runs/<agentRunId>/` | per-run working directory (`cwd/`), event log (`events.jsonl`) and the full prompt (`prompt.md`; `prompt.attemptN.md` per rate-limit retry) |

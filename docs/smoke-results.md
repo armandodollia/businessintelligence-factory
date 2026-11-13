@@ -12,7 +12,30 @@ The script boots the real server (temporary data dir and config, free port on 12
   message with the real claude CLI as interviewer, then `GET .../interview` must show the user turn
   plus exactly one stored agent turn.
 
-## Results
+## Final state (KS-8, `feat/learning-loop`, 2026-11-13)
+
+Last real-CLI run on the final branch (knowledge-store KS-0…KS-8 and learning-loop wave 2 merged):
+`BIF_SMOKE_TIMEOUT_MS=400000 npx tsx scripts/smoke.ts knowledge claude codex` (claude 2.1.322,
+codex-cli 0.167.2).
+
+| Check | Result | Detail |
+|---|---|---|
+| knowledge/codex (gpt-6.1-sol) | **PASS**, 7 of 7 steps | 72.7 s, 16 bif tool calls, 9 `retrieval_events`, `promptStoreGaps` `[]`, $0.1749; step 6 at `max_tokens` 250: 6 pages, header on 1, 1 piece cut, 0 placeholders, 8 of 8 passages whole, 0 characters never served; step 7: quote rejected once, then saved "Enterprise plan has custom pricing" |
+| knowledge/claude (haiku) | steps 1–6 PASS, step 7 **not exercised** (reported FAIL) | 23.6 s, 15 calls, 10 `retrieval_events`, `promptStoreGaps` `[]`, $0.0140; step 6 identical to codex (8 of 8 whole, 0 characters never served). Haiku read the page first and saved the true Enterprise claim directly, without trying the colleague's quote, so no quote was rejected — the same agent choice recorded under "Found and fixed while re-running" below. The harness behaved correctly. |
+| worker / browser / interview (claude, codex) | PASS on 2026-11-12 (below) | not re-run at KS-8: those paths did not change |
+| opencode | not run | free tier 429, Copilot models 404 (below) |
+
+Status per area:
+
+- Knowledge read tools, duplicate handshake, verified quotes, position paging and the cursor check
+  value hold with both real CLIs. The `relation` field also accepts a JSON-encoded value.
+- The full chain (interview → two scheduled runs → what changed → synthesis → export, with the
+  briefing reads, outcomes, lesson signals and metrics) is covered with the fake adapter by
+  `test/core/knowledge/endToEnd.test.ts`. It is not part of the real-CLI smoke.
+- Measurements (prompt tokens, `search` latency at 10,000 chunks, store size):
+  `docs/superpowers/verify-log.md`.
+
+## Results (2026-11-12)
 
 | Check | Result | Time | Detail |
 |---|---|---|---|
@@ -226,6 +249,6 @@ So the OpenCode success path is still verified only against the handcrafted fixt
 
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without
   breaking OAuth); the smoke passed regardless.
-- Re-run everything with `npx tsx scripts/smoke.ts`; `worker [providers...]`, `browser [providers...]`
-  or `interview` runs a subset.
+- Re-run everything with `npx tsx scripts/smoke.ts`; `worker [providers...]`, `browser [providers...]`,
+  `knowledge [providers...]` or `interview` runs a subset.
   The script exits non-zero when any check fails.

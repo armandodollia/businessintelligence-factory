@@ -293,14 +293,11 @@ export const BUDGET_KIND: Record<string, KnowledgeBudgetKind> = {
  * `workspace_id`): may a request read an item of the caller's tree that is OUTSIDE its node scope (a
  * sibling's or cousin's), when it names the item's id?
  *
- * Ruling (confirmed by the user, design §3 decision 13: nothing inside a tree is confidential from
- * another node of it): yes, in node scope too —
- * same-tree nodes may read and cite each other, and an agent only holds a sibling id because it asked
- * tree-wide or because in-scope evidence cites it. The item is labelled with its source node; what
- * the response lists AROUND it still follows the request's scope.
- *
- * If the user rules that such reads need `scope: "tree"`, this is the one line to change:
- * `return mode === 'tree';`.
+ * Settled by the user (design §3 decision 13: nothing inside a tree is confidential from another
+ * node of it; there is no restricted label): yes, in node scope too — same-tree nodes may read and
+ * cite each other, and an agent only holds a sibling id because it asked tree-wide or because
+ * in-scope evidence cites it. The item is labelled with its source node; what the response lists
+ * AROUND it still follows the request's scope. The rule stays one function so it has one place.
  */
 export function allowByIdSiblingRead(_scope: KnowledgeScope, _mode: ScopeMode): boolean {
   return true;

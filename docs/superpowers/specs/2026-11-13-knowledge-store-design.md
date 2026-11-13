@@ -601,6 +601,9 @@ than home) records a `Decision` with refs, like `save_finding` does today.
   duplicate handshake. Prompts shrink from "all findings" to a fixed briefing.
 - Latency: FTS5 queries are milliseconds at this scale; extraction is tens of
   milliseconds for HTML and seconds for large PDFs (queued, not blocking the save).
+  Measured at KS-8 (10,000 passages, 1,000 facts, worst-case vocabulary; `scripts/measure-knowledge.ts`,
+  `docs/superpowers/verify-log.md`): `search` p50 / p95 = 74 / 88 ms in node scope (the "elsewhere" note
+  included) and 23 / 28 ms tree-wide; a 29 MB database plus 18 MB of stored files.
 - Later, without changing tools: a vector ranking signal for `search`; OCR for
   image-only PDFs and uploaded screenshots; a merge-proposer agent.
 
@@ -677,6 +680,9 @@ go through `feedback/actions.ts` with the actor from config. Upload-derived item
   and retracts; "what changed" is correct; row counts show no duplicates.
 - Real-CLI smoke: claude and codex each call `search` → `expand` → `save_finding`
   with a verified quote.
+- As built (KS-8): `test/core/knowledge/endToEnd.test.ts` runs interview → two scheduled runs through
+  the real scheduler → what changed → synthesis → export with the fake adapter; the real-CLI smoke is
+  `scripts/smoke.ts knowledge` (results in `docs/smoke-results.md`).
 
 ## 19. Left to the builder
 

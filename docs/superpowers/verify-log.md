@@ -30,7 +30,7 @@ Rounds 1–2 substantive issues fixed (35fd436, ac6e7fb). Round 3 remaining → 
 ## Knowledge store KS-8 — measurements (2026-11-13)
 
 Script: `scripts/measure-knowledge.ts` (`npx tsx scripts/measure-knowledge.ts [prompts|search|all]`), on
-`feat/learning-loop` after the KS-8 merge. Apple Silicon laptop, Node 25, `node:sqlite`, temp data dir.
+`feat/learning-loop` after the KS-8 merge. Apple M5 Pro, Node 25.8, `node:sqlite`, temp data dir.
 
 **Prompt tokens** (characters / 4) on a seeded four-node tree (company, two divisions, one slice); one
 finding in five unverified; `backfillKnowledge` run; prompts built for the Payments division. Same

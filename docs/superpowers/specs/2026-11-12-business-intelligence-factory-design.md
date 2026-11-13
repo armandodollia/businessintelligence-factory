@@ -74,6 +74,10 @@ core/        engine — no UI, no HTTP
   internal/    optional internal data uploads (parsing, evidence registration)
   scoring/     criteria, priority weights, rating ingestion
   scheduler/   recurring jobs, diffing between runs
+  knowledge/   knowledge store: extraction, scopes, living facts, entities, read tools, briefings (§10a)
+  learning/    decision outcomes, review issues, lessons and retro, reviewer audits, experiments (§10, §10b)
+  feedback/    human actions and the append-only feedback log (§10)
+  policy/      action-policy history (§6.6); metrics/, telemetry/: usage, metrics view, bus events
   store/       SQLite + filesystem artifact store
 api/         local HTTP + JSON, SSE for live run events. Only thing the UI talks to.
 web/
@@ -82,7 +86,21 @@ web/
 config/      bif.config.(json|ts): providers, models, roles, loop limits, budgets
 ```
 
-**Stack (builder's call, stated):** TypeScript on Node, SQLite (e.g. better-sqlite3 or node:sqlite), Vite + React for `web/`. Data root per workspace: `data/<workspace>/{db, artifacts/}`.
+**Stack (builder's call, stated):** TypeScript on Node 25, SQLite (`node:sqlite`, FTS5), Vite + React for `web/`. One database `data/bif.db` for every workspace; files per workspace under `data/<workspaceId>/` (artifacts, personas, run directories) and calibration per business tree under `data/<rootWorkspaceId>/calibration/`.
+
+### 5.1 Data model
+
+One SQLite database, append-only migrations (`src/core/store/migrations.ts`; never edited, only appended). Tables by area:
+
+| Area | Tables (migration) |
+|---|---|
+| Businesses and interview | `workspaces` (scope, audiences, parent: the business tree), `profiles`, `interview_turns`, `symptoms` (symptoms and strengths), `symptom_hypotheses`, `unit_proposals`, `identities` |
+| Research | `pipelines`, `research_runs`, `tasks`, `agent_runs`, `decisions` (the decision log, §6.3), `user_requests`, `schedules` |
+| Outputs | `findings` (facts, §7.3 and §10a), `artifacts`, `recommendations`, `personas`, `competitors`, `ratings` |
+| Learning loop (14–17, 19, 20) | `feedback_events` (14); `agent_usage`, `agent_run_attempts`, `prompt_versions`, `calibration_versions` (15); `decision_outcomes`, `review_issues` (16); `policy_events`, `bus_events` (17); `lesson_rules`, `lesson_proposals`, `lesson_signals`, `retros` (19); `reviewer_audits`, `experiments`, `audit_schedules` and the `experiment_id` / `arm` / `audit_id` / `lessons_off` tags on runs, decisions and tasks (20) |
+| Knowledge store (18) | `artifact_captures`, `artifact_texts`, `chunks`, `finding_evidence`, `fact_observations`, `item_scopes`, `entities`, `relations`, `entity_merge_suggestions`, `retrieval_events`, `retrieval_uses`; FTS5 `findings_fts`, `chunks_fts`, `artifacts_fts`, `entities_fts`; lineage, lifecycle, entity and upload-provenance columns on `findings`, `artifacts` and the typed records (knowledge store design §15) |
+
+Upload provenance (`upload_derived`, `upload_cause`) is sticky: triggers set it and refuse to clear it. Exposure of a run to upload-derived text is never stored; it is computed from `retrieval_events` when needed (§10a).
 
 **UI separation rule:** everything a view does goes through `web/logic/` — e.g. `useInterview()`, `useResearchRun(runId)`, `useEvidence(findingId)`, `rateCriterion(itemId, criterion, verdict, value?, reason?)`. A redesign replaces `web/views/` and CSS only.
 
@@ -109,11 +127,26 @@ Start with Claude Code and Codex; OpenCode third. Every raw event stream is pers
 - `describe_artifact({ artifact_id, description })` (knowledge store)
 - `save_finding({ claim, subject, criteria{...}, evidence: artifactId[] })` — **rejected if `evidence` is empty or references unknown artifacts**
   (knowledge store: also `relation` (`new` / `{confirms}` / `{replaces}`; omitted → duplicate handshake against current
-  facts of the same entity), `entity`, `relations`, `applies_to`, `evidence_refs` with verified quotes, `ttl_days`;
-  returns `entityId` when a fact is saved; see `2026-11-13-knowledge-store-design.md` §7.2–7.4)
+  facts of the same entity; a JSON-encoded value such as `"{\"confirms\": …}"` is accepted too), `entity`, `relations`,
+  `applies_to`, `evidence_refs` with verified quotes, `ttl_days`; returns `entityId` when a fact is saved; see
+  `2026-11-13-knowledge-store-design.md` §7.2–7.4)
 - `confirm_finding({ finding_id, evidence })`, `retract_finding({ finding_id, reason, evidence })` — evidence must include
   an artifact this task saved with `save_artifact`; applied when the task is verified (knowledge store)
-- `propose_tasks([...])` — orchestrator only (§7)
+- Knowledge read tools (knowledge store design §9): `search({ query, kinds?, scope?, entity_id?, include_unverified?,
+  include_history?, since?, limit? })` (labelled hits with ids, no bodies), `get_card({ entity_id | workspace_id })`,
+  `expand({ id, around? })`, `read_artifact({ artifact_id, mode: outline|text|image|raw })`, `list_changes({ since? |
+  run_id? })` and `read_workspace({ workspace_id })`. Node scope by default (the node, its sub-units and its parents);
+  `scope: "tree"` for the whole business tree; another tree's ids answer exactly like unknown ids. A read by id returns
+  the named item from any node of the tree, labelled with its source node (user decision); what it lists around the
+  item follows the request's scope. Every response fits the role's token budget (`max_tokens` may lower it) and
+  carries `tokens`, `truncated`, `cursor` and `content_trust: "untrusted"`; evidence text is redacted and fenced
+  `<<<EVIDENCE … >>>`. Paging never skips content: a text page ends mid-passage with `cut: true` and the next
+  `cursor` continues from that character; a list item too large for the page is shortened (`cut: true`; `expand`
+  gives it whole); the header of `expand` / `read_artifact` is on the first page only. Every call writes one
+  `retrieval_events` row. Roles: worker, orchestrator and synthesizer get all six; the interviewer gets `search`,
+  `get_card`, `expand`, `read_artifact`, `read_workspace` (usable facts only, as the synthesizer); reviewer and
+  escalation runs get `expand` and `read_artifact` limited to the task's review slice.
+- `propose_tasks([...])` — orchestrator only (§7); a task may carry `recheck_fact_ids` (§11)
 - `submit_result({...})` — worker deliverable
 - `submit_review({ score, issues[] })` — reviewer only
 - `respond_to_review({ issueId, action: fix|pushback, reason })` — worker only
@@ -158,7 +191,7 @@ lessons engine.
 ## 7. Research flow and adversarial loop
 
 ### 7.1 Orchestrator
-- An agent run (model configurable) that receives the workspace profile, interview summary, prior findings, and the stage goal.
+- An agent run (model configurable) that receives the workspace profile, interview summary, the stage goal and a fixed-size knowledge briefing (node card, entity index, changes since the last run, facts due for re-check; §10a) instead of a list of prior findings. It reads more with the knowledge read tools (§6.2).
 - Decides **what tasks** and **how many** sub-agents, and which configured model each uses, via `propose_tasks`. Each task: `{ type, brief, subject, model, needs_browser, acceptance_criteria }`.
 - The program validates proposals against config limits (max parallel workers, max tasks per run, allowed models, budget) and executes them. Rejections are reported back to the orchestrator.
 - The orchestrator may run in phases (e.g. discover competitors → deep dives → synthesis) and propose follow-up tasks based on results.
@@ -187,6 +220,13 @@ loop:
 - **Unverified** results are kept, flagged in the UI with the last reviewer's objections, and excluded from recommendation synthesis unless the user overrides.
 - `max_rounds` and `pass_threshold` are configurable globally and per task type.
 
+### 7.3 Evidence rule
+- Every finding references ≥ 1 stored artifact of its business tree (`save_finding` is rejected otherwise). Flow walkthroughs store an ordered screenshot per step; articles are archived as a page snapshot + extracted text + source URL + retrieval time; documents (PDF filings, reports) are stored as original files; internal uploads are artifacts too.
+- Every save of an artifact is recorded as a capture (run, task, URL, flow step), even when the bytes are already stored. Screenshots and images saved by agents need a `description` (≥ `knowledge.captions.minChars`).
+- A finding is a living fact (§10a): a later run confirms it, replaces it with a new version or retracts it, and nothing is deleted. A confirmation or retraction must cite an artifact the same task captured; it applies only when the task is verified.
+- A quote in `evidence_refs` must occur in the artifact's extracted text (whitespace-normalized), else the save is rejected with the reason; the quote is stored (`finding_evidence`) and shown to the reviewer.
+- Recommendations reference findings, and only usable ones: the current version of a fact that is verified or included by the user (`save_recommendation` rejects a replaced, retracted, superseded, unverified or user-excluded fact). The UI traverses recommendation → findings → artifacts.
+
 ### 7.4 Structured escalations (learning loop WP-D)
 When a task ends `unverified` or `failed`, an `escalation` agent run (prompt `escalation.md`, model
 `escalation.model`, default `roles.orchestrator`) gets the brief, criteria, outcome, last review
@@ -199,8 +239,6 @@ round budget — as a revision when the last review raised issues, else as new w
 carries the previous outcome, the previous run's tool calls (prior-attempt summary) and the answers.
 At most `escalation.maxPerTask` (default 2) escalations per task.
 
-### 7.3 Evidence rule
-Every finding references ≥1 stored artifact. Flow walkthroughs store an ordered screenshot per step. Articles are archived as full page snapshot + extracted text + source URL + retrieval time. Documents (PDF filings, reports) stored as original files. Recommendations reference findings; the UI can traverse recommendation → findings → artifacts.
 
 ## 8. Interview
 
@@ -213,7 +251,7 @@ Every finding references ≥1 stored artifact. Flow walkthroughs store an ordere
 
 - Users may upload internal material (KPI/CSV exports, financials, decks, PDFs). Entirely optional; the interview remains sufficient on its own.
 - Uploads are stored locally as artifacts and can be cited as evidence for symptoms, strengths and findings (e.g. "renewals down 12% QoQ" backed by the export).
-- Uploads are passed to agents only when relevant to a task; excluded from the training export unless the user opts in (builder's call).
+- Uploads are extracted and searchable like any artifact, and their upload provenance is sticky. Prompts list them as metadata only (id, type, size, date — never the title); an agent opens one with `expand` / `read_artifact`, and a run that is shown upload-derived text is upload-exposed. Upload-derived items and the judgments of exposed runs and tasks are left out of the training export unless the user opts in (§10a).
 
 ## 8b. Market research and personas
 
@@ -230,7 +268,7 @@ Every finding references ≥1 stored artifact. Flow walkthroughs store an ordere
 - Personas carry `audience: external | internal`. Internal personas are researched from job postings/role descriptions, employee-review sites, industry surveys of the role, the interview, and internal uploads (weighted highest).
 - For internal scopes, "competitors" means **alternatives**: vendor tools, outsourcing, and how peer companies run the same function. Competitor discovery and deep dives cover those.
 - **Recursive business map:** workspaces form a tree of arbitrary depth (company → divisions → products → teams/internal platforms). Each node is a full workspace (scope, audiences, interview, research, personas, recommendations).
-  - **Shared reading across the tree:** a node may read and cite profile, findings and artifacts of **any node in the same tree** (ancestors, siblings, cousins, descendants), always tagged with the source node. Orchestrator context includes ancestors' and siblings' profiles + finding titles; other nodes are reachable on demand. Nodes in different trees (different businesses) are never shared.
+  - **Shared reading across the tree:** a node may read and cite profile, findings and artifacts of **any node in the same tree** (ancestors, siblings, cousins, descendants), always tagged with the source node; nothing inside a tree is confidential from another node (there is no restricted label). Queries default to node scope (the node, its sub-units and its parents) and reach the rest with `scope: "tree"`; reads by id work tree-wide (§6.2). Prompts carry tree context as one line per parent, child and sibling (name, scope, audiences; parents and children also their profile keys), never their findings. Nodes in different trees (different businesses) are never shared.
   - **Roll-up:** a node's views include descendants' symptoms, strengths and recommendations, tagged by source node; patterns recurring across ≥2 children are flagged as possible company-wide issues.
   - **Mapping step:** task type `map_business_units` (phase `mapping`, optional, runs before market research) proposes child nodes from interview, uploads and research (site, filings, org signals), each with name, description, audiences, evidence and reasoning (logged, ratable). The user accepts/edits/rejects each; accepted children can be mapped again.
   - Each node runs its pipeline independently; the user picks where to drill.
@@ -318,7 +356,7 @@ Details in `2026-11-13-knowledge-store-design.md`. This section describes how th
 
 ## 10b. Lessons engine and weekly retro (learning loop WP-E, migration 19)
 
-- **Signals** (`src/core/learning/lessons/signals.ts`), per business-tree root, normalized to (role, category, unit = task, else run): review-issue classes per task type (`issueRecurrence` / `listReviewIssues`), negative outcome labels (`listOutcomes`), run failures (`agent_runs.failure_reason`, `agent_run_attempts`; rate limits, interruptions, spawn errors and budgets left out), policy denials (`listPolicyEvents`; out-of-tree blocks left out; the action is a tool name or the configured action-policy item it matches, never the agent's free text), feedback on an agent run's output (`listFeedback`: exclusions, proposal reject / edit, hypothesis corrections, fact retractions) and rating disagreements, knowledge signals (`knowledgeSignals`; rate kinds from a rate of 0.5), reviewer-audit misses (WP-F `auditMisses`, read directly: `audit:<class>` for the reviewer, one signal per class and audited task; the `weak-review` outcome an audit writes is not counted again), and signals recorded by other packages (`recordLessonSignal`; idempotent per source + key; same-tree task / run only; a note is kept only with a task, run or ref id none of which is upload-derived or exposed, ruling R2).
+- **Signals** (`src/core/learning/lessons/signals.ts`), per business-tree root, normalized to (role, category, unit = task, else run): review-issue classes per task type (`issueRecurrence` / `listReviewIssues`), negative outcome labels (`listOutcomes`), run failures (`agent_runs.failure_reason`, `agent_run_attempts`; rate limits, interruptions, spawn errors and budgets left out), policy denials (`listPolicyEvents`; out-of-tree blocks left out; the action is a tool name or the configured action-policy item it matches, never the agent's free text), feedback on an agent run's output (`listFeedback`: exclusions, proposal reject / edit, hypothesis corrections, fact retractions) and rating disagreements, knowledge signals (`knowledgeSignals`; rate kinds from a rate of 0.5), reviewer-audit misses (WP-F `auditMisses`, read directly: `audit:<class>` for the reviewer, one signal per class and audited task; the `weak-review` outcome an audit writes is not counted again), and signals recorded by other packages (`recordLessonSignal`; idempotent per source + key; same-tree task / run only; a note is kept only with a task, run or ref id none of which is upload-derived or exposed, ruling R2). Experiment and audit runs feed no lessons (ruling R3, as for calibration): every signal of an experiment arm task or of an experiment / reviewer-audit run, and every rating or feedback event on a tagged decision, is left out (`includeExperiments` keeps them); audit misses still arrive through `auditMisses`.
 - **Rules** (`lesson_rules`) per root + role: a category recurring in ≥ 3 tasks (after a rejection, retirement or revert of it: tasks started later) is proposed as a rule; at most 15 active rules plus pending additions per role. Rule text comes from templates keyed by the category (code identifiers and a count only), with three strengths. Accepted rules are appended to the role's prompt after the calibration appendix (`withCalibration` through `CalibrationScope.lessons`, bound by `calibrationScope`), one line each tagged `[<marker>.v<version>]`. Because the marker is in the stored prompt text of every run, each task is classed as under the rule's current version, before the rule, or neither; the effect is the category rate per class and per prompt version (with WP-B's pass rate, agreement and cost). The engine proposes **revert** when, after ≥ 5 tasks under the current version, the rate did not drop below the rate before the rule; **retire** after 10 consecutive clean tasks under it; **strengthen** when it still recurred in ≥ 3 tasks under the current version (strength < 3). Retro prompt edits have no category to measure; any active rule can be proposed for retirement by the user.
 - **User control.** Every change is a pending proposal (`lesson_proposals`). `acceptLessonProposalAsUser` / `rejectLessonProposalAsUser` (`src/core/feedback/actions.ts`) are the only paths that change rules: accept records the role prompt version before and after (both in the prompt store), an `accept_lesson` Decision by the acting user and a `lesson_accept` feedback event; reject records a `lesson_reject` event. A calibration note from the retro is applied through `applyPromptPatchAsUser` (calibration history, revertable). A proposal of another tree answers 404 like an unknown id.
 - **Uploads.** Rules never quote stored text. Examples (proposal evidence, the retro digest) quote a review issue or a recorded note only when neither it, the ids it rests on, its runs nor its task is upload-derived or upload-exposed under the export's per-task bound (§10a; `exportExclusion`, computed when built); otherwise they name the id.

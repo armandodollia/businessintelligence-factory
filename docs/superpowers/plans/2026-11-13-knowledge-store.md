@@ -918,9 +918,9 @@ gate (reads by id, interviewer tools, `get_card` / `read_workspace` inputs).
   that sibling's own view, labelled). Rationale: same-tree nodes may read and cite each other, and an
   agent only holds a sibling id because it asked tree-wide or because in-scope evidence cites it. The
   sibling rule is ONE function, `allowByIdSiblingRead(scope, mode)` in `readCommon.ts` (used through
-  `readableById`); it is the designer's interpretation pending the user's confirmation — if the user
-  rules that such reads need `scope: "tree"`, its body becomes `return mode === 'tree';`. All four
-  by-id tools accept `scope` for that reason. A fact's own evidence and versions are part of the
+  `readableById`). Settled by the user after the gate (design §3 decision 13: no confidentiality inside
+  a tree, no restricted label): by-id sibling reads stay allowed in node scope. All four by-id tools
+  accept `scope` (it decides what is listed around the item). A fact's own evidence and versions are part of the
   named item (tree check only). Unknown and other-tree ids get
   the same "<kind> '<id>' not found" (`item` for `expand`, `artifact`, `entity`, `workspace`, `run`).
   A workspace with no row (legacy tests) is a one-node tree (`factScope`).
