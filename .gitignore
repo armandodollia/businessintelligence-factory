@@ -4,3 +4,4 @@ dist/
 .superpowers/
 *.tsbuildinfo
 bif.config.json
+.claude/worktrees/
