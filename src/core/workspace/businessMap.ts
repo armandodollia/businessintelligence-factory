@@ -15,6 +15,7 @@ import type {
   Workspace,
 } from '../types.js';
 import { ancestors, audiencesOf, children, createWorkspace, descendants, sameTree, scopeOf, siblings } from './tree.js';
+import { recordUnitProposalRejected } from '../learning/outcomes.js';
 
 // ---------------------------------------------------------------------------
 // reading across the tree
@@ -232,6 +233,7 @@ export function rejectUnitProposal(store: Store, id: string, reason: string): { 
   return store.transaction(() => {
     const p = pendingProposal(store, id);
     const proposal = store.unitProposals.update(id, { status: 'rejected' });
+    recordUnitProposalRejected(store, p, reason); // learning loop WP-C
     const rating: Rating = {
       id: newId('rat'),
       workspaceId: p.workspaceId,

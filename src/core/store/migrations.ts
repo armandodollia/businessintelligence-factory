@@ -408,4 +408,54 @@ export const MIGRATIONS: readonly string[] = [
       WHERE c.workspace_id = ratings.workspace_id AND lower(trim(replace(replace(replace(replace(c.name, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' '))) = lower(trim(replace(replace(replace(replace(ratings.target_id, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' ')))
     );
   `,
+  // 16: learning loop WP-C — decision outcomes (labelled after-the-fact judgments of agent decisions:
+  // task end, superseded outputs, scheduled what_changed diffs, user overrides / rejects, review
+  // disputes) and append-only review-issue history (one row per task + round + issue, stable issue
+  // ids across rounds, dispute status). Self-contained: depends on no other learning-loop migration.
+  `
+  CREATE TABLE decision_outcomes (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    label TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    source TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    task_id TEXT,
+    target_type TEXT,
+    target_id TEXT,
+    role TEXT NOT NULL,
+    task_type TEXT,
+    prompt_version TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX decision_outcomes_ws ON decision_outcomes (workspace_id);
+  CREATE INDEX decision_outcomes_decision ON decision_outcomes (decision_id);
+  CREATE INDEX decision_outcomes_task ON decision_outcomes (task_id);
+
+  CREATE TABLE review_issues (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    issue_id TEXT NOT NULL,
+    raw_issue_id TEXT,
+    class TEXT NOT NULL,
+    text TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    synthetic INTEGER NOT NULL DEFAULT 0,
+    reviewer_run_id TEXT NOT NULL,
+    review_decision_id TEXT,
+    worker_run_id TEXT,
+    worker_prompt_version TEXT,
+    response_reason TEXT,
+    response_decision_id TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+  );
+  CREATE INDEX review_issues_ws ON review_issues (workspace_id);
+  CREATE INDEX review_issues_task ON review_issues (task_id, round);
+  `,
 ];

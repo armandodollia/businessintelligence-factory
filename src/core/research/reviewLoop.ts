@@ -10,6 +10,7 @@ import type { Finding, Role, Task, TaskType } from '../types.js';
 import { sameTree } from '../workspace/tree.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
 import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
+import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
@@ -361,6 +362,7 @@ function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unveri
   });
   // Live refresh: output lists in the web app reload when a task's outputs got their final status.
   deps.events.emit({ type: 'task_status', workspaceId: done.workspaceId, taskId: done.id, status: done.status });
+  recordTaskEndOutcomes(store, done); // learning loop WP-C: task-end + superseded outcomes
   return done;
 }
 
