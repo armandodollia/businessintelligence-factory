@@ -139,8 +139,27 @@ async function workerStep(
     });
     throwIfAborted(deps.signal);
     const outputs = getRunOutputs(store, res.agentRunId);
-    if (res.status === 'done' && outputs.result !== undefined) return { ok: true };
-    reason = res.status === 'failed' ? failureReason(res) : 'run ended without submit_result';
+    // A revision only counts when every issue got a respond_to_review (fix | pushback).
+    const answered = new Set(outputs.responses.map((r) => r.issueId));
+    const unanswered = kind === 'revise' ? issues.map((i) => i.id).filter((i) => !answered.has(i)) : [];
+    if (res.status === 'done' && outputs.result !== undefined && unanswered.length === 0) {
+      if (attempt > 1) {
+        recordHarnessDecision(
+          store,
+          { agentRunId: res.agentRunId, workspaceId: task.workspaceId, role, model: task.model, promptVersion: version },
+          'decision',
+          { event: 'worker_retry_succeeded', step: kind, round, attempt },
+          [task.id],
+        );
+      }
+      return { ok: true };
+    }
+    reason =
+      res.status === 'failed'
+        ? failureReason(res)
+        : outputs.result === undefined
+          ? 'run ended without submit_result'
+          : `run did not respond_to_review for issue(s) ${unanswered.join(', ')}`;
     // The failed run (AgentRun row + events.jsonl) is kept; this decision makes the failure visible.
     recordHarnessDecision(
       store,
@@ -171,7 +190,8 @@ async function reviewStep(
   });
   throwIfAborted(deps.signal);
   const review = getRunOutputs(store, res.agentRunId).review;
-  if (review && Number.isFinite(review.score) && review.score >= 0 && review.score <= 10) {
+  // A review counts only if the reviewer run itself finished successfully.
+  if (res.status === 'done' && review && Number.isFinite(review.score) && review.score >= 0 && review.score <= 10) {
     return { score: review.score, issues: review.issues };
   }
   const issues: ReviewIssue[] = [{ id: 'I1', class: 'blocking', description: MALFORMED_REVIEW_ISSUE }];
@@ -202,35 +222,45 @@ function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unveri
  * Runs one task through the adversarial review loop (spec §7.2):
  * worker → `submit_result`; then per round a NEW reviewer run; `score >= passThreshold` →
  * `verified`; `round == maxRounds` → `unverified` (the task's findings take the same status);
- * otherwise a revision run answers the issues (`respond_to_review`) and resubmits.
+ * otherwise a revision run answers EVERY issue (`respond_to_review`) and resubmits.
  *
- * A worker step whose run fails (non-zero exit, idle kill) or ends without `submit_result` is retried
- * once with a new run; a second failure marks the task `failed`. Failed runs are kept and logged as
- * harness Decisions (`payload.event = 'worker_run_failed'`).
+ * A worker step whose run fails (non-zero exit, idle kill), ends without `submit_result` or (revise)
+ * leaves an issue unanswered is retried once with a new run; a second failure marks the task
+ * `failed`. Failed runs are kept and logged as harness Decisions (`worker_run_failed`, and
+ * `worker_retry_succeeded` when the retry worked).
  *
- * Resume: a task that already has a deliverable (`result`) starts at review of `task.round`.
+ * The current step (`work | review | revise`), the round, the last submitted round and the last
+ * review's issues are persisted on the Task, so a resumed task continues exactly where it stopped
+ * (an interrupted revise is re-run as a revise with the same issues).
  * Throws `AbortError` when `deps.signal` aborts (task state is then left as is).
  */
 export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise<Task> {
   const { store, config } = deps;
   const { maxRounds, passThreshold } = loopSettings(task.type, config);
   const id = task.id;
-  let round = Math.max(1, store.tasks.get(id)?.round ?? task.round);
+  const current = store.tasks.get(id) ?? task;
+  let round = Math.max(1, current.round);
+  // Tasks created before migration 7 have no step: a deliverable means it awaits review.
+  let step: NonNullable<Task['step']> = current.step ?? (current.result === undefined ? 'work' : 'review');
   try {
-    if (store.tasks.get(id)?.result === undefined) {
-      store.tasks.update(id, { status: 'running', round });
-      const step = await workerStep(deps, id, 'work', round, []);
-      if (!step.ok) return finish(deps, id, 'failed', round);
-    }
     for (;;) {
-      store.tasks.update(id, { status: 'reviewing', round });
+      if (step === 'work' || step === 'revise') {
+        const latest = store.tasks.get(id)!;
+        const issues = step === 'revise' ? (latest.reviewIssues ?? []) : [];
+        store.tasks.update(id, { status: 'running', round, step });
+        const res = await workerStep(deps, id, step, round, issues);
+        if (!res.ok) return finish(deps, id, 'failed', round);
+        step = 'review';
+        store.tasks.update(id, { step, submittedRound: round });
+        continue;
+      }
+      store.tasks.update(id, { status: 'reviewing', round, step: 'review' });
       const review = await reviewStep(deps, id, round);
       if (review.score >= passThreshold) return finish(deps, id, 'verified', round);
       if (round >= maxRounds) return finish(deps, id, 'unverified', round);
       round++;
-      store.tasks.update(id, { status: 'running', round });
-      const step = await workerStep(deps, id, 'revise', round, review.issues);
-      if (!step.ok) return finish(deps, id, 'failed', round);
+      step = 'revise';
+      store.tasks.update(id, { status: 'running', round, step, reviewIssues: review.issues });
     }
   } catch (err) {
     if (err instanceof AbortError || (err as Error).name === 'AbortError') throw err;

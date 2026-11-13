@@ -4,6 +4,7 @@ import type { ToolInput } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, Identity } from '../types.js';
+import { REDACTED, redactSecrets } from '../store/redact.js';
 import { randomPassword, type EmailProvider } from './email.js';
 
 /** Generic names for disposable identities. */
@@ -12,7 +13,7 @@ export const IDENTITY_NAMES: readonly string[] = [
   'Morgan Ellis', 'Drew Collins', 'Avery Quinn', 'Sam Carter', 'Robin Hart', 'Charlie Shaw',
 ];
 
-export const REDACTED = '[redacted]';
+export { REDACTED };
 
 /** Normalizes a site to its lowercase host without `www.` (`https://www.Acme.com/x` → `acme.com`). */
 export function normalizeSite(site: string): string {
@@ -62,18 +63,7 @@ export async function getOrCreateIdentity(
 
 /** Replaces every identity secret (site and inbox passwords) of the workspace found in `value`. */
 export function redactIdentitySecrets<T>(store: Store, workspaceId: string, value: T): T {
-  const secrets = store.identities
-    .list({ workspaceId })
-    .flatMap((i) => [i.password, i.emailPassword])
-    .filter((s): s is string => typeof s === 'string' && s.length >= 4);
-  if (!secrets.length) return value;
-  const walk = (v: unknown): unknown => {
-    if (typeof v === 'string') return secrets.reduce((acc, s) => acc.split(s).join(REDACTED), v);
-    if (Array.isArray(v)) return v.map(walk);
-    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
-    return v;
-  };
-  return walk(value) as T;
+  return redactSecrets(store, workspaceId, value);
 }
 
 /**

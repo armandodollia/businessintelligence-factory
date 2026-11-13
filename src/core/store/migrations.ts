@@ -270,4 +270,12 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX unit_proposals_ws ON unit_proposals (workspace_id);
   `,
+  // 7: Section C fix r1 — persisted review-loop step (exact resume) and CLI process start time
+  // (verify an orphan's identity before killing it after a crash).
+  `
+  ALTER TABLE tasks ADD COLUMN step TEXT;
+  ALTER TABLE tasks ADD COLUMN submitted_round INTEGER;
+  ALTER TABLE tasks ADD COLUMN review_issues TEXT;
+  ALTER TABLE agent_runs ADD COLUMN pid_started_at TEXT;
+  `,
 ];

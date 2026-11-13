@@ -1,6 +1,7 @@
 import type { BifConfig } from '../config/schema.js';
 import { PROVIDER_IDS } from '../config/schema.js';
 import { AbortError } from '../events.js';
+import { isOurProcessGroup } from '../harness/procinfo.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
 import type { ToolInput } from '../harness/tools/registry.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
@@ -122,29 +123,71 @@ export function workspaceContext(store: Store, ws: Workspace): string[] {
 }
 
 function harnessEvents(store: Store, workspaceId: string, event: string) {
+  // Decisions are listed per workspace; harness events are tagged by `payload.event`.
   return store.decisions
     .list({ workspaceId })
     .filter((d) => (d.payload as { tool?: string; event?: string } | null)?.event === event && (d.payload as { tool?: string }).tool === 'harness');
 }
 
-/** Results of a research run's tasks, for the orchestrator's follow-up round. */
+type RunHistoryPayload = { event: string; step?: string; round?: number; attempt?: number; reason?: string; willRetry?: boolean };
+
+/**
+ * Failed-run history of a task and how each retry ended, e.g.
+ * `work r1 attempt 1 failed (run failed (exit 1)) → retried; work r1 attempt 2 succeeded`.
+ * Empty when no run of the task failed.
+ */
+export function runHistory(store: Store, task: Task): string[] {
+  const events = store.decisions
+    .list({ workspaceId: task.workspaceId })
+    .filter((d) => d.refs.includes(task.id))
+    .map((d) => d.payload as RunHistoryPayload | null)
+    .filter((p): p is RunHistoryPayload => !!p && (p as { tool?: string }).tool === 'harness' && (p.event === 'worker_run_failed' || p.event === 'worker_retry_succeeded'));
+  if (!events.some((e) => e.event === 'worker_run_failed')) return [];
+  return events.map((e) =>
+    e.event === 'worker_retry_succeeded'
+      ? `${e.step} r${e.round} attempt ${e.attempt} succeeded`
+      : `${e.step} r${e.round} attempt ${e.attempt} failed (${e.reason})${e.willRetry ? ' → retried' : ' → gave up'}`,
+  );
+}
+
+function taskSummary(store: Store, t: Task): string {
+  const lines = [`- [${t.id}] ${t.type} → ${t.status} (round ${t.round})${t.subject ? `, subject ${t.subject}` : ''}`];
+  lines.push(`  brief: ${trunc(t.brief, 300)}`);
+  const history = runHistory(store, t);
+  if (t.status === 'failed') {
+    lines.push(`  FAILED: ${history.length ? 'all attempts failed' : 'task could not run'}`);
+  }
+  if (history.length) lines.push(`  run history: ${history.join('; ')}`);
+  if (t.result !== undefined) lines.push(`  result: ${trunc(JSON.stringify(t.result), 1500)}`);
+  const findings = store.findings.list({ taskId: t.id });
+  if (findings.length) lines.push(`  findings: ${findings.map((f) => `[${f.id}] ${trunc(f.claim, 120)}`).join('; ')}`);
+  return lines.join('\n');
+}
+
+/** Results of a research run's tasks (with failed-run history), for the orchestrator's follow-up round. */
 export function resultsSummary(store: Store, rr: ResearchRun): string {
-  const tasks = store.tasks.list({ runId: rr.id }).filter((t) => t.workspaceId === rr.workspaceId);
-  const failures = harnessEvents(store, rr.workspaceId, 'worker_run_failed');
-  return tasks
-    .map((t) => {
-      const lines = [`- [${t.id}] ${t.type} → ${t.status} (round ${t.round})${t.subject ? `, subject ${t.subject}` : ''}`];
-      lines.push(`  brief: ${trunc(t.brief, 300)}`);
-      if (t.status === 'failed') {
-        const reasons = failures.filter((d) => d.refs.includes(t.id)).map((d) => (d.payload as { reason: string }).reason);
-        lines.push(`  FAILED: ${reasons.length ? reasons.join(' | ') : 'task could not run'}`);
-      }
-      if (t.result !== undefined) lines.push(`  result: ${trunc(JSON.stringify(t.result), 1500)}`);
-      const findings = store.findings.list({ taskId: t.id });
-      if (findings.length) lines.push(`  findings: ${findings.map((f) => `[${f.id}] ${trunc(f.claim, 120)}`).join('; ')}`);
-      return lines.join('\n');
-    })
+  return store.tasks
+    .list({ runId: rr.id })
+    .filter((t) => t.workspaceId === rr.workspaceId)
+    .map((t) => taskSummary(store, t))
     .join('\n');
+}
+
+/**
+ * Tasks of the workspace's previous research run that failed or had failed runs, so the next phase's
+ * orchestrator knows about them. Empty string when there were none.
+ */
+export function previousPhaseProblems(store: Store, rr: ResearchRun): string {
+  const prev = store.researchRuns
+    .list({ workspaceId: rr.workspaceId })
+    .filter((r) => r.id !== rr.id && r.status !== 'running' && r.startedAt <= rr.startedAt)
+    .at(-1);
+  if (!prev) return '';
+  const affected = store.tasks
+    .list({ runId: prev.id })
+    .filter((t) => t.workspaceId === rr.workspaceId && (t.status === 'failed' || runHistory(store, t).length > 0));
+  if (!affected.length) return '';
+  return `## Problems in the previous phase (${prev.phase}, ${prev.id})\n${affected.map((t) => taskSummary(store, t)).join('\n')}\n\nRe-plan this work in the current phase if it still matters and fits its task types.`;
 }
 
 /** Full orchestrator prompt for one round. */
@@ -162,6 +205,8 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
     `## Allowed models\n${allowedModels(config).map((m) => `- {"provider":"${m.provider}","model":"${m.model}"}`).join('\n')}`,
     `## Task budget\n${remaining} more task(s) may be proposed in this phase run (limits.maxTasksPerRun = ${config.limits.maxTasksPerRun}).`,
   ];
+  const problems = previousPhaseProblems(store, rr);
+  if (problems) parts.push(problems);
   if (existing.length) {
     parts.push(
       round > 1
@@ -337,14 +382,25 @@ export type ResumeReport = {
   done: Promise<ResearchRun[]>;
 };
 
-/** SIGKILLs an orphaned CLI process group; a vanished group (ESRCH) is ignored. */
-export function killOrphanGroup(pid: number): void {
-  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 1) return;
+/**
+ * SIGKILLs an orphaned CLI process group, but only after verifying it is still ours (recorded start
+ * time, no reboot since, leader start time unchanged; see `isOurProcessGroup`). A vanished group
+ * (ESRCH) is ignored. Returns whether a kill signal was sent.
+ */
+export function killOrphanGroup(pid: number, startedAt?: string): boolean {
+  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 1) return false;
+  const check = isOurProcessGroup(pid, startedAt);
+  if (!check.ours) {
+    if (check.reason !== 'process group is gone') console.warn(`[bif] not killing process group ${pid}: ${check.reason}`);
+    return false;
+  }
   try {
     process.kill(-pid, 'SIGKILL');
+    return true;
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code !== 'ESRCH') console.warn(`[bif] could not kill orphan process group ${pid}: ${code ?? (e as Error).message}`);
+    return false;
   }
 }
 
@@ -359,7 +415,7 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
   const now = new Date().toISOString();
   const failedRuns: string[] = [];
   for (const run of store.agentRuns.list({ status: 'running' })) {
-    if (run.pid !== undefined) killOrphanGroup(run.pid);
+    if (run.pid !== undefined) killOrphanGroup(run.pid, run.pidStartedAt);
     if (tokens) tokens.revoke(run.token);
     else if (!run.token.startsWith('revoked:')) store.agentRuns.update(run.id, { token: `revoked:${run.token}` });
     store.agentRuns.update(run.id, { status: 'failed', endedAt: now });

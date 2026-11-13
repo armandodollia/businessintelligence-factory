@@ -1,6 +1,8 @@
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
+import { findReplay, titleKey } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
+import { redactSecrets } from '../store/redact.js';
 import { newId } from '../store/repos.js';
 import type {
   CrossCuttingGroup,
@@ -12,7 +14,7 @@ import type {
   UnitProposal,
   Workspace,
 } from '../types.js';
-import { ancestors, audiencesOf, createWorkspace, descendants, sameTree, scopeOf, siblings } from './tree.js';
+import { ancestors, audiencesOf, children, createWorkspace, descendants, sameTree, scopeOf, siblings } from './tree.js';
 
 // ---------------------------------------------------------------------------
 // reading across the tree
@@ -98,15 +100,20 @@ export const proposeBusinessUnitHandler: ExtraToolHandler = async (ctx, rawInput
   const { store, artifacts, events } = deps;
   const missing = artifacts.exists(ctx.workspaceId, input.evidence);
   if (missing.length) return { ok: false, error: `evidence references unknown artifacts: ${missing.join(', ')}` };
+  // Agent-written text is shown in the UI and logged: strip identity secrets first.
+  const text = redactSecrets(store, ctx.workspaceId, { name: input.name, description: input.description, reasoning: input.reasoning });
+  // Idempotent per (task, unit name): replays return the proposal already made.
+  const replay = findReplay(store, ctx, 'propose_business_unit', 'task', (p) => titleKey(String(p.name)) === titleKey(text.name));
+  if (replay) return { ok: true, data: { proposalId: (replay.payload as { proposalId: string }).proposalId, duplicate: true } };
   const proposal: UnitProposal = {
     id: newId('unit'),
     workspaceId: ctx.workspaceId,
-    name: input.name,
-    description: input.description,
+    name: text.name,
+    description: text.description,
     level: input.level,
     audiences: [...new Set(input.audiences)],
     evidence: input.evidence,
-    reasoning: input.reasoning,
+    reasoning: text.reasoning,
     status: 'proposed',
     createdAt: new Date().toISOString(),
   };
@@ -117,14 +124,14 @@ export const proposeBusinessUnitHandler: ExtraToolHandler = async (ctx, rawInput
     role: ctx.role,
     model: ctx.model,
     kind: 'decision',
-    payload: {
+    payload: redactSecrets(store, ctx.workspaceId, {
       tool: 'propose_business_unit',
       proposalId: proposal.id,
       name: proposal.name,
       level: proposal.level,
       audiences: proposal.audiences,
       reasoning: proposal.reasoning,
-    },
+    }),
     refs: [proposal.id, ...proposal.evidence, ...(ctx.taskId ? [ctx.taskId] : [])],
     promptVersion: ctx.promptVersion,
     createdAt: proposal.createdAt,
@@ -227,24 +234,36 @@ export function normalizeTitle(title: string): string {
 }
 
 /**
- * Descendant symptoms grouped by normalized title; only groups seen in ≥ 2 distinct descendant
- * workspaces are returned (possible company-wide issues).
+ * Descendant symptoms grouped by normalized title. Each descendant is attributed to its top-level
+ * child of `wsId` (the branch it sits in); only groups present under ≥ 2 distinct top-level children
+ * are returned (possible company-wide issues). `sourceWorkspaceIds` lists the actual source nodes,
+ * `childWorkspaceIds` the top-level children they roll up to.
  */
 export function crossCuttingSymptoms(store: Store, wsId: string): CrossCuttingGroup[] {
-  const groups = new Map<string, Sourced<Symptom>[]>();
-  for (const ws of descendants(store, wsId)) {
-    for (const s of store.symptoms.list({ workspaceId: ws.id, kind: 'symptom' })) {
-      const key = normalizeTitle(s.title);
-      if (!key) continue;
-      const g = groups.get(key) ?? [];
-      g.push({ ...s, sourceWorkspaceId: ws.id });
-      groups.set(key, g);
+  const groups = new Map<string, { symptoms: Sourced<Symptom>[]; branches: Set<string> }>();
+  const visit = (branch: string) => {
+    for (const ws of [store.workspaces.get(branch)!, ...descendants(store, branch)]) {
+      for (const s of store.symptoms.list({ workspaceId: ws.id, kind: 'symptom' })) {
+        const key = normalizeTitle(s.title);
+        if (!key) continue;
+        const g = groups.get(key) ?? { symptoms: [], branches: new Set<string>() };
+        g.symptoms.push({ ...s, sourceWorkspaceId: ws.id });
+        g.branches.add(branch);
+        groups.set(key, g);
+      }
     }
-  }
+  };
+  for (const child of children(store, wsId)) visit(child.id);
   const out: CrossCuttingGroup[] = [];
-  for (const [key, symptoms] of groups) {
-    const sources = [...new Set(symptoms.map((s) => s.sourceWorkspaceId))];
-    if (sources.length >= 2) out.push({ key, title: symptoms[0]!.title, sourceWorkspaceIds: sources, symptoms });
+  for (const [key, g] of groups) {
+    if (g.branches.size < 2) continue;
+    out.push({
+      key,
+      title: g.symptoms[0]!.title,
+      sourceWorkspaceIds: [...new Set(g.symptoms.map((s) => s.sourceWorkspaceId))],
+      childWorkspaceIds: [...g.branches],
+      symptoms: g.symptoms,
+    });
   }
   return out;
 }
