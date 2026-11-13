@@ -4,6 +4,8 @@ import type { ToolInput } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Competitor, CompetitorComparison, Decision } from '../types.js';
+// knowledge store KS-3
+import { linkCompetitor } from '../knowledge/entityLinks.js';
 
 /** Competitor of a workspace by normalized name (case / whitespace insensitive). */
 export function findCompetitor(store: Store, workspaceId: string, name: string): Competitor | undefined {
@@ -71,6 +73,7 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
             return p?.tool === 'save_competitor' && p.competitorId === prior.id && p.reused === true;
           });
         const reuse = keep && !recorded ? record(store, ctx, prior, input.evidence, { reused: true, unchanged: true }, 'decision') : undefined;
+        linkCompetitor(store, competitor, { agentRunId: ctx.agentRunId }); // knowledge store KS-3
         return { competitor, decision: reuse, duplicate: true };
       }
       const patch: Partial<Competitor> = { ...values, evidence, updatedAt: now, ...tracking };
@@ -78,6 +81,7 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
       patch.taskId = taskId; // a change without a task clears the owner (it is unverified)
       const competitor = store.competitors.update(prior.id, patch);
       const decision = same ? undefined : record(store, ctx, competitor, input.evidence, { revision: true, previous: { threat: prior.threat, directness: prior.directness, comparison: prior.comparison } });
+      linkCompetitor(store, competitor, { agentRunId: ctx.agentRunId }); // knowledge store KS-3
       return { competitor, decision, duplicate: false };
     }
     const competitor: Competitor = {
@@ -93,6 +97,7 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     if (input.site !== undefined) competitor.site = input.site;
     if (taskId) competitor.taskId = taskId;
     store.competitors.insert(competitor);
+    linkCompetitor(store, competitor, { agentRunId: ctx.agentRunId }); // knowledge store KS-3: entity + competes_with
     return { competitor, decision: record(store, ctx, competitor, input.evidence, {}), duplicate: false };
   });
   if (result.decision) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: result.decision });

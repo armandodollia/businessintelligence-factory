@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import { modelRefSchema, taskTypeSchema } from '../../config/schema.js';
+// knowledge store KS-3
+import { entityKindSchema } from '../../config/schema.js';
+import { RELATION_TYPES } from '../../knowledge/relations.js';
 import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
 import type { Role } from '../../types.js';
 
@@ -69,6 +72,18 @@ const personaProfileShape = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, per
   [K in PersonaField]: typeof personaField;
 };
 
+// --- knowledge store KS-3: entity references (design §7.4, §9) ---
+/** An entity of this business tree: `{ id }`, or `{ kind, name }` (resolved by name or alias, else created). */
+const entityRefInput = z.union([
+  z.strictObject({ id: id.describe('Entity id from a search, card or earlier save') }),
+  z.strictObject({ kind: entityKindSchema, name: z.string().min(1) }),
+]);
+const findingRelationInput = z.strictObject({
+  type: z.enum(RELATION_TYPES),
+  to: entityRefInput.describe('The other entity'),
+});
+// --- end knowledge store KS-3 ---
+
 // ---------------------------------------------------------------------------
 // input schemas (snake_case, as agents see them)
 
@@ -108,6 +123,18 @@ export const toolInputSchemas = {
     subject: z.string().min(1).describe('Company / product the claim is about'),
     criteria: criteria.default({}),
     evidence: z.array(id).min(1, 'evidence must reference at least one saved artifact'),
+    // knowledge store KS-3
+    entity: entityRefInput
+      .optional()
+      .describe(
+        'What the claim is about: { id } or { kind, name }. Omitted: the subject names it — an existing competitor, persona ' +
+          'or company entity of this business with that name or alias, else the company of a unit with that name, else a topic',
+      ),
+    relations: z
+      .array(findingRelationInput)
+      .max(10)
+      .optional()
+      .describe('Typed links this claim asserts from its entity, e.g. { type: "offers", to: { kind: "product", name: "Widget" } }'),
   }),
   submit_result: z
     .record(z.string(), z.unknown())
@@ -254,7 +281,10 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   save_artifact: 'Store evidence (screenshot, page snapshot, document or text). Returns artifactId.',
   read_artifact: 'Read a stored evidence artifact by id (text content, or the image for screenshots).',
   save_finding:
-    'Save a finding. Rejected unless evidence lists at least one artifact saved in this workspace.',
+    'Save a finding. Rejected unless evidence lists at least one artifact saved in this workspace. ' +
+    // knowledge store KS-3
+    'The finding is filed under an entity: `entity` when given, else the subject names it (an existing competitor, persona ' +
+    'or company entity with that name or alias, else the company of a business unit with that name, else a topic). Returns entityId.',
   submit_result: 'Submit your task deliverable (one JSON object). Call once at the end; resubmit after revisions.',
   submit_review: 'Submit your review: score 0–10 and issues classed blocking | substantive | nit | scope_expansion.',
   respond_to_review: 'Answer one review issue: fix (and say what changed) or pushback (with reason).',

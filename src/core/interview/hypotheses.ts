@@ -6,6 +6,8 @@ import { newId } from '../store/repos.js';
 import type { Decision, Finding, SymptomHypothesis } from '../types.js';
 import { isOutputUsable } from '../research/outputs.js';
 import { sameTree } from '../workspace/tree.js';
+// knowledge store KS-3
+import { linkHypothesis } from '../knowledge/entityLinks.js';
 
 /**
  * `save_hypothesis` (worker, `symptom_hypotheses` tasks; spec §8 drill-down): persists a hypothesis
@@ -100,6 +102,7 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
   };
   store.transaction(() => {
     store.symptomHypotheses.insert(hypothesis);
+    linkHypothesis(store, hypothesis, { agentRunId: ctx.agentRunId }); // knowledge store KS-3: cause entity + causes edge
     store.decisions.insert(decision);
   });
   events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision });

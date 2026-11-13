@@ -43,6 +43,12 @@ export const FEEDBACK_KINDS = [
   'prompt_patch_apply',
   /** A role's calibration appendix was reverted to an earlier version (integration: WP-B history). */
   'prompt_patch_revert',
+  // --- knowledge store KS-3 (design §13; wave-1 hook 1) ---
+  /** The user merged two entities (target: the survivor). */
+  'entity_merge',
+  /** The user renamed an entity. */
+  'entity_rename',
+  // --- end knowledge store KS-3 ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -57,7 +63,9 @@ export type FeedbackTargetType =
   | 'unit_proposal'
   | 'user_request'
   | 'scoring_weights'
-  | 'prompt';
+  | 'prompt'
+  // knowledge store KS-3: an entity (`entity_merge`, `entity_rename`)
+  | 'entity';
 
 export interface FeedbackEvent {
   id: string;

@@ -21,6 +21,9 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   weights_change: 'weights changed',
   prompt_patch_apply: 'prompt patch applied',
   prompt_patch_revert: 'prompt calibration reverted',
+  // knowledge store KS-3
+  entity_merge: 'entities merged',
+  entity_rename: 'entity renamed',
 };
 
 const short = (v: unknown, max = 80): string => {

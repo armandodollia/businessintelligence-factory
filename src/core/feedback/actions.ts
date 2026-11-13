@@ -38,6 +38,11 @@ import type {
   Workspace,
 } from '../types.js';
 import { acceptUnitProposal, rejectUnitProposal, type UnitProposalEdits } from '../workspace/businessMap.js';
+// knowledge store KS-3
+import { entityNameKey } from '../knowledge/entityKeys.js';
+import { EntityConflictError, cleanEntityName, mergeEntities, renameEntity, type MergeResult, type RenameResult } from '../knowledge/entities.js';
+import { KnowledgeNotFoundError, scopeFor } from '../knowledge/scope.js';
+import { knowledgeRepos } from '../store/repos.js';
 import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent } from './events.js';
 import { targetProvenance } from './provenance.js';
 import { UNIT_PROPOSAL_CRITERION } from './signals.js';
@@ -545,3 +550,88 @@ export function revertCalibrationAsUser(
     return { path: result.path, decisionId: decision.id, version: cal, promptVersion: version, previousPromptVersion, feedback };
   });
 }
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-3: entity merge / rename as human actions (design §7.4, §13; wave-1 hook 2).
+// Same transaction as the change; the actor comes from the caller (`actorOf(config)` in the API).
+
+export type EntityActionOpts = ActorOpts & {
+  /** The caller's node: ids outside its tree are "not found" (design §12). */
+  workspaceId?: string;
+};
+
+/** Runs an entity action, mapping knowledge errors to `FeedbackActionError` (404 not found, 409 conflict). */
+function entityAction<R>(fn: () => R): R {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof KnowledgeNotFoundError) throw new FeedbackActionError(e.message, 404);
+    if (e instanceof EntityConflictError) throw new FeedbackActionError(e.message, 409);
+    throw e;
+  }
+}
+
+const entitySnapshot = (e: { id: string; kind: string; name: string; aliases: string[] }) => ({
+  id: e.id, kind: e.kind, name: e.name, aliases: e.aliases,
+});
+
+/**
+ * Merges entity `loserId` into `survivorId` (`mergeEntities`) and records an `entity_merge` feedback
+ * event on the survivor (before: both entities; after: the survivor's names). When an upload-only
+ * name is involved, `beforeJson.uploadRefs` lists the upload-derived records behind it, so the
+ * export's provenance expansion leaves the event out by default.
+ */
+export function mergeEntitiesAsUser(store: Store, survivorId: string, loserId: string, opts: EntityActionOpts = {}): MergeResult {
+  return entityAction(() =>
+    store.transaction(() => {
+      const repo = knowledgeRepos(store).entities;
+      const before = { survivor: repo.get(survivorId), loser: repo.get(loserId) };
+      const scope = opts.workspaceId !== undefined ? scopeFor(store, opts.workspaceId) : undefined;
+      const result = mergeEntities(store, survivorId, loserId, actor(opts), scope ? { scope } : {});
+      recordFeedback(store, {
+        workspaceId: result.survivor.workspaceId,
+        actor: actor(opts),
+        kind: 'entity_merge',
+        targetType: 'entity',
+        targetId: result.survivor.id,
+        beforeJson: {
+          survivor: entitySnapshot(before.survivor!),
+          loser: entitySnapshot(before.loser!),
+          ...(result.uploadRefs.length ? { uploadRefs: result.uploadRefs } : {}),
+        },
+        afterJson: {
+          survivor: { name: result.survivor.name, aliases: result.survivor.aliases },
+          mergedIntoId: result.survivor.id,
+          aliasUploadOnly: result.aliasUploadOnly,
+          swappedNames: result.swappedNames,
+        },
+        ...(opts.reason ? { reason: opts.reason } : {}),
+      });
+      return result;
+    }),
+  );
+}
+
+/** Renames an entity (`renameEntity`) and records an `entity_rename` feedback event (same upload rule as merges). */
+export function renameEntityAsUser(store: Store, entityId: string, name: string, opts: EntityActionOpts = {}): RenameResult {
+  if (!entityNameKey(cleanEntityName(name))) throw new FeedbackActionError('name is empty', 400);
+  return entityAction(() =>
+    store.transaction(() => {
+      const scope = opts.workspaceId !== undefined ? scopeFor(store, opts.workspaceId) : undefined;
+      const result = renameEntity(store, entityId, name, scope ? { scope } : {});
+      const prior = { name: result.previousName };
+      recordFeedback(store, {
+        workspaceId: result.entity.workspaceId,
+        actor: actor(opts),
+        kind: 'entity_rename',
+        targetType: 'entity',
+        targetId: result.entity.id,
+        beforeJson: { ...prior, ...(result.uploadRefs.length ? { uploadRefs: result.uploadRefs } : {}) },
+        afterJson: { name: result.entity.name, aliases: result.entity.aliases, aliasUploadOnly: result.aliasUploadOnly },
+        ...(opts.reason ? { reason: opts.reason } : {}),
+      });
+      return result;
+    }),
+  );
+}
+// --- end knowledge store KS-3 ----------------------------------------------------------------------
