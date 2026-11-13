@@ -8,7 +8,7 @@ import type { ToolInput } from '../harness/tools/registry.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
-import type { ModelRef, Phase, ResearchRun, Task, Workspace } from '../types.js';
+import type { Decision, ModelRef, Phase, ResearchRun, Task, Workspace } from '../types.js';
 import { treeContext } from '../workspace/businessMap.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
@@ -40,42 +40,57 @@ export function currentResearchRun(store: Store, workspaceId: string): ResearchR
 // ---------------------------------------------------------------------------
 // propose_tasks
 
+/** Normalized near-duplicate key of a task within a research run: (type, subject, brief). */
+export function taskKey(t: { type: string; subject?: string | undefined; brief: string }): string {
+  const norm = (x: string | undefined) => (x ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return `${t.type}|${norm(t.subject)}|${norm(t.brief)}`;
+}
+
 /**
  * `propose_tasks` handler (orchestrator role). Validates each proposed task against the running
- * phase (allowed task types), enabled models and `limits.maxTasksPerRun` (per research run);
- * accepted items become `queued` Tasks. The Decision (`task_proposal`) is written by the dispatcher.
+ * phase (allowed task types), enabled models, `limits.maxTasksPerRun` (per research run) and
+ * near-duplicates already in the run (same type, normalized subject and brief); accepted items
+ * become `queued` Tasks.
+ *
+ * Replay detection, validation, task inserts and the `task_proposal` Decision happen in ONE
+ * synchronous transaction, so concurrent identical calls from the same run cannot both insert:
+ * an identical replay returns the original outcome with `duplicate: true` (no tasks, no budget, no
+ * second Decision). The handler writes the Decision itself (`recorded: true`).
  */
 export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps) => {
   const input = rawInput as ToolInput<'propose_tasks'>;
-  const { store, config } = deps;
-  // Identical replay from the same orchestrator run (e.g. after a rate-limit retry): return the
-  // original outcome; no new tasks, no budget used, and the dispatcher writes no second Decision.
+  const { store, config, events } = deps;
   const key = JSON.stringify(input);
-  const replay = findReplay(store, ctx, 'propose_tasks', 'run', (p) => JSON.stringify(p.input) === key);
-  if (replay) {
-    const original = (replay.payload as { result?: Record<string, unknown> }).result ?? {};
-    return { ok: true, data: { ...original, duplicate: true } };
-  }
-  const rr = currentResearchRun(store, ctx.workspaceId);
-  if (!rr) return { ok: false, error: 'no research phase is running for this workspace' };
-  const allowedTypes = PHASE_TASK_TYPES[rr.phase];
-  const models = allowedModels(config);
-  let remaining = config.limits.maxTasksPerRun - store.tasks.list({ runId: rr.id }).length;
-  const accepted: Array<{ index: number; taskId: string; type: string }> = [];
-  const rejected: Array<{ index: number; type: string; reason: string }> = [];
-  const now = new Date().toISOString();
-  store.transaction(() => {
+  const outcome = store.transaction(() => {
+    const replay = findReplay(store, ctx, 'propose_tasks', 'run', (p) => JSON.stringify(p.input) === key);
+    if (replay) {
+      const original = (replay.payload as { result?: Record<string, unknown> }).result ?? {};
+      return { ok: true as const, data: { ...original, duplicate: true }, decision: undefined };
+    }
+    const rr = currentResearchRun(store, ctx.workspaceId);
+    if (!rr) return { ok: false as const, error: 'no research phase is running for this workspace' };
+    const allowedTypes = PHASE_TASK_TYPES[rr.phase];
+    const models = allowedModels(config);
+    const existing = store.tasks.list({ runId: rr.id }).filter((t) => t.workspaceId === ctx.workspaceId);
+    const keys = new Map(existing.map((t) => [taskKey(t), t.id]));
+    let remaining = config.limits.maxTasksPerRun - existing.length;
+    const accepted: Array<{ index: number; taskId: string; type: string }> = [];
+    const rejected: Array<{ index: number; type: string; reason: string; duplicateOf?: string }> = [];
+    const now = new Date().toISOString();
     input.tasks.forEach((t, index) => {
       let reason: string | undefined;
+      const dupOf = keys.get(taskKey(t));
       if (!allowedTypes.includes(t.type)) {
         reason = `task type '${t.type}' is not allowed in phase '${rr.phase}' (allowed: ${allowedTypes.join(', ') || 'none'})`;
       } else if (!models.some((m) => m.provider === t.model.provider && m.model === t.model.model)) {
         reason = `model '${t.model.provider}/${t.model.model}' is not enabled (allowed: ${models.map((m) => `${m.provider}/${m.model}`).join(', ')})`;
+      } else if (dupOf) {
+        reason = `duplicate of task ${dupOf} already in this phase run (same type, subject and brief)`;
       } else if (remaining <= 0) {
         reason = `exceeds limits.maxTasksPerRun (${config.limits.maxTasksPerRun}) for this phase run`;
       }
       if (reason) {
-        rejected.push({ index, type: t.type, reason });
+        rejected.push(dupOf && reason.startsWith('duplicate') ? { index, type: t.type, reason, duplicateOf: dupOf } : { index, type: t.type, reason });
         return;
       }
       const task: Task = {
@@ -89,16 +104,35 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
         needsBrowser: t.needs_browser,
         acceptanceCriteria: t.acceptance_criteria,
         status: 'queued',
+        step: 'work',
         round: 1,
         createdAt: now,
       };
       if (t.subject !== undefined) task.subject = t.subject;
       store.tasks.insert(task);
+      keys.set(taskKey(task), task.id);
       remaining--;
       accepted.push({ index, taskId: task.id, type: t.type });
     });
+    const result = { accepted, rejected, remaining: Math.max(0, remaining) };
+    const decision: Decision = {
+      id: newId('dec'),
+      workspaceId: ctx.workspaceId,
+      agentRunId: ctx.agentRunId,
+      role: ctx.role,
+      model: ctx.model,
+      kind: 'task_proposal',
+      payload: { tool: 'propose_tasks', input, result },
+      refs: [rr.id, ...accepted.map((a) => a.taskId)],
+      promptVersion: ctx.promptVersion,
+      createdAt: now,
+    };
+    store.decisions.insert(decision);
+    return { ok: true as const, data: result, decision };
   });
-  return { ok: true, data: { accepted, rejected, remaining: Math.max(0, remaining) } };
+  if (!outcome.ok) return { ok: false, error: outcome.error };
+  if (outcome.decision) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: outcome.decision });
+  return { ok: true, data: outcome.data, recorded: true };
 };
 
 // ---------------------------------------------------------------------------
@@ -235,6 +269,16 @@ async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: num
   const version = promptVersion(system);
   const model = config.roles.orchestrator;
   const before = store.tasks.list({ runId: rr.id }).length;
+  // Round-started marker, written BEFORE the agent runs, so a resume after a crash mid-round does
+  // not start the same round again. The agent run does not exist yet, so the Decision is attached
+  // to a synthetic run id `orchestrator:<researchRunId>:r<round>`.
+  recordHarnessDecision(
+    store,
+    { agentRunId: `orchestrator:${rr.id}:r${round}`, workspaceId: rr.workspaceId, role: 'orchestrator', model, promptVersion: version },
+    'decision',
+    { event: 'orchestrator_round_started', researchRunId: rr.id, phase: rr.phase, round },
+    [rr.id],
+  );
   const res = await runAgent(deps, {
     kind: 'orchestrate', role: 'orchestrator', workspaceId: rr.workspaceId, round, attempt: 1,
     prompt: orchestratorPrompt(store, config, rr, round), systemPrompt: system,
@@ -254,10 +298,16 @@ async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: num
   }
 }
 
+/** Orchestrator rounds of a research run that were started (finished or not). */
 function orchestratorRounds(store: Store, rr: ResearchRun): number {
-  return harnessEvents(store, rr.workspaceId, 'orchestrator_round').filter(
-    (d) => (d.payload as { researchRunId?: string }).researchRunId === rr.id,
-  ).length;
+  const rounds = new Set<number>();
+  for (const event of ['orchestrator_round_started', 'orchestrator_round']) {
+    for (const d of harnessEvents(store, rr.workspaceId, event)) {
+      const p = d.payload as { researchRunId?: string; round?: number };
+      if (p.researchRunId === rr.id) rounds.add(p.round ?? rounds.size + 1);
+    }
+  }
+  return rounds.size;
 }
 
 async function runTracked(task: Task, deps: ResearchDeps): Promise<void> {
@@ -385,6 +435,8 @@ export type ResumeReport = {
   requeuedTasks: string[];
   /** Tasks still waiting for a pending user request. */
   waitingTasks: string[];
+  /** running/reviewing tasks whose research run is no longer running: marked `failed`, not re-queued. */
+  abandonedTasks: string[];
   /** Research runs being continued. */
   continuedRuns: string[];
   /** Settles when every continued research run has finished. */
@@ -416,7 +468,8 @@ export function killOrphanGroup(pid: number, startedAt?: string): boolean {
 /**
  * Startup recovery. AgentRuns left `running` by a dead process are marked `failed`, their tokens
  * revoked and their orphaned process groups killed (`AgentRun.pid`). Tasks in `running|reviewing`
- * are re-queued with the same round; tasks in `waiting_user` keep their pending request and resume
+ * are re-queued with the same round when their research run is still `running` (otherwise they are
+ * marked `failed`: nothing would run them); tasks in `waiting_user` keep their pending request and resume
  * when it is answered. Research runs still `running` are continued in the background (`done`).
  */
 export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
@@ -432,11 +485,19 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
   }
   const requeuedTasks: string[] = [];
   const waitingTasks: string[] = [];
+  const abandonedTasks: string[] = [];
+  const liveRuns = new Set(store.researchRuns.list({ status: 'running' }).map((r) => r.id));
   for (const t of store.tasks.list()) {
     if (active.has(t.id)) continue;
     if (t.status === 'running' || t.status === 'reviewing') {
-      store.tasks.update(t.id, { status: 'queued' });
-      requeuedTasks.push(t.id);
+      if (liveRuns.has(t.runId)) {
+        store.tasks.update(t.id, { status: 'queued' });
+        requeuedTasks.push(t.id);
+      } else {
+        // Its research run is over (or unknown): nothing will run it again.
+        store.tasks.update(t.id, { status: 'failed' });
+        abandonedTasks.push(t.id);
+      }
     } else if (t.status === 'waiting_user') {
       waitingTasks.push(t.id);
     }
@@ -447,5 +508,5 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
     Promise.all(runs.map((rr) => executePhase(deps, rr))),
   );
   done.catch(() => {});
-  return { failedRuns, requeuedTasks, waitingTasks, continuedRuns: runs.map((r) => r.id), done };
+  return { failedRuns, requeuedTasks, waitingTasks, abandonedTasks, continuedRuns: runs.map((r) => r.id), done };
 }

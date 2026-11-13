@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,6 +10,7 @@ import { Supervisor, type RunOptions } from '../../src/core/harness/supervisor.j
 import { TokenRegistry } from '../../src/core/harness/tokens.js';
 import { createToolHandlers, resolveUserRequest } from '../../src/core/harness/tools/handlers.js';
 import { openStore, type Store } from '../../src/core/store/db.js';
+import { newId } from '../../src/core/store/repos.js';
 
 const FAKE_CLI = join(import.meta.dirname, '../fixtures/fake-cli.mjs');
 const CLAUDE_FIXTURE = readFileSync(join(import.meta.dirname, '../fixtures/claude-stream.jsonl'), 'utf8')
@@ -123,6 +124,34 @@ describe('Supervisor', () => {
     expect(res).toMatchObject({ exitCode: 0, status: 'done', attempts: 3 });
     expect(res.events.filter((e) => e.t === 'error' && e.rateLimited)).toHaveLength(2);
     expect(res.events.at(-1)).toEqual({ t: 'done', exitCode: 0 });
+  });
+
+  it('rate-limit retry prompt lists what the previous attempt already did', async () => {
+    const { dir, sup, store, events } = setup();
+    const counterFile = join(dir, 'count');
+    const rejected = JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } });
+    // Attempt 1 "calls" save_finding and log_decision before being rate limited.
+    events.on((e) => {
+      if (e.type !== 'run_status' || e.status !== 'running') return;
+      for (const payload of [
+        { tool: 'save_finding', findingId: 'fnd_PRIOR', criteria: {} },
+        { tool: 'log_decision', what: 'chose the pricing page first', why: 'w' },
+      ]) {
+        store.decisions.insert({
+          id: newId('dec'), workspaceId: 'ws_a', agentRunId: e.agentRunId, role: 'worker',
+          model: { provider: 'claude', model: 'sonnet' }, kind: 'decision', payload, refs: [], promptVersion: 'pv', createdAt: '',
+        });
+      }
+    });
+    const res = await sup.run(cli({ counterFile, attempts: [{ lines: [rejected], exitCode: 1 }, { lines: CLAUDE_FIXTURE }] }));
+    expect(res).toMatchObject({ status: 'done', attempts: 2 });
+    const cwd = join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd');
+    const prompts = readdirSync(cwd).filter((f) => f.startsWith('prompt.')).sort().map((f) => readFileSync(join(cwd, f), 'utf8'));
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).not.toContain('Your previous attempt');
+    expect(prompts[1]).toContain('## Your previous attempt in this run already did:');
+    expect(prompts[1]).toContain('- save_finding fnd_PRIOR');
+    expect(prompts[1]).toContain('- log_decision: chose the pricing page first');
   });
 
   it('gives up after maxAttempts rate-limited attempts', async () => {

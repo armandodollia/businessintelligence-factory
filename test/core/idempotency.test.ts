@@ -10,6 +10,7 @@ import type { RunContext } from '../../src/core/harness/tokens.js';
 import { interviewToolHandlers } from '../../src/core/interview/interview.js';
 import { researchToolHandlers } from '../../src/core/research/tools.js';
 import { scoringToolHandlers } from '../../src/core/scoring/priority.js';
+import { acceptUnitProposal } from '../../src/core/workspace/businessMap.js';
 import { openStore, type Store } from '../../src/core/store/db.js';
 import { newId } from '../../src/core/store/repos.js';
 
@@ -97,6 +98,28 @@ describe('replayed tool calls are idempotent', () => {
     expect(store.unitProposals.list()).toHaveLength(1);
     data(await handle(c, 'propose_business_unit', { ...input, name: 'Lending' }));
     expect(store.unitProposals.list()).toHaveLength(2);
+  });
+
+  it('propose_business_unit replay revises a pending proposal and never touches decided ones', async () => {
+    const { store, handle } = setup();
+    const c = taskWithRun(store, ctx('worker'));
+    const base = { name: 'Payments', description: 'v1', level: 'division', audiences: ['external'], reasoning: 'r1' };
+    const { proposalId } = data<{ proposalId: string }>(await handle(c, 'propose_business_unit', base));
+    const firstDecision = store.unitProposals.get(proposalId)!.decisionId;
+    const rev = data<{ updated: string[] }>(
+      await handle(c, 'propose_business_unit', { ...base, description: 'v2', level: 'slice', audiences: ['external', 'internal'], reasoning: 'r2' }),
+    );
+    expect(rev.updated.sort()).toEqual(['audiences', 'description', 'level', 'reasoning']);
+    const p = store.unitProposals.get(proposalId)!;
+    expect(p).toMatchObject({ description: 'v2', level: 'slice', audiences: ['external', 'internal'], reasoning: 'r2', status: 'proposed' });
+    expect(p.decisionId).not.toBe(firstDecision);
+    expect(store.decisions.get(p.decisionId!)!.payload).toMatchObject({ revision: true, previous: { description: 'v1', level: 'division' } });
+    expect(store.unitProposals.list()).toHaveLength(1);
+
+    acceptUnitProposal(store, proposalId);
+    const after = data<{ duplicate: boolean; status: string }>(await handle(c, 'propose_business_unit', { ...base, description: 'v3' }));
+    expect(after).toMatchObject({ duplicate: true, status: 'accepted' });
+    expect(store.unitProposals.get(proposalId)).toMatchObject({ description: 'v2', status: 'accepted' });
   });
 
   it('save_symptom: one symptom per (run, kind, title)', async () => {

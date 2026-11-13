@@ -320,6 +320,51 @@ describe('replayed user requests', () => {
   });
 });
 
+describe('post-cap replays', () => {
+  it('save_finding replay updates judgments: reliability 5 -> 1 persists 1', async () => {
+    const s = setup();
+    const task = addTask(s.store);
+    const c = ctx('worker', { taskId: task.id });
+    const a = s.artifacts.save({ workspaceId: 'ws_a', kind: 'text', mime: 'text/plain', bytes: 'one' });
+    const b = s.artifacts.save({ workspaceId: 'ws_a', kind: 'text', mime: 'text/plain', bytes: 'two' });
+    const first = await s.handle(c, 'save_finding', { claim: 'Rival cut prices', subject: 'Rival', criteria: { relevance: 4, reliability: 5, novelty: 3 }, evidence: [a.id] });
+    const again = await s.handle(c, 'save_finding', { claim: 'Rival cut prices', subject: 'Rival Inc', criteria: { relevance: 4, reliability: 1, novelty: 3 }, evidence: [b.id] });
+    if (!first.ok || !again.ok) throw new Error('save_finding failed');
+    const id = (first.data as { findingId: string }).findingId;
+    expect(again.data).toMatchObject({ findingId: id, duplicate: true, updated: true });
+    expect(s.store.findings.list()).toHaveLength(1);
+    expect(s.store.findings.get(id)).toMatchObject({ subject: 'Rival Inc', criteria: { reliability: 1 }, evidence: [a.id, b.id] });
+    const scores = s.store.decisions.list({ kind: 'score' });
+    expect(scores).toHaveLength(2);
+    expect(scores[1]!.payload).toMatchObject({ revision: true, criteria: { reliability: 1 }, previous: { criteria: { reliability: 5 } } });
+    // An exact replay changes nothing and logs nothing.
+    await s.handle(c, 'save_finding', { claim: 'Rival cut prices', subject: 'Rival Inc', criteria: { relevance: 4, reliability: 1, novelty: 3 }, evidence: [b.id] });
+    expect(s.store.decisions.list({ kind: 'score' })).toHaveLength(2);
+  });
+
+  for (const outcome of ['resolved', 'denied'] as const) {
+    it(`replayed request already ${outcome} returns the stored answer at once`, async () => {
+      const s = setup();
+      const task = addTask(s.store);
+      const c = ctx('worker', { taskId: task.id });
+      const input = { kind: 'register', site: 'acme.com', instructions: 'Please register' };
+      const first = s.handle(c, 'request_user_action', input);
+      await tick();
+      const [req] = s.store.userRequests.list();
+      resolveUserRequest({ store: s.store, events: s.events }, req!.id, outcome, 'done as bob');
+      await first;
+      const replay = await s.handle(c, 'request_user_action', input);
+      expect(replay).toMatchObject({
+        ok: true,
+        data: { requestId: req!.id, status: outcome, approved: outcome === 'resolved', response: 'done as bob', reused: true },
+      });
+      expect(s.store.userRequests.list()).toHaveLength(1);
+      expect(s.store.userRequests.list({ status: 'pending' })).toHaveLength(0);
+      expect(s.seen.filter((e) => e.type === 'user_request')).toHaveLength(1);
+    });
+  }
+});
+
 describe('tokens', () => {
   it('rejects unknown token; resolves after store reopen; revoke', () => {
     const { store, dbPath } = setup();
