@@ -285,11 +285,7 @@ export type { FeedbackEvent, FeedbackKind, FeedbackTargetType } from '../../../s
 export type { SymptomHypothesis } from '../../../src/core/types.js';
 
 /** `POST /api/hypotheses/:id/correct`: the user's correction (text and/or confidence 0–100) and why. */
-export interface HypothesisCorrection {
-  hypothesis?: string;
-  confidence?: number;
-  reason?: string;
-}
+export type HypothesisCorrection = import('../../../src/core/feedback/actions.js').HypothesisCorrection & { reason?: string };
 
 // ---------------------------------------------------------------------------
 // learning loop WP-B: usage, costs, agent runs, prompt versions, calibration history
@@ -302,85 +298,28 @@ export type {
 } from '../../../src/core/types.js';
 export type { RunEvent } from '../../../src/core/harness/adapter.js';
 
-/** `UsageTotals` (src/core/metrics/usage.ts). `costUsd` = computed cost, else CLI-reported. */
-export interface UsageTotals {
-  runs: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
-  costUsd: number;
-  cliReportedCostUsd: number;
-  unpriced: number;
-}
-export type CostGroup = UsageTotals & { key: string; label: string };
+// Same shapes as the core report types (type-only re-exports; no duplicated definitions).
+export type { CostGroup, UsageTotals } from '../../../src/core/metrics/usage.js';
+export type { BudgetStatus } from '../../../src/core/harness/budget.js';
+export type { PromptVersionMetrics } from '../../../src/core/metrics/promptMetrics.js';
+export type { RunEventsPage } from '../../../src/core/harness/runEvents.js';
 
-/** `BudgetStatus` (src/core/harness/budget.ts). */
-export interface BudgetStatusView {
-  kind: 'workspace' | 'pipeline';
-  id: string;
-  cap: { maxTokens?: number; maxCostUsd?: number };
-  extensions: number;
-  effectiveCap: { maxTokens?: number; maxCostUsd?: number };
-  spent: { tokens: number; costUsd: number };
-  exceeded: boolean;
-  denied: boolean;
-  pendingRequestId?: string;
-}
-
-/** `GET /api/costs[?workspaceId=]`. */
-export interface CostReport {
-  pricing: { version: string; effectiveDate: string; currency: string };
-  total: UsageTotals;
-  byWorkspace: CostGroup[];
-  byTask: CostGroup[];
-  byRole: CostGroup[];
-  byModel: CostGroup[];
-  byPromptVersion: CostGroup[];
-  budgets?: BudgetStatusView[];
-}
+/** `GET /api/costs[?workspaceId=]`: the core cost report plus, with a workspace, its budget status. */
+export type CostReport = import('../../../src/core/metrics/usage.js').CostReport & {
+  budgets?: import('../../../src/core/harness/budget.js').BudgetStatus[];
+};
 
 /** An agent run as listed by `GET /api/workspaces/:id/agent-runs` (no token). */
-export type AgentRunView = Omit<import('../../../src/core/types.js').AgentRun, 'token'> & { usage: UsageTotals };
+export type AgentRunView = Omit<import('../../../src/core/types.js').AgentRun, 'token'> & {
+  usage: import('../../../src/core/metrics/usage.js').UsageTotals;
+};
 
 /** `GET /api/runs/:id`. */
 export interface AgentRunDetail {
   run: Omit<import('../../../src/core/types.js').AgentRun, 'token'>;
   attempts: import('../../../src/core/types.js').AgentRunAttempt[];
-  usage: UsageTotals;
+  usage: import('../../../src/core/metrics/usage.js').UsageTotals;
   usageRows: import('../../../src/core/types.js').AgentUsage[];
-}
-
-/** `GET /api/runs/:id/events`. */
-export interface RunEventsPage {
-  runId: string;
-  total: number;
-  offset: number;
-  limit: number;
-  events: import('../../../src/core/harness/adapter.js').RunEvent[];
-}
-
-/** `PromptVersionMetrics` (src/core/metrics/promptMetrics.ts). */
-export interface PromptVersionMetrics {
-  role: PatchRole;
-  promptVersion: string;
-  firstSeen: string;
-  lastSeen: string;
-  runs: number;
-  failedRuns: number;
-  ratings: number;
-  agreeRate: number | null;
-  meanDelta: number | null;
-  tasks: number;
-  verified: number;
-  unverified: number;
-  failed: number;
-  passRate: number | null;
-  firstRoundPassRate: number | null;
-  meanRounds: number | null;
-  costUsd: number;
-  totalTokens: number;
 }
 
 /** `POST .../calibration/versions/:id/revert`. */
