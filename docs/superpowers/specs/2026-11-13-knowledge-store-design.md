@@ -533,7 +533,8 @@ fallback for facts saved as `new`.
     Each line counts once, under its first cause. The summary states that
     `includeUploads` includes them. The API returns it as the `x-bif-export-summary`
     header of the JSONL download and from `GET /api/workspaces/:id/export/summary`.
-    The decision log shows it next to the download links, with an "including uploads"
+    The decision log computes it on demand (a button, as the metrics page does) and shows it
+    next to the download links, with an "including uploads"
     link.
   - **Known limit.** The rule does not catch uncited text that a run paraphrased from
     an exposed task's output when that text is carried on two tasks later: the later

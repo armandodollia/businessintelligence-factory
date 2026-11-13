@@ -340,14 +340,13 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
     recommendation and your ratings of either are left out.
 
   Only citing excludes. A later run that is only shown one of those outputs is not exposed by that,
-  its reads are exported, and a judgment citing only that task's other outputs is exported. The
-  Decision log computes the report below only when you press its button (it runs the whole
-  export). Exposure is computed at each export from the
-  retrieval log and never stored, so it cannot spread through cards or briefings. Each export reports
-  what it left out, counted by cause: cites an upload, exposed run, task of an exposed run,
-  references an output of such a task. The report comes in the `x-bif-export-summary` header and
-  from `GET /api/workspaces/:id/export/summary`, and the Decision log shows it with an "including
-  uploads" link. Known limit: uncited text paraphrased from such an output and carried on two tasks
+  its reads are exported, and a judgment citing only that task's other outputs is exported. Exposure
+  is computed at each export from the retrieval log and never stored, so it cannot spread through
+  cards or briefings. Each export reports what it left out, counted by cause: cites an upload, exposed
+  run, task of an exposed run, references an output of such a task. The report comes in the
+  `x-bif-export-summary` header and from `GET /api/workspaces/:id/export/summary`. The Decision log
+  (like the Metrics page) computes it only when you press its button, because that runs the whole
+  export, and shows it with an "including uploads" link. Known limit: uncited text paraphrased from such an output and carried on two tasks
   later is not caught.
 - **Usage, cost and prompts.** Every agent run's token usage (input, output, cache read/write) is
   stored with its cost, computed from the dated price table `src/core/harness/pricing.json` (USD per
@@ -367,7 +366,8 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   issue classes per task type, negative decision outcomes, run failures (not rate limits or other
   infrastructure), policy denials, your exclusions / corrections / rating disagreements on an agent's
   output, knowledge-store signals (zero-result searches, unused reads, duplicates, missing captions,
-  rejected quotes) and signals other features record (`recordLessonSignal`). When one recurs in 3
+  rejected quotes), reviewer-audit misses (below) and signals other features record (`recordLessonSignal`;
+  a note is kept only when it names a task, run or item that is not upload-derived or exposed). When one recurs in 3
   tasks, a rule is **proposed** on the **Lessons** page; you accept or reject it (with an optional
   reason), and only an accepted rule is appended to that role's prompt, tagged with a tracking
   marker (`[L-7F3A2C.v1]`), so the prompt version changes and every run's stored prompt shows which
@@ -387,24 +387,33 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `POST …/lessons/proposals/:pid/accept|reject` (`{reason?}`), `POST …/lessons/rules/:rid/propose-retire`,
   `POST …/lessons/retro`. Config: `lessons` (`enabled`, `minTasks`, `retireAfterCleanTasks`,
   `minEffectTasks`, `maxRulesPerRole` ≤ 15, `retro: { enabled, cron, model, windowDays, maxProposals }`).
+  `lessons.enabled: false` is a kill switch: no proposals, no retro, and accepted rules leave every
+  prompt (the new prompt versions are recorded). Runs that must not see lessons (experiment arms,
+  reviewer audits) carry a stored lessons-off flag, so they keep it after a restart.
 - **Reviewer audits and experiments (learning loop WP-F).** *Audits:* a different model (another
   enabled provider than the original reviewer when there is one; `audit.model` in config overrides)
   re-reviews the N most recently verified tasks of one business tree that were not audited yet, with
-  exactly the reviewer's input for the final round (same prompt, prompt reads logged before the run
-  starts, reads limited to the task's review slice). An audit never changes the task. When the
+  the reviewer's input for the final round (same prompt, prompt reads logged before the run starts,
+  reads limited to the task's review slice) but without lesson rules, so it judges independently of
+  what the reviewer learned. An audit never changes the task. When the
   auditor fails work the reviewer passed (a *miss*), the passing review gets a `weak-review` decision
-  outcome (source `reviewer_audit`) and the miss is a lesson signal for its tree. An auditor without a
+  outcome (source `reviewer_audit`) and the miss counts once per issue class and task as a reviewer
+  lesson signal for its tree. An auditor without a
   valid review is `invalid`, not a miss. Start one from the **Audits & experiments** page or
   `POST /api/workspaces/:id/audits {n?, taskIds?}`; schedule them with a cron
-  (`POST /api/workspaces/:id/audit-schedules {cron, n}`, run by the normal scheduler).
+  (`POST /api/workspaces/:id/audit-schedules {cron, n}`, run by the normal scheduler, the same way as
+  the weekly retro).
   *Experiments:* re-run a finished task as arm A and arm B (worker model and / or a stored worker
   prompt version; 1–5 repeats) through the normal review loop, with lessons off
-  (`POST /api/workspaces/:id/experiments`). The page compares review pass rate, first-round pass
+  (`POST /api/workspaces/:id/experiments`). Tasks that use the browser are refused unless
+  `experiments.allowBrowser` is true; then the request must carry `confirmBrowser: true` and the page
+  says that real-world actions repeat for each arm and each repeat. The page compares review pass rate, first-round pass
   rate, rounds, review scores, your ratings and cost per arm (`GET /api/experiments/:id`). Arm tasks
   sit in their own research run; their outputs are retired when they end (nothing reaches findings,
   knowledge or synthesis), they write no outcomes and never ask you questions. Experiment and audit
   runs and their decisions are tagged (`experiment_id`, `arm`, `audit_id`), stay out of the
-  prompt-version metrics and outcome reports, count against budgets like any run, follow the same
+  prompt-version metrics, outcome reports, calibration and prompt-patch examples (your ratings of
+  them still count in the arm comparison), count against budgets like any run, follow the same
   upload-exposure and export rules, and their export lines carry the tags.
 - **Metrics (learning loop WP-G).** The **Metrics** page charts review pass rate, first-round pass
   rate, rounds to pass, run failure rate, cost and rating agreement per day or week, with tables per

@@ -167,3 +167,40 @@ review pass rate, rounds, ratings, cost per arm. API + minimal UI.
 Migration 18 is owned by knowledge-store KS-0 (plans/2026-11-13-knowledge-store.md).
 Metrics API + view: pass rate, rounds to pass, failures, cost, rating agreement,
 outcome labels, over time and per role / task type / prompt version / model.
+
+## Orchestrator rulings (wave 2)
+
+Binding rulings made when WP-E, WP-F and WP-G were merged into `feat/learning-loop`. Each is
+implemented with tests.
+
+- **R1. Lessons kill switch.** `lessons.enabled: false` stops new proposals and the retro, and also
+  leaves accepted rules out of every prompt. The switch changes role prompt versions, so the new
+  versions are recorded in the prompt store (`recordLessonsPromptVersions`: at boot and when
+  `PUT /api/config` flips it).
+- **R2. Signal notes need provenance.** A `recordLessonSignal` note sent without a task, run or ref id
+  keeps only its category; the note text is dropped. A note with ids is kept only if none of those ids
+  is upload-derived or upload-exposed (the export's rule, `LessonPrivacy`).
+- **R3. Calibration ignores experiments and audits.** Ratings of experiment and reviewer-audit
+  judgments are left out of calibration (`calibrationReport`) and prompt-patch examples
+  (`proposePromptPatch`) by default (`calibrationRatings`, `includeExperiments` to include them). They
+  still count in the arm comparison (`compareExperiment`).
+- **R4. No browser experiments by default.** An experiment on a task that uses the browser is refused
+  (403) unless `config.experiments.allowBrowser` is true (default false). When allowed, the start
+  request must carry `confirmBrowser: true`, and the UI states that real-world actions repeat per arm
+  and per repeat.
+- **R5. Auditors run without lessons.** Audit runs are stored with `lessons_off` and their prompt has no
+  lesson rules, so the auditor stays independent of reviewer lessons. An audit run never switches the
+  audited task to lessons-off.
+- **R6. Decision log export summary on demand.** The Decision log computes the export summary only when
+  the user presses its button, as the Metrics page does; it never runs the export on load.
+- **R7. Rating agreement** in the metrics view follows `calibrationReport`'s ratings, as WP-G built it.
+  No change.
+
+Integration wiring done with these rulings: prompt assembly reads the stored lessons-off flag (WP-F
+`lessonsOff`; `withLessons` only marks the runs it starts); reviewer-audit misses reach lessons by one
+path (`collectLessonSignals` reads `auditMisses`; the audit's `weak-review` outcome is not counted
+again); the retro and audit schedules share one scheduler hook (`ScheduledJobSource`,
+`builtInJobSources`); the metrics view excludes experiment and audit runs through WP-F's tags (toggle
+to include) and shows WP-E's `rulesWithEffect` per rule and prompt version. Export (knowledge-store
+design §12): an output of an exposed task is followed along citation edges like an upload-derived
+artifact, so a task whose outputs cite one has its judgments left out.
