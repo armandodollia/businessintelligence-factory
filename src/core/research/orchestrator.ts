@@ -19,6 +19,7 @@ import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } f
 import { PipelineBusyError, tryLockPipeline } from './lock.js';
 import { failureReason, runTaskWithReview } from './reviewLoop.js';
 import { applyTaskStatus } from './outputs.js';
+import { policyDenialsSection } from '../policy/policyEvents.js'; // WP-D
 
 /** At most this many orchestrator runs per phase (initial plan + one follow-up round). */
 export const MAX_ORCHESTRATOR_ROUNDS = 2;
@@ -293,6 +294,8 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
   ];
   const problems = previousPhaseProblems(store, rr);
   if (problems) parts.push(problems);
+  const denials = policyDenialsSection(store, rr.workspaceId, 'orchestrator'); // WP-D
+  if (denials) parts.push(denials);
   if (existing.length) {
     parts.push(
       round > 1
@@ -644,4 +647,22 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
     continuedPipelines: pipelines.map((p) => p.id),
     done,
   };
+}
+
+// ---------------------------------------------------------------------------
+// WP-D: escalation re-runs
+
+/**
+ * Runs one task through the review loop outside the drain loop (a re-run after an answered
+ * escalation), tracked like drained tasks so no drain loop runs it at the same time. Resolves with
+ * the task's final state, or `undefined` when it is already running.
+ */
+export async function runTaskTracked(task: Task, deps: ResearchDeps): Promise<Task | undefined> {
+  if (active.has(task.id)) return undefined;
+  active.add(task.id);
+  try {
+    return await runTaskWithReview(task, deps);
+  } finally {
+    active.delete(task.id);
+  }
 }

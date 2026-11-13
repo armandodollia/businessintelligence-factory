@@ -56,3 +56,21 @@ export function priorAttemptSection(store: Store, agentRunId: string): string {
     'It was interrupted by a rate limit. Do not repeat or paraphrase these calls; continue from where it stopped.',
   ].join('\n');
 }
+
+// ---------------------------------------------------------------------------
+// WP-D: prior-attempt summary reused by escalation re-runs
+
+/**
+ * One-line summaries of the tool calls a run recorded (same format as `priorAttemptSection`), the
+ * last `limit` kept, for re-running a task after an escalation was answered.
+ */
+export function priorRunLines(store: Store, agentRunId: string, limit = 12): string[] {
+  const lines: string[] = [];
+  for (const d of store.decisions.list({ agentRunId })) {
+    const p = d.payload as Record<string, unknown> | null;
+    if (!p || typeof p !== 'object') continue;
+    const line = summarize(p);
+    if (line) lines.push(`- ${line}`);
+  }
+  return lines.length > limit ? [`- … ${lines.length - limit} earlier call(s) omitted`, ...lines.slice(-limit)] : lines;
+}
