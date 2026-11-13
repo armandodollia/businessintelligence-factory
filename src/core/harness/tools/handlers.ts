@@ -16,6 +16,7 @@ import { findReplay } from './idempotency.js';
 // Knowledge store KS-1: captures, captions, entity / applies_to, extraction, describe_artifact.
 import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave } from '../../knowledge/artifactTools.js';
 import type { CaptureResult } from '../../evidence/artifacts.js';
+import { ingestorFor } from '../../knowledge/ingest.js';
 import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
 // knowledge store KS-3
 import { findingEntity, linkFindingRelations, relinkFinding } from '../../knowledge/entityLinks.js';
@@ -123,7 +124,13 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
   }
 
   // Knowledge store KS-2: living-fact tools (save_finding beyond the replay rule, confirm / retract).
-  const factEnv: FactToolEnv = { store, artifacts, config: deps.config, events, recordDecision };
+  // KS-1 × KS-2: a quote on a still-pending artifact extracts and indexes it inline (stored chunks).
+  const factEnv: FactToolEnv = {
+    store, artifacts, config: deps.config, events, recordDecision,
+    ensureExtracted: async (artifactId) => {
+      await ingestorFor({ store, artifacts, config: deps.config }).ensure(artifactId);
+    },
+  };
 
   function taskOf(ctx: RunContext): Task | undefined {
     if (!ctx.taskId) return undefined;

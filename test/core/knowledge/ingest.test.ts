@@ -282,6 +282,25 @@ describe('Ingestor queue', () => {
     expect(await ing.submit(big.id)).toMatchObject({ status: 'ok', chunks: 1 });
   });
 
+  it('ensure() ingests a queued artifact now whatever its size and joins a run in flight', async () => {
+    const t = setup(cfg({ inlineMaxBytes: 0 }));
+    let calls = 0;
+    const ing = new Ingestor(t.deps, {
+      extract: async (bytes, mime, opts) => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 5));
+        return extract(bytes, mime, opts);
+      },
+    });
+    const a = t.artifacts.save({ workspaceId: 'R', kind: 'text', mime: 'text/plain', bytes: 'larger than the inline cap' });
+    expect(await ing.submit(a.id)).toMatchObject({ status: 'pending', queued: true });
+    const [x, y] = await Promise.all([ing.ensure(a.id), ing.ensure(a.id)]);
+    expect(x).toMatchObject({ status: 'ok', chunks: 1 });
+    expect(y).toEqual(x);
+    await ing.idle();
+    expect(calls).toBe(1);
+  });
+
   it('respects the concurrency limit and survives a throwing extractor', async () => {
     const t = setup(cfg({ inlineMaxBytes: 0, concurrency: 2 }));
     let running = 0;

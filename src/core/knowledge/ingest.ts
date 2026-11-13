@@ -227,6 +227,15 @@ export class Ingestor {
     return Promise.resolve({ ...current, queued: true });
   }
 
+  /**
+   * Ingests `artifactId` now whatever its size, joining a run already in flight (KS-2 quote checks
+   * via `FactToolEnv.ensureExtracted`: the quote is checked against stored chunks, not a queued
+   * future). Also runs after `stop()`; `ingestArtifact` itself never re-ingests a non-`pending` row.
+   */
+  ensure(artifactId: string): Promise<ExtractionSummary> {
+    return this.inflight.get(artifactId) ?? this.run(artifactId);
+  }
+
   /** Adds `artifactId` to the queue (once). */
   enqueue(artifactId: string): void {
     if (this.stopped || this.queued.has(artifactId) || this.inflight.has(artifactId)) return;
