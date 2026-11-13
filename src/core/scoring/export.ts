@@ -567,12 +567,19 @@ class ExportExclusion extends UploadExclusionSet {
     return c;
   }
 
-  /** Whether record `id` cites an output of an exposed task along its citation edges (cycle-safe). */
+  /**
+   * Whether record `id` cites an output of an exposed task along its citation edges (cycle-safe).
+   * Opus finding 1 (design-thread ruling): `replaces` is a citation edge, forward only — a later version
+   * of a fact inherits from the version it replaces, to any depth; an earlier version never inherits
+   * from a later one (the edge is followed from the replacement to what it replaced, never back).
+   */
   private citesExposedOutput(id: string, seen: Set<string>): boolean {
     if (seen.has(id)) return false;
     seen.add(id);
     const { outputs } = this.load();
-    return (recordEvidenceOf(this.exportStore, id) ?? []).some((e) => outputs.has(e) || this.citesExposedOutput(e, seen));
+    const replaced = this.exportStore.findings.get(id)?.replacesId;
+    const edges = [...(recordEvidenceOf(this.exportStore, id) ?? []), ...(replaced ? [replaced] : [])];
+    return edges.some((e) => outputs.has(e) || this.citesExposedOutput(e, seen));
   }
 
   /**
@@ -635,6 +642,9 @@ export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<st
       ...store.competitors.list({ taskId: t }),
       ...store.symptomHypotheses.list({ taskId: t }),
     ]) outputs.add(x.id);
+    // A confirm / retract / replace observation is its task's output too (design-thread ruling): what
+    // references it is excluded; the fact it targets keeps its own status.
+    for (const o of knowledgeRepos(store).factObservations.list({ taskId: t })) outputs.add(o.id);
   }
   return { runs, tasks, outputs, ids: new Set([...tasks, ...outputs]) };
 }
@@ -679,6 +689,7 @@ function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclus
             ? 'exposed_run'
             : firstCause([
                 o.taskId ? uploads.exposedCause(o.taskId) : undefined,
+                uploads.exposedCause(o.id),
                 uploads.exposedCause(o.findingId),
                 o.priorFindingId ? uploads.exposedCause(o.priorFindingId) : undefined,
                 ...o.evidence.map((e) => uploads.exposedCause(e)),
