@@ -37,6 +37,18 @@ export type BusEvent =
       workspaceId: string;
       taskId: string;
       status: Task['status'];
+    }
+  // --- knowledge store KS-0 ---
+  | {
+      /**
+       * A knowledge read was logged (`retrieval_events`, design §13). Carries only the row id: the
+       * payload lives in the table (no second copy). Emitted by `recordRetrieval`.
+       */
+      type: 'retrieval';
+      workspaceId: string;
+      retrievalEventId: string;
+      agentRunId?: string;
+      taskId?: string;
     };
 
 export class AbortError extends Error {

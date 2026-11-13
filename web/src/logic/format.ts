@@ -84,6 +84,8 @@ export function describeEvent(e: BusEvent): string {
       return `user action ${e.request.status}: ${e.request.kind}`;
     case 'task_status':
       return `task ${e.taskId} ${e.status}`;
+    case 'retrieval': // knowledge store (KS-0)
+      return `knowledge read ${e.retrievalEventId}`;
   }
 }
 
