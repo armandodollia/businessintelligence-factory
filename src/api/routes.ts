@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { ConfigError, parseConfig } from '../core/config/load.js';
 import { ROLES, type BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
-import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
+import { ArtifactFileGoneError, ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
 import { treeWorkspaceIds } from '../core/evidence/synthesis.js';
 import { lastReviewsByTask, withLastReview } from '../core/research/outputs.js';
 import { isPipelineLocked } from '../core/research/lock.js';
@@ -47,6 +47,7 @@ import { sseResponse } from './sse.js';
 import { mountUsageRoutes } from './usageRoutes.js';
 import { mountOversightRoutes } from './oversightRoutes.js'; // WP-D
 import { mountKnowledgeMetricsRoutes } from './knowledgeMetricsRoutes.js'; // knowledge store KS-6
+import { mountKnowledgeRoutes } from './knowledgeRoutes.js'; // knowledge store KS-7
 
 export type AppDeps = {
   store: Store;
@@ -235,6 +236,7 @@ export function createApp(deps: AppDeps): Hono {
     if (err instanceof ConfigError) return c.json({ error: err.message, issues: err.issues }, 400);
     if (err instanceof ArtifactNotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof ArtifactTooLargeError) return c.json({ error: err.message }, 413);
+    if (err instanceof ArtifactFileGoneError) return c.json({ error: err.message }, 410); // knowledge store KS-7: pruned file
     console.error(`[bif] ${c.req.method} ${c.req.path} failed:`, err);
     return c.json({ error: (err as Error).message ?? String(err) }, 500);
   });
@@ -668,6 +670,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- knowledge store KS-6: knowledge metrics and learning signals ------------------------------
   mountKnowledgeMetricsRoutes(app, { store, config, artifacts }, workspace);
   // --- end KS-6 ---
+  // --- knowledge store KS-7: Knowledge view (search, cards, items, changes, lists, actions, gc) ----
+  mountKnowledgeRoutes(app, { store, artifacts, config, events });
+  // --- end knowledge store KS-7 ----------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

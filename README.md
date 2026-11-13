@@ -241,6 +241,10 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,
   logged before the run starts — is recorded in `retrieval_events`; a run shown upload-derived text
   counts as upload-exposed.
+  Nothing inside a business is confidential from another part of it: node scope is a relevance
+  default, a node-scoped `search` says how many more matches exist elsewhere in the business (counts
+  only), and around a symptom or cause entity the `causes` / `addresses` relations of the whole
+  business are listed, each labelled with the part it comes from.
 - **Knowledge tracking (knowledge store).** When a run saves something citing ids it was shown by a
   read, those ids are marked used (`retrieval_uses`); hit rate = reads with a used result. Living facts
   write decision outcomes once each (`confirmed`, `changed`, `retracted`, `stale`, `user-rejected`, and
@@ -252,6 +256,19 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `GET /api/workspaces/:id/knowledge/metrics` (store size, freshness, hit and zero-result rates, retrieved /
   used tokens per role, task type, prompt version and model, share of input tokens that was retrieved
   knowledge) and `GET /api/workspaces/:id/knowledge/signals` (learning signals per role).
+- **Knowledge view (knowledge store).** The *Knowledge* tab searches the store as you ("this part of
+  the business" / "whole business"), lists entities and opens their cards, a fact's history and
+  evidence (shown as plain text, never rendered), merge suggestions, stale facts, conflicts and
+  unverified updates, and recent changes. Upload-derived items are marked with why the export leaves
+  them out. Retracting a fact, applying an unverified update, changing where a fact applies, merging
+  or renaming entities and rejecting a suggestion are your actions (feedback events, actor
+  `user.id`). The storage report shows, per part and age, the stored files no record references;
+  nothing is removed automatically. Pruning is your explicit action on files you pick, at least
+  `knowledge.retention.pruneMinAgeDays` (default 90) days old: it is refused as a whole if any file
+  is still cited (by any fact version, observation, record, the latest capture of a flow step, an
+  upload list) and removes only the file — the description and extracted text stay, and capturing
+  the same bytes again restores it. Each prune is logged (a decision and an `artifact_prune` feedback
+  event).
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.

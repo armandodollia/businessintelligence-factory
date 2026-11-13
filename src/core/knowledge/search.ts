@@ -467,9 +467,21 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
   }
   if (!terms.length) notes.push('empty query: newest items of the entity first');
   const header = { query: input.query ?? '', scope: mode, ...(relaxed ? { relaxed: true } : {}) };
-  const page = pageOf(hits.map((h) => h.hit), header, budget, {
-    key: cursorKey(cursorParts), notes, itemsKey: 'hits', ...(input.cursor ? { cursor: input.cursor } : {}),
+  const pageWith = (n: string[]) => pageOf(hits.map((h) => h.hit), header, budget, {
+    key: cursorKey(cursorParts), notes: n, itemsKey: 'hits', ...(input.cursor ? { cursor: input.cursor } : {}),
   });
+  let page = pageWith(notes);
+  // KS-7 (user decision, design §3): a node-scoped search says how many more matches exist elsewhere in
+  // the business. First page only; counts only (no text, no ids; the retrieval row is unchanged); left
+  // out when it would cost a hit of this page (the response budget always holds).
+  const elsewhere = mode === 'node' && !input.cursor ? elsewhereNote(c, kinds, terms, relaxed ? 'OR' : 'AND') : undefined;
+  if (elsewhere) {
+    const withNote = pageWith([...notes, elsewhere]);
+    if (withNote.items.length === page.items.length && withNote.truncated === page.truncated) {
+      page = withNote;
+      notes.push(elsewhere);
+    }
+  }
   const shown = hits.slice(page.offset, page.offset + page.items.length);
   const out: ReadOutput = {
     data: { ...header, hits: page.items },
@@ -485,6 +497,25 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
   };
   if (page.cursor) out.cursor = page.cursor;
   return out;
+}
+
+/**
+ * "Elsewhere" line of a node-scoped search: per kind, how many matches the same query has in the whole
+ * tree beyond node scope (up to the search pool per kind, `+` when the pool is full). Counts only.
+ * `undefined` when there are none.
+ */
+function elsewhereNote(c: Ctx, kinds: readonly SearchKind[], terms: string[], op: 'AND' | 'OR'): string | undefined {
+  const parts: string[] = [];
+  for (const k of kinds) {
+    const ids = (ctx: Ctx) => new Set(rankKind(RUNNERS[k](ctx, terms, op), Number.POSITIVE_INFINITY).map((h) => h.hit.id));
+    const wide = ids({ ...c, mode: 'tree', limit: MAX_LIMIT });
+    if (!wide.size) continue;
+    const near = ids({ ...c, limit: MAX_LIMIT });
+    const n = [...wide].filter((id) => !near.has(id)).length;
+    if (n > 0) parts.push(`${k} ${n}${wide.size >= MAX_LIMIT * POOL_FACTOR ? '+' : ''}`);
+  }
+  if (!parts.length) return undefined;
+  return `more matches elsewhere in the business (outside node scope): ${parts.join(', ')}; repeat with scope "tree" to see them`;
 }
 
 /** A search request that cannot run (empty query without an entity). */

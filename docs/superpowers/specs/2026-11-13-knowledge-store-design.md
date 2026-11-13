@@ -57,6 +57,20 @@ Made by the user:
    is SQLite FTS5. The search interface must allow a vector signal later without
    changing the tool contract.
 
+Approved by the user later (2026-11-13, after the KS-4 gate):
+
+13. **No confidentiality inside a tree.** Nothing in a tree is confidential from another node of
+    the same tree; there is no "restricted" label, now or planned. The user wants a wide view of the
+    company (an HR flow that makes a product flow inefficient must be findable). By-id sibling reads
+    (§7.1) are confirmed as built.
+14. **"Elsewhere" count on `search`.** A node-scoped search that also has matches outside node
+    scope says, in one line, how many more matches exist elsewhere in the business per kind and that
+    `scope: "tree"` returns them. Counts only (no text, no ids); nothing when zero.
+15. **Causal edges cross nodes by default.** On a symptom's card and in `expand` of a symptom or
+    cause entity, `causes` and `addresses` relations are listed tree-wide without `scope: "tree"`,
+    each labelled with its source node. Every other relation type keeps the node boundary.
+16. **Tree-wide diagnosis prompts** (KS-5): diagnosis prompts may draw on the whole tree.
+
 Made by the designer (correct any of these):
 
 6. **Computed cards.** Entity summaries are assembled by code from reviewed facts at
@@ -91,6 +105,9 @@ Non-goals (v1)
 - Embeddings / vector search, OCR, perceptual image hashing, chunk-level diffs of a
   changed page, LLM-written summaries, multi-user access control, cross-tree
   knowledge of any kind.
+- Per-item restriction or confidentiality inside a tree (decision 13): every node of a
+  tree may read every other node's items; node scope is a relevance default, not an
+  access rule.
 
 Anti-goals
 - A tool that can return an unbounded response.
@@ -161,9 +178,14 @@ lists *around* it (an entity card's facts and relations, an entity's neighbours 
 card's entity index and counts) follows node scope unless `scope: "tree"` is passed. A node card
 requested for another node shows that node's own view, labelled. Rationale: same-tree nodes may read
 and cite each other, and an agent only holds a sibling's id because it asked tree-wide or because
-in-scope evidence cites it. (Designer's interpretation pending the user's confirmation; the rule is
-one function, `allowByIdSiblingRead`, so requiring `scope: "tree"` for such reads is a one-line
-change.)
+in-scope evidence cites it. (Confirmed by the user, decision 13; the rule stays one function,
+`allowByIdSiblingRead`.)
+
+Causal edges (decision 15): around a symptom or cause entity (its card, `expand` of it), `causes` and
+`addresses` relations are listed from the whole tree in node scope too, each labelled with its source
+node (the node of the record asserting the edge); the edge and its source record are logged in the
+retrieval row. This is a named case of the one around-item rule (`aroundVisible`); every other
+relation type follows the request's scope.
 
 Invariant: a workspace's parent never changes after creation. If re-parenting is
 ever added it must rewrite `entities.root_workspace_id`.
@@ -378,6 +400,12 @@ Write tools:
 | `describe_artifact` | new: add or replace the description of an artifact that has none (or that the caller saved). |
 | `read_workspace` | Returns the node card plus counts, not every finding. Accepts `scope?`, `cursor?`, `max_tokens?` like `get_card`. |
 
+A node-scoped `search` (first page) adds one note when the same query matches more items elsewhere in
+the tree: `more matches elsewhere in the business (outside node scope): fact 2, entity 1; repeat
+with scope "tree" to see them` — counts only, per kind (up to the search pool, `+` when full), no
+text and no ids; the retrieval row is unchanged; the note is left out when it would cost a hit of the
+page, so the response budget always holds (decision 14).
+
 Search query handling: the agent's text is never passed to `MATCH` raw. It is
 tokenized, each token quoted, joined with AND; quoted phrases are kept. Zero hits →
 one automatic retry with OR, flagged `relaxed`. Empty query with `entity_id` =
@@ -456,6 +484,10 @@ fallback for facts saved as `new`.
 
 ## 12. Privacy and isolation
 
+- **No confidentiality inside a tree** (decision 13). Node scope is a relevance default: any node
+  may read any other node of its tree (by id, or with `scope: "tree"`), the "elsewhere" count says
+  what node scope left out, and causal edges cross nodes by default. There is no per-item
+  restriction label. Tree isolation and the upload / export rules below are unchanged.
 - **Tree isolation.** Every knowledge query takes its ids from `KnowledgeScope`.
   Ids supplied by an agent are checked with `sameTree`; an out-of-tree id and an
   unknown id produce the same error. Entities, merge suggestions, duplicate
@@ -485,7 +517,7 @@ relaxed, latency ms, upload_derived, created_at.
 
 | Learning-loop piece | Integration |
 |---|---|
-| WP-A `feedback_events`, actor | New human actions write events with the configured actor: `entity_merge`, `entity_rename`, `fact_scope_change`, `fact_retract`, `fact_replacement_accept`, `artifact_prune`. A new fact version re-queues its lineage in the review queue (the rated revision ≠ current). Export gains retrieval events and fact observations, under the upload rules. |
+| WP-A `feedback_events`, actor | New human actions write events with the configured actor: `entity_merge`, `entity_merge_reject`, `entity_rename`, `fact_scope_change`, `fact_retract`, `fact_replacement_accept`, `artifact_prune`. A new fact version re-queues its lineage in the review queue (the rated revision ≠ current). Export gains retrieval events and fact observations, under the upload rules. |
 | WP-B usage, cost, prompt store | Retrieval tokens per run sit next to `agent_usage` so the cost report shows how much of a run's input was retrieved knowledge. Changed role prompts get new prompt versions automatically; the assembled briefing is part of the saved `prompt.md`. |
 | WP-C `decision_outcomes`, `recordOutcome` | Lineage events call `recordOutcome` on the decision that saved the fact: `confirmed` (later verified confirmation), `changed` (replaced), `retracted`, `stale` (first time observed past TTL), `user-rejected`. This replaces WP-C's text-diff hook for scheduled changes. A duplicate handshake answered `new` that the user later merges is a `duplicate-saved` outcome. |
 | WP-D `policy_events`, `bus_events` | Out-of-slice or out-of-tree read attempts are policy events (blocked attempt). Retrieval emits a bus event carrying only the retrieval id (no double storage). The escalation role gets a reviewer-style slice. |
@@ -510,6 +542,13 @@ than home) records a `Decision` with refs, like `save_finding` does today.
   references, older than a chosen age. A pruned artifact keeps its row, hash,
   description and text; only the file goes. Logged as a system decision and a
   feedback event.
+  As built (KS-7): "references" are any fact version (any lifecycle or status), fact observations,
+  competitors, symptoms, hypotheses, unit proposals, review issues, persona profile fields, relations
+  sourced by the artifact, the latest capture of a (node, flow, step), kind `upload` or a profile's
+  `uploads`, and a still-`pending` extraction. Prune is all or nothing; a request may ask for an
+  older cut than `pruneMinAgeDays`, never a younger one. A pruned file reads as 410 and comes back
+  when the same bytes are captured again. The report also counts texts from an older extractor
+  version (no re-extraction exists yet).
 - Cost: no model calls are added. The extra agent tokens are captions and the
   duplicate handshake. Prompts shrink from "all findings" to a fixed briefing.
 - Latency: FTS5 queries are milliseconds at this scale; extraction is tens of
@@ -561,6 +600,14 @@ accept/reject, fact scope change, fact retract, gc report and prune.
 UI: one Knowledge view — search box with "this part / whole business", entity list
 → card → fact history → evidence; merge suggestions; stale and conflict lists.
 Behaviour in `web/src/logic`, markup in `web/src/views`.
+
+As built (KS-7): routes under `/api/workspaces/:id/knowledge/…` (`:id` = the caller's node), every
+read taking `scope=node|tree`. Search, entity card, node card, item (`expand`), artifact text and
+changes call `knowledgeRead` with `role: 'user'` (logged, no agent run); the entity list, merge
+suggestions, stale / conflict lists and stats apply the same scope predicates without a retrieval row
+(user reads expose no agent run). Ids of another tree answer exactly like unknown ids (404). Actions
+go through `feedback/actions.ts` with the actor from config. Upload-derived items carry `uploadWhy`
+(`explainUploadDerived`).
 
 ## 18. Testing (required suites)
 

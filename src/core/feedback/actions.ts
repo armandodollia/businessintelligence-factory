@@ -23,6 +23,7 @@ import { recordSystemDecision } from '../systemDecision.js';
 import type {
   CalibrationVersion,
   Competitor,
+  EntityMergeSuggestion,
   Decision,
   Finding,
   OutputStatus,
@@ -40,11 +41,15 @@ import type {
 import { acceptUnitProposal, rejectUnitProposal, type UnitProposalEdits } from '../workspace/businessMap.js';
 // knowledge store KS-3
 import { entityNameKey } from '../knowledge/entityKeys.js';
-import { EntityConflictError, cleanEntityName, mergeEntities, renameEntity, type MergeResult, type RenameResult } from '../knowledge/entities.js';
-import { KnowledgeNotFoundError, scopeFor } from '../knowledge/scope.js';
+import {
+  EntityConflictError, cleanEntityName, mergeEntities, rejectMergeSuggestion, renameEntity, type MergeResult, type RenameResult,
+} from '../knowledge/entities.js';
+import { KnowledgeNotFoundError, inTree, scopeFor } from '../knowledge/scope.js';
 import { knowledgeRepos } from '../store/repos.js';
 import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent } from './events.js';
-import { applyReplacementByUser } from '../knowledge/facts.js'; // KS-2
+import { FactActionError, applyReplacementByUser, retractFactByUser, setFactScopes } from '../knowledge/facts.js'; // KS-2, KS-7
+import { pruneArtifacts, type ArtifactFiles, type PruneResult } from '../knowledge/gc.js'; // KS-7
+import { mergeSuggestionIsUploadOnly } from '../knowledge/provenance.js'; // KS-7
 import { mergeDuplicateSaves } from '../knowledge/outcomes.js'; // KS-6
 import { targetProvenance } from './provenance.js';
 import { UNIT_PROPOSAL_CRITERION } from './signals.js';
@@ -645,3 +650,174 @@ export function renameEntityAsUser(store: Store, entityId: string, name: string,
   );
 }
 // --- end knowledge store KS-3 ----------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-7: the human actions of the Knowledge view (design §13, §14, §17). Every one
+// runs through here with the actor from the caller (`actorOf(config)` in the API, never a request
+// body). With `workspaceId` (the caller's node) any id outside its business tree answers exactly
+// like an unknown id (404, design §12).
+
+export type KnowledgeActionOpts = ActorOpts & {
+  /** The caller's node: ids outside its tree are "not found". */
+  workspaceId?: string;
+};
+
+/** Runs a fact action, mapping knowledge errors to `FeedbackActionError` (404 / the fact error's status). */
+function factAction<R>(fn: () => R): R {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof KnowledgeNotFoundError) throw new FeedbackActionError(e.message, 404);
+    if (e instanceof FactActionError) throw new FeedbackActionError(e.message, e.status);
+    throw e;
+  }
+}
+
+/** The fact `id`, if it is in the caller's tree (else the same 404 as an unknown id). */
+function callerFact(store: Store, id: string, opts: KnowledgeActionOpts): Finding {
+  const f = store.findings.get(id);
+  const scope = opts.workspaceId !== undefined ? factAction(() => scopeFor(store, opts.workspaceId!)) : undefined;
+  if (!f || (scope && !inTree(scope, f.workspaceId))) throw new FeedbackActionError(`finding '${id}' not found`, 404);
+  return f;
+}
+
+const factOpts = (opts: KnowledgeActionOpts) => ({ actor: actor(opts), ...(opts.reason ? { reason: opts.reason } : {}) });
+
+/** The user retracts a current fact (`retractFactByUser`: a `fact_retract` event). 409 when not current. */
+export function retractFactAsUser(store: Store, findingId: string, opts: KnowledgeActionOpts = {}): Finding {
+  callerFact(store, findingId, opts);
+  return factAction(() => retractFactByUser(store, findingId, factOpts(opts)));
+}
+
+/** The user relabels the nodes a fact applies to (`setFactScopes`: a `fact_scope_change` event). Nodes outside the fact's tree: 404. */
+export function setFactScopesAsUser(store: Store, findingId: string, workspaceIds: string[], opts: KnowledgeActionOpts = {}): string[] {
+  if (!workspaceIds.length) throw new FeedbackActionError('give at least one node the fact applies to', 400);
+  callerFact(store, findingId, opts);
+  return factAction(() => setFactScopes(store, findingId, workspaceIds, factOpts(opts)));
+}
+
+/**
+ * The user applies an unverified replacement (design §7.2): the include override set to true on a
+ * `candidate` whose replace observation was rejected (`setIncludeOverride` → `applyReplacementByUser`,
+ * `include_override` + `fact_replacement_accept` events). 409 when there is nothing to apply.
+ */
+export function acceptReplacementAsUser(store: Store, findingId: string, opts: KnowledgeActionOpts = {}): Finding {
+  const f = callerFact(store, findingId, opts);
+  const pending = knowledgeRepos(store).factObservations.list({ findingId: f.id, kind: 'replace', status: 'rejected' }).length > 0;
+  if (f.lifecycle !== 'candidate' || f.status === 'superseded' || !pending) {
+    throw new FeedbackActionError(`finding '${f.id}' is not an unverified update that can be applied`, 409);
+  }
+  return factAction(() => setIncludeOverride(store, 'finding', f.id, true, factOpts(opts))) as Finding;
+}
+
+/** An open merge suggestion of the caller's tree (else 404 / 409). */
+function callerSuggestion(store: Store, id: string, opts: KnowledgeActionOpts) {
+  const s = knowledgeRepos(store).entityMergeSuggestions.get(id);
+  const scope = opts.workspaceId !== undefined ? factAction(() => scopeFor(store, opts.workspaceId!)) : undefined;
+  if (!s || (scope && s.rootWorkspaceId !== scope.rootId)) throw new FeedbackActionError(`merge suggestion '${id}' not found`, 404);
+  if (s.status !== 'open') throw new FeedbackActionError(`merge suggestion '${id}' is already ${s.status}`, 409);
+  return s;
+}
+
+/**
+ * Accepts a merge suggestion: merges the two entities (`mergeEntitiesAsUser`, an `entity_merge`
+ * event). The survivor defaults to the earlier entity (`candidateId`); `survivorId` may pick the other.
+ */
+export function acceptMergeSuggestionAsUser(
+  store: Store,
+  suggestionId: string,
+  opts: KnowledgeActionOpts & { survivorId?: string } = {},
+): MergeResult {
+  const s = callerSuggestion(store, suggestionId, opts);
+  const survivor = opts.survivorId ?? s.candidateId;
+  if (survivor !== s.candidateId && survivor !== s.entityId) throw new FeedbackActionError('survivorId must be one of the two suggested entities', 400);
+  const loser = survivor === s.candidateId ? s.entityId : s.candidateId;
+  return mergeEntitiesAsUser(store, survivor, loser, opts);
+}
+
+/**
+ * Rejects a merge suggestion (the row records actor and time) and, in the same transaction, an
+ * `entity_merge_reject` feedback event on the suggested entity (before: the pair; after: the status).
+ * An upload-only name involved lists the suggestion in `beforeJson.uploadRefs` (export leaves it out).
+ */
+export function rejectMergeSuggestionAsUser(store: Store, suggestionId: string, opts: KnowledgeActionOpts = {}): EntityMergeSuggestion {
+  const s = callerSuggestion(store, suggestionId, opts);
+  return entityAction(() =>
+    store.transaction(() => {
+      const repo = knowledgeRepos(store).entities;
+      const entity = repo.get(s.entityId);
+      const candidate = repo.get(s.candidateId);
+      const rejected = rejectMergeSuggestion(store, scopeFor(store, s.rootWorkspaceId), s.id, actor(opts));
+      const uploadOnly = mergeSuggestionIsUploadOnly(store, s.id);
+      recordFeedback(store, {
+        workspaceId: entity?.workspaceId ?? s.rootWorkspaceId,
+        actor: actor(opts),
+        kind: 'entity_merge_reject',
+        targetType: 'entity',
+        targetId: s.entityId,
+        beforeJson: {
+          suggestionId: s.id, score: s.score,
+          ...(entity ? { entity: entitySnapshot(entity) } : {}),
+          ...(candidate ? { candidate: entitySnapshot(candidate) } : {}),
+          ...(uploadOnly ? { uploadRefs: [s.id] } : {}),
+        },
+        afterJson: { status: rejected.status, suggestionId: s.id },
+        ...(opts.reason ? { reason: opts.reason } : {}),
+      });
+      return rejected;
+    }),
+  );
+}
+
+export type PruneDeps = { store: Store; files: ArtifactFiles; config: Pick<BifConfig, 'knowledge'>; events?: EventBus };
+
+/**
+ * The user prunes stored files (design §14; `pruneArtifacts`, all or nothing): in the same transaction
+ * a system decision (tool `artifact_prune`, refs = the artifacts) and one `artifact_prune` feedback
+ * event per artifact (before: path, sha256, bytes, last capture; after: the decision). Ids outside
+ * the caller's tree are refused like unknown ones. Throws `PruneError` (400 / 409 with `refused`) or
+ * `FeedbackActionError` (404 unknown caller node).
+ */
+export function pruneArtifactsAsUser(
+  deps: PruneDeps,
+  workspaceId: string,
+  artifactIds: string[],
+  opts: ActorOpts & { minAgeDays?: number; now?: Date } = {},
+): PruneResult & { decisionId: string; feedback: FeedbackEvent[] } {
+  const { store } = deps;
+  const scope = factAction(() => scopeFor(store, workspaceId));
+  let decisionId = '';
+  const feedback: FeedbackEvent[] = [];
+  const result = pruneArtifacts(
+    store, deps.files, deps.config, artifactIds,
+    { treeIds: scope.treeIds, ...(opts.minAgeDays !== undefined ? { minAgeDays: opts.minAgeDays } : {}), ...(opts.now ? { now: opts.now } : {}) },
+    (eligible, minAgeDays) => {
+      const decision = recordSystemDecision(
+        { store, ...(deps.events ? { events: deps.events } : {}) },
+        {
+          workspaceId, actor: 'user', actorId: actor(opts), refs: eligible.map((x) => x.artifactId),
+          payload: {
+            tool: 'artifact_prune', minAgeDays, ...(opts.reason ? { reason: opts.reason } : {}),
+            artifacts: eligible.map((x) => ({ id: x.artifactId, workspaceId: x.workspaceId, bytes: x.bytes, ageDays: x.ageDays })),
+          },
+        },
+      );
+      decisionId = decision.id;
+      for (const x of eligible) {
+        const a = store.artifacts.get(x.artifactId)!;
+        feedback.push(recordFeedback(store, {
+          workspaceId: a.workspaceId,
+          actor: actor(opts),
+          kind: 'artifact_prune',
+          targetType: 'artifact',
+          targetId: a.id,
+          beforeJson: { path: a.path, sha256: a.sha256, bytes: x.bytes, lastCapturedAt: x.lastCapturedAt, ageDays: x.ageDays },
+          afterJson: { fileRemoved: true, decisionId: decision.id, minAgeDays },
+          ...(opts.reason ? { reason: opts.reason } : {}),
+        }));
+      }
+    },
+  );
+  return { ...result, decisionId, feedback };
+}
+// --- end knowledge store KS-7 ----------------------------------------------------------------------

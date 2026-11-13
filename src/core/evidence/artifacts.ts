@@ -28,6 +28,14 @@ export class ArtifactNotFoundError extends Error {
   }
 }
 
+/** KS-7: the artifact row exists but its stored file was pruned (design §14) or is missing. */
+export class ArtifactFileGoneError extends Error {
+  constructor(readonly id: string) {
+    super(`the stored file of artifact '${id}' is not available (pruned or missing); its description and extracted text remain`);
+    this.name = 'ArtifactFileGoneError';
+  }
+}
+
 export interface ArtifactMeta {
   workspaceId: string;
   kind: Artifact['kind'];
@@ -131,7 +139,9 @@ export class ArtifactStore {
   read(id: string): { artifact: Artifact; bytes: Buffer } {
     const artifact = this.store.artifacts.get(id);
     if (!artifact) throw new ArtifactNotFoundError(id);
-    return { artifact, bytes: readFileSync(join(this.dataDir, artifact.path)) };
+    const path = join(this.dataDir, artifact.path);
+    if (!existsSync(path)) throw new ArtifactFileGoneError(id);
+    return { artifact, bytes: readFileSync(path) };
   }
 
   /**
@@ -159,12 +169,16 @@ export class ArtifactStore {
     const sha256 = createHash('sha256').update(buf).digest('hex');
     const rel = join(meta.workspaceId, 'artifacts', sha256.slice(0, 2), `${sha256}.${ext}`);
     const abs = join(this.dataDir, rel);
-    if (!this.findBySha(meta.workspaceId, sha256) && !existsSync(abs)) {
-      mkdirSync(dirname(abs), { recursive: true });
-      const tmp = `${abs}.${randomBytes(6).toString('hex')}.tmp`;
+    // KS-7: the file of an existing row may have been pruned (design §14); capturing the same bytes
+    // again restores it at the row's own path.
+    const existing = this.findBySha(meta.workspaceId, sha256);
+    const target = existing ? join(this.dataDir, existing.path) : abs;
+    if (!existsSync(target)) {
+      mkdirSync(dirname(target), { recursive: true });
+      const tmp = `${target}.${randomBytes(6).toString('hex')}.tmp`;
       writeFileSync(tmp, buf);
       try {
-        renameSync(tmp, abs);
+        renameSync(tmp, target);
       } catch (e) {
         rmSync(tmp, { force: true });
         throw e;

@@ -1162,3 +1162,51 @@ Smaller decisions taken while building KS-6 (no migration added; no change to §
   artifact prune; **after the KS-7 merge add `entity_merge_reject`** (KS-7's kind) to that list.
 - **Known limit:** a run whose only retrieval rows were lost (crash before a prompt read was logged) cannot
   be exposed; unchanged from KS-4.
+
+## KS-7 builder notes
+
+Smaller decisions taken while building KS-7 (no migration added; none changes §3, §9 or §12 beyond
+the user decisions 13–16 recorded in design §3, §4 and §12).
+
+- **Modules:** `api/knowledgeRoutes.ts` (mounted in a delimited block of `routes.ts`),
+  `knowledge/userViews.ts` (entity list, merge suggestions, stale / conflict lists, stats),
+  `knowledge/gc.ts` (`gcReport`, `pruneCheck`, `pruneArtifacts`), `web/src/logic/knowledge.ts`
+  (types, display helpers, `useKnowledgeView`), `web/src/views/Knowledge.tsx`; `knowledgeApi` is a
+  delimited block in `web/src/logic/api.ts`. `web/src/logic/types.ts` is untouched.
+- **Human actions** (`feedback/actions.ts`, KS-7 block): `retractFactAsUser`, `setFactScopesAsUser`,
+  `acceptReplacementAsUser` (include override true → `applyReplacementByUser`; 409 when the fact is
+  not a pending unverified update), `acceptMergeSuggestionAsUser` (survivor defaults to the earlier
+  entity, `candidateId`), `rejectMergeSuggestionAsUser`, `pruneArtifactsAsUser`. All take the caller's
+  node and answer an other-tree id with the same 404 as an unknown id. `artifact_prune` / target type
+  `artifact` added to `FEEDBACK_KINDS`; `api/feedbackRoutes.ts` `TARGET_TYPES` gains `entity` and
+  `artifact`. A rejected merge suggestion writes `entity_merge_reject` (design-thread answer; added to
+  §13), target the suggested entity, `uploadRefs` = the suggestion when a name is upload-only.
+- **Reads:** search, entity card, node card, item (`expand`), artifact text (`read_artifact`, modes
+  outline / text / raw) and changes call `knowledgeRead` with `role: 'user'`. The lists in
+  `userViews.ts` use the same scope predicates but write no retrieval row (a user read exposes no
+  agent run; **KS-6** may want them counted in metrics). Upload-derived hits and items carry
+  `uploadWhy` (`explainUploadDerived`).
+- **gc:** references are listed in the design §14 "as built" paragraph; logs (decisions, feedback,
+  retrieval events, outcomes) are not references. Age = the latest capture. Prune is all or nothing
+  (409 `refused: [{ artifactId, reason, references? }]`); files are moved aside inside the
+  transaction and deleted after the commit (moved back if it rolls back). No column marks a pruned
+  artifact: missing file + `artifact_prune` event = pruned, missing file alone = `missing`.
+  `ArtifactStore.read` throws `ArtifactFileGoneError` (API 410) for a missing file; `persist`
+  rewrites a missing file when the same bytes are captured again. The report counts texts from older
+  extractor versions; re-extraction is not built (KS-1 notes).
+- **Gate nit (`expand.ts`):** relation endpoints of a fact carry `source` (their home node) when it
+  is not the caller's.
+- **User decisions (coordinator, 2026-11-13):**
+  - *Elsewhere count:* `search` in node scope runs the same query tree-wide (same AND / OR as the
+    response) and adds `more matches elsewhere in the business (outside node scope): fact 2,
+    entity 1; repeat with scope "tree" to see them` — first page only, counts up to the search pool
+    (`+` when full), left out when it would cost a hit of the page; the retrieval row is unchanged.
+  - *Causal edges:* `aroundVisible` gains the named case `{ kind: 'relation', relation, anchor }`;
+    `causes` / `addresses` around an entity of kind `symptom` or `cause` are visible tree-wide in node
+    scope (`isCrossNodeCausal`). This applies to the entity card (`get_card`) and so to `expand` of
+    such an entity, which renders the card — a cause entity's `get_card` gets it too. Card relation
+    names carry `(source <node>)` (the node of the record asserting the edge) whenever that is not the
+    caller's node, for every type; causal edges also log the edge id (`relation`) and its source
+    record in `results`, and the source record's upload flag marks the line.
+- **Web:** evidence is parsed out of its fence (`parseEvidence`) and shown in a `<pre>` as untrusted
+  text; nothing uses `innerHTML` (tested). Card lines' `[id]` references open the item.
