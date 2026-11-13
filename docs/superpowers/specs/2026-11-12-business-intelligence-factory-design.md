@@ -194,6 +194,11 @@ Every finding references ≥1 stored artifact. Flow walkthroughs store an ordere
 - A scope declares its **audiences**: `external` (customers), `internal` (employees/internal users), or both. All interview questions, research tasks and recommendations are framed to the scope.
 - Personas carry `audience: external | internal`. Internal personas are researched from job postings/role descriptions, employee-review sites, industry surveys of the role, the interview, and internal uploads (weighted highest).
 - For internal scopes, "competitors" means **alternatives**: vendor tools, outsourcing, and how peer companies run the same function. Competitor discovery and deep dives cover those.
+- **Recursive business map:** workspaces form a tree of arbitrary depth (company → divisions → products → teams/internal platforms). Each node is a full workspace (scope, audiences, interview, research, personas, recommendations).
+  - **Inheritance down:** a node may read and cite profile, findings and artifacts of **all ancestors**, never siblings or cousins.
+  - **Roll-up:** a node's views include descendants' symptoms, strengths and recommendations, tagged by source node; patterns recurring across ≥2 children are flagged as possible company-wide issues.
+  - **Mapping step:** task type `map_business_units` (phase `mapping`, optional, runs before market research) proposes child nodes from interview, uploads and research (site, filings, org signals), each with name, description, audiences, evidence and reasoning (logged, ratable). The user accepts/edits/rejects each; accepted children can be mapped again.
+  - Each node runs its pipeline independently; the user picks where to drill.
 
 ## 9. Scoring and rating
 

@@ -209,7 +209,7 @@
 - `get_identity({site})` → returns existing identity for workspace+site or creates one: generic name from a fixed list, inbox from provider; stored in a new `identities` table (add migration) with password; credentials never logged in Decisions (redacted).
 - [ ] Tests: `policy prompt lists approval-required actions verbatim`; `get_identity reuses identity per site`; `identity password redacted in decision payloads`; `mailtm provider createInbox parses API response` (mock fetch). Fail → implement → pass → commit.
 
-### Task 10b: Scope and audiences
+### Task 10b: Scope, audiences and recursive business map
 
 **Files:** Modify `src/core/types.ts`, `src/core/store/migrations.ts` (append migration), `src/core/research/phases.ts`, `src/core/research/orchestrator.ts`. Test `test/core/scope.test.ts`.
 
@@ -218,7 +218,10 @@
 - `Persona` gains `audience: 'external'|'internal'`.
 - Orchestrator context includes scope + audiences + (if parent) parent profile and parent findings as read-only references; findings/artifacts of the parent may be cited as evidence by the child (`ArtifactStore.exists` treats parent artifacts as present for the child).
 - `PHASE_GOALS` text is templated with scope; when audiences include `internal`, `competitor_discovery` goal = "alternatives: vendor tools, outsourcing, peer-company practices for this function" and `audience_segments` covers internal roles.
-- [ ] Tests: `old rows get default scope company and audiences external`; `child workspace can cite parent artifact as evidence`; `internal audience changes competitor_discovery goal text`; `persona audience persisted`. Fail → implement → pass → commit.
+- **Tree:** `Workspace.parentWorkspaceId` forms a tree of any depth. `ancestors(store, wsId): Workspace[]` (nearest first, cycle-safe), `descendants(store, wsId): Workspace[]`. `ArtifactStore.exists` and `save_finding` accept artifacts from any ancestor; never siblings/cousins. Orchestrator context includes all ancestors' profiles + finding titles.
+- **Mapping:** add `Phase` `'mapping'` (optional, first when present; not in `ALL_PHASES` default) with task type `map_business_units`; new tool `propose_business_unit({ name, description, level, audiences, evidence, reasoning })` (worker role) inserts a `UnitProposal { id; workspaceId; name; description; level; audiences; evidence; reasoning; status: 'proposed'|'accepted'|'rejected'; childWorkspaceId? }` (new table) + Decision. `acceptUnitProposal(id, edits?) → Workspace` creates the child workspace; `rejectUnitProposal(id, reason)` logs a Rating-like negative signal.
+- **Roll-up:** `rollup(store, wsId): { symptoms; recommendations; findings }` returns own + descendants' items with `sourceWorkspaceId`; `crossCuttingSymptoms(store, wsId)` groups descendant symptoms by normalized title (lowercase, stopwords removed) and returns groups with ≥2 distinct child sources.
+- [ ] Tests: `ancestors deep chain nearest first`; `grandchild can cite grandparent artifact`; `sibling artifact rejected`; `acceptUnitProposal creates child with parent link`; `rollup tags sourceWorkspaceId`; `crossCuttingSymptoms flags symptom present in 2 children`; `old rows get default scope company and audiences external`; `internal audience changes competitor_discovery goal text`; `persona audience persisted`. Fail → implement → pass → commit.
 
 **Section C verify gate.**
 
@@ -271,7 +274,7 @@
 
 **Files:** Create `src/api/main.ts` (boot: load config, open store, build deps, mount MCP, `resumeInterrupted`, start scheduler), `src/api/routes.ts`, `src/api/sse.ts`. Test `test/api/routes.test.ts` (Hono `app.request`).
 
-Routes (JSON): `GET/POST /api/workspaces` (POST accepts `scope`, `audiences`, `parentWorkspaceId`); `GET /api/workspaces/:id/profile`; `GET/POST /api/workspaces/:id/interview` (POST `{text}`); `POST /api/workspaces/:id/uploads` (multipart); `POST /api/workspaces/:id/research` `{phases?}`; `GET /api/workspaces/:id/runs`, `/tasks?runId=`, `/findings`, `/symptoms`, `/personas`, `/recommendations`, `/decisions?kind=`, `/requests?status=pending`; `POST /api/requests/:id` `{status, response?}`; `GET /api/artifacts/:id` (bytes with mime); `POST /api/ratings`; `GET /api/workspaces/:id/review-queue` (items with criteria not yet rated); `GET /api/workspaces/:id/calibration`; `GET /api/workspaces/:id/export`; `GET/POST/PATCH /api/workspaces/:id/schedules`; `GET/PUT /api/config`; `GET /api/events?workspaceId=` (SSE of `BusEvent`).
+Routes (JSON): `GET/POST /api/workspaces` (POST accepts `scope`, `audiences`, `parentWorkspaceId`); `GET /api/workspaces/:id/profile`; `GET/POST /api/workspaces/:id/interview` (POST `{text}`); `POST /api/workspaces/:id/uploads` (multipart); `POST /api/workspaces/:id/research` `{phases?}`; `GET /api/workspaces/:id/runs`, `/tasks?runId=`, `/findings`, `/symptoms`, `/personas`, `/recommendations`, `/decisions?kind=`, `/requests?status=pending`; `POST /api/requests/:id` `{status, response?}`; `GET /api/artifacts/:id` (bytes with mime); `POST /api/ratings`; `GET /api/workspaces/:id/tree`, `GET /api/workspaces/:id/rollup`, `GET /api/workspaces/:id/unit-proposals`, `POST /api/unit-proposals/:id` `{action: accept|reject, edits?, reason?}`; `GET /api/workspaces/:id/review-queue` (items with criteria not yet rated); `GET /api/workspaces/:id/calibration`; `GET /api/workspaces/:id/export`; `GET/POST/PATCH /api/workspaces/:id/schedules`; `GET/PUT /api/config`; `GET /api/events?workspaceId=` (SSE of `BusEvent`).
 
 - [ ] Tests: create workspace → list contains it; `POST /api/ratings` with unknown criterion → 400; resolving a request unblocks a pending `request_approval` (fake); artifact bytes served with mime; SSE emits `run_event`. Fail → implement → pass → commit.
 
@@ -279,12 +282,12 @@ Routes (JSON): `GET/POST /api/workspaces` (POST accepts `scope`, `audiences`, `p
 
 **Files:** Create `web/index.html`, `web/vite.config.ts` (proxy `/api` and `/mcp` to 4317), `web/src/logic/api.ts`, `web/src/logic/sse.ts`, `web/src/logic/hooks.ts`. Test `test/web/logic.test.ts` (vitest + jsdom + `@testing-library/react` `renderHook`, mocked fetch).
 
-Hooks (all views use only these): `useWorkspaces()`, `useWorkspace(id)`, `useInterview(wsId) → { turns, coverage, send(text), upload(file), sending }`, `useResearch(wsId) → { runs, tasks, start(phases?), liveEvents }`, `useFindings(wsId)`, `useEvidence(artifactIds)`, `usePersonas(wsId)`, `useRecommendations(wsId)`, `useRatings() → { rate(input) }`, `useReviewQueue(wsId)`, `useRequests(wsId) → { pending, resolve(id, status, response?) }`, `useDecisions(wsId, kind?)`, `useSchedules(wsId)`, `useConfig()`.
+Hooks (all views use only these): `useWorkspaces()`, `useWorkspace(id)`, `useBusinessMap(rootId) → { tree, proposals, accept, reject, rollup }`, `useInterview(wsId) → { turns, coverage, send(text), upload(file), sending }`, `useResearch(wsId) → { runs, tasks, start(phases?), liveEvents }`, `useFindings(wsId)`, `useEvidence(artifactIds)`, `usePersonas(wsId)`, `useRecommendations(wsId)`, `useRatings() → { rate(input) }`, `useReviewQueue(wsId)`, `useRequests(wsId) → { pending, resolve(id, status, response?) }`, `useDecisions(wsId, kind?)`, `useSchedules(wsId)`, `useConfig()`.
 - [ ] Tests: `useInterview.send appends turn`; `useRequests.resolve posts and removes from pending`; `SSE event updates useResearch.liveEvents`. Fail → implement → pass → commit.
 
 ### Task 16: Web views (minimal)
 
-**Files:** Create `web/src/main.tsx`, `web/src/views/App.tsx` (hash router), one file per page in spec §13: `Workspaces.tsx`, `Interview.tsx`, `Personas.tsx`, `Research.tsx`, `Findings.tsx`, `Strategy.tsx`, `ReviewQueue.tsx`, `DecisionLog.tsx`, `Schedule.tsx`, `Settings.tsx`, shared `CriterionRating.tsx` (agree / disagree→value+reason), `EvidenceList.tsx` (screenshots as ordered thumbnails per flow, archived pages/docs as links), `views/styles.css` (plain, minimal). Persona feedback rendered in a separate column labeled "Simulated".
+**Files:** Create `web/src/main.tsx`, `web/src/views/App.tsx` (hash router), one file per page in spec §13 plus `BusinessMap.tsx`: `Workspaces.tsx`, `Interview.tsx`, `Personas.tsx`, `Research.tsx`, `Findings.tsx`, `Strategy.tsx`, `ReviewQueue.tsx`, `DecisionLog.tsx`, `Schedule.tsx`, `Settings.tsx`, shared `CriterionRating.tsx` (agree / disagree→value+reason), `EvidenceList.tsx` (screenshots as ordered thumbnails per flow, archived pages/docs as links), `views/styles.css` (plain, minimal). Persona feedback rendered in a separate column labeled "Simulated".
 - [ ] Verify: `npm run typecheck` clean; `npx vite build web` succeeds; grep check `! grep -rn "fetch(" web/src/views` returns nothing. Commit.
 
 ### Task 17: Scheduler + diffing
