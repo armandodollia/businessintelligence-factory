@@ -1,0 +1,453 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { serveStatic } from '@hono/node-server/serve-static';
+import { Hono, type Context } from 'hono';
+import { z } from 'zod';
+import { ConfigError, parseConfig } from '../core/config/load.js';
+import { ROLES, type BifConfig } from '../core/config/schema.js';
+import type { EventBus } from '../core/events.js';
+import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
+import { resolveUserRequest } from '../core/harness/tools/handlers.js';
+import { uploadInternal } from '../core/internal/uploads.js';
+import { interviewCoverage, sendInterviewMessage, type InterviewerFake } from '../core/interview/interview.js';
+import type { ResearchDeps } from '../core/research/deps.js';
+import { currentResearchRun, runPipeline } from '../core/research/orchestrator.js';
+import { ALL_PHASES } from '../core/research/phases.js';
+import { validateCron } from '../core/scheduler/scheduler.js';
+import { applyPromptPatch, calibrationReport, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
+import { RECOMMENDATION_KEYS } from '../core/scoring/criteria.js';
+import { exportTrainingData } from '../core/scoring/export.js';
+import { scoreRecommendations } from '../core/scoring/priority.js';
+import { RatingError, rateCriterion } from '../core/scoring/ratings.js';
+import { reviewQueue } from '../core/scoring/reviewQueue.js';
+import type { Store } from '../core/store/db.js';
+import { newId } from '../core/store/repos.js';
+import { recordSystemDecision } from '../core/systemDecision.js';
+import type { Decision, Phase, Schedule, UserRequest, Workspace } from '../core/types.js';
+import { acceptUnitProposal, crossCuttingSymptoms, rejectUnitProposal, rollup } from '../core/workspace/businessMap.js';
+import { createWorkspace, workspaceTree } from '../core/workspace/tree.js';
+import { mountMcp, type McpDeps } from './mcp.js';
+import { sseResponse } from './sse.js';
+
+export type AppDeps = {
+  store: Store;
+  artifacts: ArtifactStore;
+  events: EventBus;
+  /** Shared, mutable config object: `PUT /api/config` updates it in place. */
+  config: BifConfig;
+  /** Deps for `runPipeline` (also supplies the supervisor for interview runs). */
+  research: ResearchDeps;
+  /** Where `PUT /api/config` and `PUT .../scoring-weights` persist the config; not persisted when absent. */
+  configPath?: string;
+  /** In-process interviewer (tests / dry runs). */
+  interviewFake?: InterviewerFake;
+  /** Mounts the harness MCP server at `/mcp/:token` when given. */
+  mcp?: McpDeps;
+  /** Built web app (`web/dist`); served at `/` when the directory exists. */
+  webDist?: string;
+  /** SSE keep-alive interval (default 15 s). */
+  sseHeartbeatMs?: number;
+};
+
+/** Error with an HTTP status, rendered as `{ error, ...extra }`. */
+export class HttpError extends Error {
+  constructor(
+    readonly status: 400 | 404 | 409 | 413 | 500 | 502,
+    message: string,
+    readonly extra: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
+const PHASES = ['mapping', ...ALL_PHASES] as const satisfies readonly Phase[];
+const phaseSchema = z.enum(PHASES);
+const scopeLevel = z.enum(['company', 'division', 'slice']);
+const audience = z.enum(['external', 'internal']);
+const targetType = z.enum(['finding', 'recommendation', 'symptom', 'competitor', 'persona', 'persona_feedback', 'decision']);
+const DECISION_KINDS = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'] as const;
+const REQUEST_STATUSES = ['pending', 'resolved', 'denied'] as const;
+
+const schemas = {
+  createWorkspace: z.object({
+    name: z.string().trim().min(1),
+    sector: z.string().trim().min(1),
+    scope: z.object({ level: scopeLevel.optional(), name: z.string().optional(), description: z.string().optional() }).optional(),
+    audiences: z.array(audience).optional(),
+    parentWorkspaceId: z.string().min(1).optional(),
+  }),
+  interview: z.object({ text: z.string().refine((s) => s.trim().length > 0, 'text must not be empty') }),
+  research: z.object({ phases: z.array(phaseSchema).min(1).optional() }),
+  resolveRequest: z.object({ status: z.enum(['resolved', 'denied']), response: z.string().optional() }),
+  rating: z.object({
+    workspaceId: z.string().min(1),
+    targetType,
+    targetId: z.string().min(1),
+    criterion: z.string().min(1),
+    verdict: z.enum(['agree', 'disagree']),
+    userValue: z.union([z.number(), z.string()]).optional(),
+    reason: z.string().optional(),
+  }),
+  unitProposal: z.discriminatedUnion('action', [
+    z.object({
+      action: z.literal('accept'),
+      edits: z
+        .object({ name: z.string().min(1).optional(), description: z.string().optional(), level: scopeLevel.optional(), audiences: z.array(audience).min(1).optional() })
+        .optional(),
+    }),
+    z.object({ action: z.literal('reject'), reason: z.string().optional() }),
+  ]),
+  newSchedule: z.object({
+    name: z.string().trim().min(1),
+    cron: z.string().trim().min(1),
+    phases: z.array(phaseSchema).min(1),
+    enabled: z.boolean().optional(),
+  }),
+  patchSchedule: z.object({
+    id: z.string().min(1),
+    name: z.string().trim().min(1).optional(),
+    cron: z.string().trim().min(1).optional(),
+    phases: z.array(phaseSchema).min(1).optional(),
+    enabled: z.boolean().optional(),
+  }),
+  promptPatchRole: z.object({ role: z.enum(ROLES) }),
+  applyPromptPatch: z.object({
+    role: z.enum(ROLES),
+    patchText: z.string(),
+    examples: z.array(z.unknown()).optional(),
+  }),
+  scoringWeights: z.object({
+    weights: z.partialRecord(z.enum(RECOMMENDATION_KEYS), z.number().min(0)).optional(),
+    personaWeight: z.number().min(0).optional(),
+  }),
+};
+
+async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T>> {
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    throw new HttpError(400, 'request body must be JSON');
+  }
+  const r = schema.safeParse(raw);
+  if (!r.success) {
+    const issues = r.error.issues.map((i) => ({ path: i.path.map(String).join('.'), message: i.message }));
+    throw new HttpError(400, issues.map((i) => `${i.path || '<body>'}: ${i.message}`).join('; '), { issues });
+  }
+  return r.data;
+}
+
+/** Copies every top-level key of `next` onto the shared config object (in place). */
+function replaceConfig(target: BifConfig, next: BifConfig): void {
+  for (const key of Object.keys(next) as (keyof BifConfig)[]) {
+    (target as Record<keyof BifConfig, unknown>)[key] = next[key];
+  }
+}
+
+/**
+ * Builds the HTTP app (JSON API, SSE, optional MCP and static web). Separate from `listen` so tests
+ * use `app.request`. Errors render as `{ error }` with 400 (validation, RatingError), 404 (unknown
+ * id), 409 (state conflict), 413 (artifact > 50 MB) or 500.
+ */
+export function createApp(deps: AppDeps): Hono {
+  const { store, artifacts, events, config, research } = deps;
+  const app = new Hono();
+
+  app.onError((err, c) => {
+    if (err instanceof HttpError) return c.json({ error: err.message, ...err.extra }, err.status);
+    if (err instanceof RatingError) return c.json({ error: err.message }, 400);
+    if (err instanceof ConfigError) return c.json({ error: err.message, issues: err.issues }, 400);
+    if (err instanceof ArtifactNotFoundError) return c.json({ error: err.message }, 404);
+    if (err instanceof ArtifactTooLargeError) return c.json({ error: err.message }, 413);
+    console.error(`[bif] ${c.req.method} ${c.req.path} failed:`, err);
+    return c.json({ error: (err as Error).message ?? String(err) }, 500);
+  });
+
+  const workspace = (id: string): Workspace => {
+    const ws = store.workspaces.get(id);
+    if (!ws) throw new HttpError(404, `workspace '${id}' not found`);
+    return ws;
+  };
+
+  const persistConfig = () => {
+    if (deps.configPath) writeFileSync(deps.configPath, `${JSON.stringify(config, null, 2)}\n`);
+  };
+
+  // --- workspaces & business map ------------------------------------------------------------
+  app.get('/api/workspaces', (c) => c.json(store.workspaces.list()));
+  app.post('/api/workspaces', async (c) => {
+    const input = await body(c, schemas.createWorkspace);
+    if (input.parentWorkspaceId && !store.workspaces.get(input.parentWorkspaceId)) {
+      throw new HttpError(400, `parent workspace '${input.parentWorkspaceId}' not found`);
+    }
+    return c.json(createWorkspace(store, input as Parameters<typeof createWorkspace>[1]), 201);
+  });
+  app.get('/api/workspaces/:id', (c) => c.json(workspace(c.req.param('id'))));
+  app.get('/api/workspaces/:id/profile', (c) => {
+    const ws = workspace(c.req.param('id'));
+    return c.json(store.profiles.get(ws.id) ?? { workspaceId: ws.id, data: {} });
+  });
+  app.get('/api/workspaces/:id/tree', (c) => c.json(workspaceTree(store, workspace(c.req.param('id')).id)));
+  app.get('/api/workspaces/:id/rollup', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json({ ...rollup(store, id), crossCutting: crossCuttingSymptoms(store, id) });
+  });
+  app.get('/api/workspaces/:id/unit-proposals', (c) =>
+    c.json(store.unitProposals.list({ workspaceId: workspace(c.req.param('id')).id })),
+  );
+  app.post('/api/unit-proposals/:id', async (c) => {
+    const id = c.req.param('id');
+    const input = await body(c, schemas.unitProposal);
+    const proposal = store.unitProposals.get(id);
+    if (!proposal) throw new HttpError(404, `unit proposal '${id}' not found`);
+    if (proposal.status !== 'proposed') throw new HttpError(409, `unit proposal '${id}' is already ${proposal.status}`);
+    if (input.action === 'accept') {
+      const edits = Object.fromEntries(Object.entries(input.edits ?? {}).filter(([, v]) => v !== undefined));
+      const ws = acceptUnitProposal(store, id, edits);
+      return c.json({ proposal: store.unitProposals.get(id), workspace: ws });
+    }
+    return c.json(rejectUnitProposal(store, id, input.reason ?? ''));
+  });
+
+  // --- interview & uploads -------------------------------------------------------------------
+  const interviewState = (id: string) => ({
+    turns: store.interview.list({ workspaceId: id }),
+    coverage: interviewCoverage(id, { store }),
+  });
+  app.get('/api/workspaces/:id/interview', (c) => c.json(interviewState(workspace(c.req.param('id')).id)));
+  app.post('/api/workspaces/:id/interview', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const { text } = await body(c, schemas.interview);
+    let turn;
+    try {
+      turn = await sendInterviewMessage(id, text, {
+        store,
+        config,
+        supervisor: research.supervisor,
+        ...(deps.interviewFake ? { fake: deps.interviewFake } : {}),
+      });
+    } catch (e) {
+      throw new HttpError(502, (e as Error).message, interviewState(id));
+    }
+    return c.json({ turn, ...interviewState(id) });
+  });
+  app.post('/api/workspaces/:id/uploads', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    let form: Record<string, unknown>;
+    try {
+      form = await c.req.parseBody();
+    } catch {
+      throw new HttpError(400, 'expected a multipart/form-data body');
+    }
+    const file = form.file;
+    if (!(file instanceof File)) throw new HttpError(400, "multipart field 'file' is required");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return c.json(uploadInternal(id, { name: file.name, bytes, mime: file.type }, { store, artifacts }), 201);
+  });
+
+  // --- research -------------------------------------------------------------------------------
+  app.post('/api/workspaces/:id/research', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const { phases } = await body(c, schemas.research);
+    const running = currentResearchRun(store, id);
+    if (running) throw new HttpError(409, `a research run is already running (${running.id}, ${running.phase})`, { run: running });
+    // runPipeline inserts the first ResearchRun synchronously, then continues in the background.
+    runPipeline(id, phases ?? ALL_PHASES, research).catch((e) =>
+      console.error(`[bif] research pipeline for ${id} failed: ${(e as Error).message}`),
+    );
+    return c.json(currentResearchRun(store, id) ?? null, 202);
+  });
+  app.get('/api/workspaces/:id/runs', (c) => c.json(store.researchRuns.list({ workspaceId: workspace(c.req.param('id')).id })));
+  app.get('/api/workspaces/:id/tasks', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const runId = c.req.query('runId');
+    return c.json(store.tasks.list(runId ? { workspaceId: id, runId } : { workspaceId: id }));
+  });
+
+  // --- results --------------------------------------------------------------------------------
+  app.get('/api/workspaces/:id/findings', (c) => c.json(store.findings.list({ workspaceId: workspace(c.req.param('id')).id })));
+  app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
+  app.get('/api/workspaces/:id/personas', (c) => c.json(store.personas.list({ workspaceId: workspace(c.req.param('id')).id })));
+  app.get('/api/workspaces/:id/recommendations', (c) =>
+    c.json(store.recommendations.list({ workspaceId: workspace(c.req.param('id')).id }).sort((a, b) => b.priority - a.priority)),
+  );
+  app.get('/api/workspaces/:id/decisions', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const kind = c.req.query('kind');
+    if (kind && !(DECISION_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `unknown decision kind '${kind}'`);
+    return c.json(store.decisions.list(kind ? { workspaceId: id, kind: kind as Decision['kind'] } : { workspaceId: id }));
+  });
+  /** "What changed" Decisions recorded by the scheduler after each recurring run. */
+  app.get('/api/workspaces/:id/changes', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json(
+      store.decisions
+        .list({ workspaceId: id, agentRunId: 'scheduler' })
+        .filter((d) => (d.payload as { event?: string } | null)?.event === 'what_changed'),
+    );
+  });
+
+  // --- user requests --------------------------------------------------------------------------
+  app.get('/api/workspaces/:id/requests', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const status = c.req.query('status');
+    if (status && !(REQUEST_STATUSES as readonly string[]).includes(status)) throw new HttpError(400, `unknown status '${status}'`);
+    return c.json(store.userRequests.list(status ? { workspaceId: id, status: status as UserRequest['status'] } : { workspaceId: id }));
+  });
+  app.post('/api/requests/:id', async (c) => {
+    const id = c.req.param('id');
+    const input = await body(c, schemas.resolveRequest);
+    const req = store.userRequests.get(id);
+    if (!req) throw new HttpError(404, `user request '${id}' not found`);
+    if (req.status !== 'pending') throw new HttpError(409, `user request '${id}' is already ${req.status}`);
+    return c.json(resolveUserRequest({ store, events }, id, input.status, input.response));
+  });
+
+  // --- artifacts ------------------------------------------------------------------------------
+  app.get('/api/artifacts/:id', (c) => {
+    const { artifact, bytes } = artifacts.read(c.req.param('id'));
+    const headers: Record<string, string> = { 'content-type': artifact.mime, 'cache-control': 'private, max-age=31536000, immutable' };
+    if (artifact.kind === 'upload' && artifact.title) {
+      headers['content-disposition'] = `inline; filename*=UTF-8''${encodeURIComponent(artifact.title)}`;
+    }
+    return c.body(new Uint8Array(bytes), 200, headers);
+  });
+  app.get('/api/artifacts/:id/meta', (c) => {
+    const id = c.req.param('id');
+    const a = store.artifacts.get(id);
+    if (!a) throw new HttpError(404, `artifact '${id}' not found`);
+    return c.json(a);
+  });
+
+  // --- ratings, review queue, calibration, export --------------------------------------------
+  app.post('/api/ratings', async (c) => {
+    const input = await body(c, schemas.rating);
+    workspace(input.workspaceId);
+    return c.json(rateCriterion(input as Parameters<typeof rateCriterion>[0], { store }), 201);
+  });
+  app.get('/api/workspaces/:id/review-queue', (c) => c.json(reviewQueue(workspace(c.req.param('id')).id, { store })));
+  app.get('/api/workspaces/:id/calibration', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json({
+      ...calibrationReport(id, { store }),
+      weights: config.scoring.weights,
+      personaWeight: config.scoring.personaWeight,
+      proposedWeights: proposeWeights(id, { store, config }),
+    });
+  });
+  /** Proposes a prompt calibration patch for a role (nothing is written). */
+  app.post('/api/workspaces/:id/calibration/prompt-patch', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const { role } = await body(c, schemas.promptPatchRole);
+    return c.json(proposePromptPatch(id, role, { store }));
+  });
+  /** User approval: writes the (possibly edited) patch as the role's prompt appendix. */
+  app.post('/api/workspaces/:id/calibration/prompt-patch/apply', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const patch = await body(c, schemas.applyPromptPatch);
+    const { path } = applyPromptPatch({ role: patch.role, patchText: patch.patchText, examples: (patch.examples ?? []) as never });
+    const decision = recordSystemDecision(
+      { store, events },
+      { workspaceId: id, actor: 'user', payload: { tool: 'apply_prompt_patch', role: patch.role, patchText: patch.patchText, path } },
+    );
+    return c.json({ path, decisionId: decision.id });
+  });
+  app.get('/api/workspaces/:id/scoring-weights', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    return c.json({ ...config.scoring, proposedWeights: proposeWeights(id, { store, config }) });
+  });
+  /** Sets priority weights (global), rescores every workspace and logs the change as a Decision. */
+  app.put('/api/workspaces/:id/scoring-weights', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const input = await body(c, schemas.scoringWeights);
+    const before = structuredClone(config.scoring);
+    const after = {
+      weights: (input.weights as Record<string, number> | undefined) ?? before.weights,
+      personaWeight: input.personaWeight ?? before.personaWeight,
+    };
+    config.scoring = after;
+    persistConfig();
+    for (const ws of store.workspaces.list()) scoreRecommendations(ws.id, { store, config });
+    const decision = recordSystemDecision(
+      { store, events },
+      { workspaceId: id, actor: 'user', payload: { tool: 'set_scoring_weights', before, after } },
+    );
+    return c.json({ ...config.scoring, decisionId: decision.id });
+  });
+  app.get('/api/workspaces/:id/export', (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const jsonl = exportTrainingData(id, { store }, c.req.query('includeUploads') === '1');
+    return c.body(jsonl, 200, {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'content-disposition': `attachment; filename="bif-${id}-export.jsonl"`,
+    });
+  });
+
+  // --- schedules ------------------------------------------------------------------------------
+  const checkCron = (cron: string) => {
+    try {
+      validateCron(cron);
+    } catch (e) {
+      throw new HttpError(400, (e as Error).message);
+    }
+  };
+  app.get('/api/workspaces/:id/schedules', (c) => c.json(store.schedules.list({ workspaceId: workspace(c.req.param('id')).id })));
+  app.post('/api/workspaces/:id/schedules', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const input = await body(c, schemas.newSchedule);
+    checkCron(input.cron);
+    const s: Schedule = { id: newId('sch'), workspaceId: id, name: input.name, cron: input.cron, phases: input.phases, enabled: input.enabled ?? true };
+    return c.json(store.schedules.insert(s), 201);
+  });
+  app.patch('/api/workspaces/:id/schedules', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const { id: scheduleId, ...patch } = await body(c, schemas.patchSchedule);
+    const s = store.schedules.get(scheduleId);
+    if (!s || s.workspaceId !== id) throw new HttpError(404, `schedule '${scheduleId}' not found in workspace '${id}'`);
+    if (patch.cron) checkCron(patch.cron);
+    const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<Schedule>;
+    return c.json(store.schedules.update(scheduleId, clean));
+  });
+
+  // --- config ---------------------------------------------------------------------------------
+  app.get('/api/config', (c) => c.json(config));
+  /**
+   * Replaces the config (validated). Applied in place, so new runs use it; limits that size the
+   * supervisor's semaphores (`maxParallelWorkers`, `maxBrowserRuns`) and `server.port` need a restart.
+   */
+  app.put('/api/config', async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw new HttpError(400, 'request body must be JSON');
+    }
+    const next = parseConfig(raw, 'PUT /api/config');
+    replaceConfig(config, next);
+    persistConfig();
+    return c.json(config);
+  });
+
+  // --- events ---------------------------------------------------------------------------------
+  app.get('/api/events', (c) => {
+    const workspaceId = c.req.query('workspaceId');
+    return sseResponse(events, {
+      ...(workspaceId ? { workspaceId } : {}),
+      ...(deps.sseHeartbeatMs ? { heartbeatMs: deps.sseHeartbeatMs } : {}),
+      signal: c.req.raw.signal,
+    });
+  });
+
+  app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
+
+  // --- MCP + static web -----------------------------------------------------------------------
+  if (deps.mcp) mountMcp(app, deps.mcp);
+  const dist = deps.webDist;
+  if (dist && existsSync(join(dist, 'index.html'))) {
+    app.use('/*', serveStatic({ root: dist }));
+    const index = readFileSync(join(dist, 'index.html'), 'utf8');
+    app.get('*', (c) => c.html(index));
+  }
+  return app;
+}
