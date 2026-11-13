@@ -13,6 +13,9 @@ import { browserConfigured } from '../browser.js';
 import { isAllowedRunFile } from '../paths.js';
 import { taskOutputEvidence } from '../../research/outputs.js';
 import { findReplay } from './idempotency.js';
+// Knowledge store KS-1: captures, captions, entity / applies_to, extraction, describe_artifact.
+import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave } from '../../knowledge/artifactTools.js';
+import type { CaptureResult } from '../../evidence/artifacts.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -220,6 +223,14 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     },
 
     async save_artifact(ctx, input: ToolInput<'save_artifact'>) {
+      // KS-1: caption rule, entity and applies_to are checked before anything is written.
+      const extras = {
+        ...(input.description !== undefined && { description: input.description }),
+        ...(input.entity !== undefined && { entity: input.entity }),
+        ...(input.applies_to !== undefined && { appliesTo: input.applies_to }),
+      };
+      const check = checkArtifactSave(deps, ctx, { kind: input.kind, mime: input.mime, ...extras });
+      if (!check.ok) return fail(check.error);
       const meta = {
         workspaceId: ctx.workspaceId,
         kind: input.kind,
@@ -230,20 +241,33 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         ...(input.step !== undefined && { step: input.step }),
         ...(input.note !== undefined && { note: input.note }),
       };
-      let artifact;
       if (input.file_path !== undefined) {
         if (!isAbsolute(input.file_path)) return fail('file_path must be an absolute path');
         // Agents may only hand over files they produced: no reading the user's disk through us.
         if (!isAllowedRunFile(input.file_path, artifacts.dataDir, ctx.workspaceId, ctx.agentRunId)) {
           return fail('file_path must be inside your working directory or the OS temp dir');
         }
-        artifact = artifacts.saveFromPath({ ...meta, filePath: input.file_path });
-      } else if (input.content_base64 !== undefined) {
-        artifact = artifacts.save({ ...meta, bytes: new Uint8Array(Buffer.from(input.content_base64, 'base64')) });
-      } else {
-        artifact = artifacts.save({ ...meta, bytes: input.content ?? '' });
       }
-      return okData({ artifactId: artifact.id, sha256: artifact.sha256 });
+      // Every save records a capture (KS-1); the entity is resolved in the same transaction.
+      const saved: CaptureResult = store.transaction(() => {
+        const full = { ...meta, ...captureMeta(deps, ctx, extras) };
+        if (input.file_path !== undefined) return artifacts.captureFromPath({ ...full, filePath: input.file_path });
+        if (input.content_base64 !== undefined) {
+          return artifacts.capture({ ...full, bytes: new Uint8Array(Buffer.from(input.content_base64, 'base64')) });
+        }
+        return artifacts.capture({ ...full, bytes: input.content ?? '' });
+      });
+      const data = await finishArtifactSave(deps, ctx, saved, extras, (payload, refs) => {
+        const d = recordDecision(ctx, 'decision', payload, refs);
+        events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
+      });
+      return okData(data);
+    },
+
+    // Knowledge store KS-1: describe_artifact (design §9).
+    async describe_artifact(ctx, input: ToolInput<'describe_artifact'>) {
+      const r = describeArtifact(deps, ctx, input);
+      return r.ok ? okData(r.value) : fail(r.error);
     },
 
     async read_artifact(ctx, input: ToolInput<'read_artifact'>) {

@@ -64,16 +64,22 @@ describe('role scope table', () => {
     // Reviewers judge only the deliverable and its evidence: no read_workspace (final review A4).
     expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact']));
     expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback']));
-    expect(new Set(ROLE_TOOLS.interviewer)).toEqual(new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact']));
+    // KS-1: describe_artifact for worker, orchestrator, interviewer, synthesizer.
+    expect(new Set(ROLE_TOOLS.interviewer)).toEqual(
+      new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact', 'describe_artifact']),
+    );
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
       new Set([
         ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
-        'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis',
+        'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis', 'describe_artifact',
       ]),
     );
-    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace', 'read_artifact']));
+    expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace', 'read_artifact', 'describe_artifact']));
     expect(new Set(ROLE_TOOLS.synthesizer)).toEqual(
-      new Set([...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace', 'read_artifact']),
+      new Set([
+        ...base, 'save_recommendation', 'save_finding', 'submit_result', 'respond_to_review', 'read_workspace', 'read_artifact',
+        'describe_artifact',
+      ]),
     );
     for (const tools of Object.values(ROLE_TOOLS)) for (const t of tools) expect(TOOL_NAMES).toContain(t);
   });
@@ -248,7 +254,10 @@ describe('tool handlers', () => {
     expect(r.ok).toBe(true);
     const id = (r as { data: { artifactId: string } }).data.artifactId;
     expect(artifacts.read(id).artifact).toMatchObject({ workspaceId: 'ws_a', sourceUrl: 'https://acme.test/pricing', step: 1 });
-    const png = await handle(c, 'save_artifact', { kind: 'screenshot', content_base64: Buffer.from([1, 2, 3]).toString('base64'), mime: 'image/png' });
+    const png = await handle(c, 'save_artifact', {
+      kind: 'screenshot', content_base64: Buffer.from([1, 2, 3]).toString('base64'), mime: 'image/png',
+      description: 'Pricing page with the Pro plan at 49 dollars', // KS-1 caption rule
+    });
     expect(png.ok).toBe(true);
     expect((await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain' })).ok).toBe(false);
 
@@ -274,7 +283,9 @@ describe('tool handlers', () => {
     const cwd = join(dir, c.workspaceId, 'runs', c.agentRunId, 'cwd');
     mkdirSync(cwd, { recursive: true });
     writeFileSync(join(cwd, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 1]));
-    const inCwd = await handle(c, 'save_artifact', { kind: 'screenshot', mime: 'image/png', file_path: join(cwd, 'shot.png') });
+    const inCwd = await handle(c, 'save_artifact', {
+      kind: 'screenshot', mime: 'image/png', file_path: join(cwd, 'shot.png'), description: 'Signup form, step one of three',
+    });
     expect(inCwd.ok).toBe(true);
     const tmpFile = join(mkdtempSync(join(tmpdir(), 'bif-shot-')), 'a.txt');
     writeFileSync(tmpFile, 'from tmp');

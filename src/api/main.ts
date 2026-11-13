@@ -27,6 +27,8 @@ import { attachEventRecorders, type EventRecorders } from '../core/telemetry/rec
 import { registerFeedbackOutcomes } from '../core/learning/feedbackOutcomes.js';
 // Knowledge store KS-0: idempotent backfill after migrations.
 import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.js';
+// Knowledge store KS-1: extraction queue (one per artifact store).
+import { ingestorFor } from '../core/knowledge/ingest.js';
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -55,6 +57,8 @@ export type Runtime = {
   research: ResearchDeps;
   dataDir: string;
   port: number;
+  /** KS-1: the artifact store (its extraction queue is `ingestorFor`). */
+  artifacts: ArtifactStore;
 };
 
 /** Builds every runtime dependency and the app (no listening, no resume, no scheduler). */
@@ -82,6 +86,8 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
   // Learning loop: human actions (feedback events) become decision outcomes through one listener.
   registerFeedbackOutcomes();
   const artifacts = new ArtifactStore(store, dataDir);
+  // KS-1: bind the extraction queue to this runtime's config (tools and uploads share it).
+  ingestorFor({ store, artifacts, config });
   const events = new EventBus();
   const tokens = new TokenRegistry(store);
   const handle = createToolHandlers({
@@ -125,7 +131,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
     mcp: { tokens, handle },
     webDist: opts.webDist ?? fileURLToPath(new URL('../../web/dist', import.meta.url)),
   });
-  return { app, config, store, events, tokens, supervisor, handle, research, dataDir, port };
+  return { app, config, store, events, tokens, supervisor, handle, research, dataDir, port, artifacts };
 }
 
 export type Booted = {
@@ -164,6 +170,11 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     );
   }
   const scheduler = startScheduler(runtime.research);
+  // KS-1: artifacts whose text is still `pending` (saved before a restart, or by older code paths)
+  // are extracted in the background.
+  const ingestor = ingestorFor({ store: runtime.store, artifacts: runtime.artifacts, config: runtime.config });
+  const requeued = ingestor.requeuePending();
+  if (requeued) console.log(`[bif] knowledge store: ${requeued} artifacts queued for text extraction`);
   let closed = false;
   const close = async () => {
     if (closed) return;
@@ -177,6 +188,7 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     await closing;
     // The shared browser server lives in its own process group: stop it explicitly.
     await runtime.supervisor.close();
+    await ingestor.stop(); // KS-1: drop the queue, finish running extractions before the store closes
     runtime.store.close();
   };
   return { runtime, server, scheduler, recorders, escalations, close };

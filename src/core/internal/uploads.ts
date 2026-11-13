@@ -1,6 +1,9 @@
+import type { BifConfig } from '../config/schema.js';
 import type { ArtifactStore } from '../evidence/artifacts.js';
 import type { Store } from '../store/db.js';
 import type { Artifact } from '../types.js';
+// Knowledge store KS-1: uploads are extracted and indexed through the same pipeline as agent saves.
+import { ingestorFor } from '../knowledge/ingest.js';
 
 export type UploadFile = { name: string; bytes: Uint8Array; mime: string };
 
@@ -13,12 +16,14 @@ function uploadIds(store: Store, workspaceId: string): string[] {
 /**
  * Stores an internal upload (KPI export, deck, PDF...) as an Artifact of kind `upload` and links
  * it into the workspace profile's `uploads[]` (artifact ids, deduped). Throws
- * `ArtifactTooLargeError` above 50 MB. Identical bytes return the existing artifact.
+ * `ArtifactTooLargeError` above 50 MB. Identical bytes return the existing artifact. Every upload
+ * records a capture row (KS-1) and is submitted to the extraction pipeline (`ingestorFor`): small
+ * files are extracted right away, larger ones queued; `ingestorFor(deps).idle()` awaits both.
  */
 export function uploadInternal(
   workspaceId: string,
   file: UploadFile,
-  deps: { store: Store; artifacts: ArtifactStore },
+  deps: { store: Store; artifacts: ArtifactStore; config?: Pick<BifConfig, 'knowledge'> },
 ): Artifact {
   const { store, artifacts } = deps;
   if (!store.workspaces.get(workspaceId)) throw new Error(`workspace '${workspaceId}' not found`);
@@ -31,6 +36,8 @@ export function uploadInternal(
     if (profile) store.profiles.update(workspaceId, { data });
     else store.profiles.insert({ workspaceId, data });
   });
+  // KS-1: never throws (failures are recorded on the artifact's text row).
+  void ingestorFor(deps).submit(artifact.id);
   return artifact;
 }
 
