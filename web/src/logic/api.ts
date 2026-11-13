@@ -270,3 +270,17 @@ export const knowledgeApi = {
     post<{ pruned: string[]; bytes: number; decisionId: string }>(kn(wsId, '/gc/prune'), { artifactIds }),
 };
 // --- end knowledge store KS-7 --------------------------------------------------------------------
+
+// --- learning loop WP-E: lessons page (proposals, rules and their effect, retros) ----------------
+const ls = (wsId: string, rest = '') => `${ws(wsId)}/lessons${rest}`;
+export const lessonsApi = {
+  page: (wsId: string) => get<import('./lessons.js').LessonsPage>(ls(wsId)),
+  evaluate: (wsId: string) => post<{ proposals: import('./lessons.js').LessonProposal[] }>(ls(wsId, '/evaluate')),
+  accept: (wsId: string, proposalId: string, reason?: string) =>
+    post<unknown>(ls(wsId, `/proposals/${enc(proposalId)}/accept`), reason ? { reason } : {}),
+  reject: (wsId: string, proposalId: string, reason?: string) =>
+    post<unknown>(ls(wsId, `/proposals/${enc(proposalId)}/reject`), reason ? { reason } : {}),
+  proposeRetire: (wsId: string, ruleId: string) => post<import('./lessons.js').LessonProposal>(ls(wsId, `/rules/${enc(ruleId)}/propose-retire`)),
+  startRetro: (wsId: string) => post<{ started: boolean }>(ls(wsId, '/retro')),
+};
+// --- end WP-E ------------------------------------------------------------------------------------
