@@ -10,6 +10,7 @@ import type { AgentRun, Role } from '../types.js';
 import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
 import { browserMcpServers } from './browser.js';
+import { priorAttemptSection } from './priorAttempt.js';
 import { processStartTime } from './procinfo.js';
 import { Semaphore } from './semaphore.js';
 import type { RunContext, TokenRegistry } from './tokens.js';
@@ -204,9 +205,12 @@ export class Supervisor {
     for (;;) {
       attempt++;
       setAttempt(attempt);
+      // A rate-limit retry restarts the agent on the same run: tell it what the run already did.
+      const prior = attempt > 1 ? priorAttemptSection(store, ctx.agentRunId) : '';
+      const prompt = prior ? `${opts.prompt}\n\n${prior}` : opts.prompt;
       result = opts.fake
         ? await this.attemptFake(ctx, opts, record)
-        : await this.attemptCli(ctx, token, cwd, runDir, opts, record);
+        : await this.attemptCli(ctx, token, cwd, runDir, { ...opts, prompt }, record);
       // Runs killed by the watchdog or an abort (result.reason set) are never retried.
       if (!result.rateLimited || result.exitCode === 0 || result.reason || opts.signal?.aborted) break;
       if (attempt >= this.backoff.maxAttempts) {

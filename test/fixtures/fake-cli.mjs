@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Scripted stand-in for an agent CLI. The script is the JSON prompt (the arg after `-p`):
+// Scripted stand-in for an agent CLI. The script is the first line of the prompt (the arg after `-p`);
+// each invocation also writes the full prompt to prompt.<ts>.<pid>.txt:
 // { lines?: string[], delayMs?: number, exitCode?: number, sleepForever?: boolean,
 //   ignoreSigterm?: boolean, counterFile?: string, attempts?: Array<{ lines, exitCode }>,
 //   stubbornChild?: boolean }
@@ -10,7 +11,10 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 writeFileSync('argv.json', JSON.stringify(args));
-const script = JSON.parse(args[args.indexOf('-p') + 1]);
+const prompt = args[args.indexOf('-p') + 1];
+writeFileSync(`prompt.${Date.now()}.${process.pid}.txt`, prompt);
+// The script is the first line; the supervisor may append sections (e.g. on rate-limit retries).
+const script = JSON.parse(prompt.split('\n')[0]);
 
 let plan = script;
 if (script.counterFile) {

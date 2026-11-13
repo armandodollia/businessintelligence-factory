@@ -102,9 +102,56 @@ export const proposeBusinessUnitHandler: ExtraToolHandler = async (ctx, rawInput
   if (missing.length) return { ok: false, error: `evidence references unknown artifacts: ${missing.join(', ')}` };
   // Agent-written text is shown in the UI and logged: strip identity secrets first.
   const text = redactSecrets(store, ctx.workspaceId, { name: input.name, description: input.description, reasoning: input.reasoning });
-  // Idempotent per (task, unit name): replays return the proposal already made.
+  // Idempotent per (task, unit name). A still-pending proposal is revised in place when the agent
+  // changed its description, level, audiences, evidence or reasoning (the revision is logged);
+  // accepted / rejected proposals are never mutated.
   const replay = findReplay(store, ctx, 'propose_business_unit', 'task', (p) => titleKey(String(p.name)) === titleKey(text.name));
-  if (replay) return { ok: true, data: { proposalId: (replay.payload as { proposalId: string }).proposalId, duplicate: true } };
+  if (replay) {
+    const proposalId = (replay.payload as { proposalId: string }).proposalId;
+    const existing = store.unitProposals.get(proposalId);
+    if (!existing || existing.status !== 'proposed') {
+      return { ok: true, data: { proposalId, duplicate: true, status: existing?.status } };
+    }
+    const next = {
+      description: text.description,
+      level: input.level,
+      audiences: [...new Set(input.audiences)],
+      evidence: [...new Set([...existing.evidence, ...input.evidence])],
+      reasoning: text.reasoning,
+    };
+    const changed = (Object.keys(next) as Array<keyof typeof next>).filter(
+      (k) => JSON.stringify(existing[k]) !== JSON.stringify(next[k]),
+    );
+    if (!changed.length) return { ok: true, data: { proposalId, duplicate: true } };
+    const revision: Decision = {
+      id: newId('dec'),
+      workspaceId: ctx.workspaceId,
+      agentRunId: ctx.agentRunId,
+      role: ctx.role,
+      model: ctx.model,
+      kind: 'decision',
+      payload: redactSecrets(store, ctx.workspaceId, {
+        tool: 'propose_business_unit',
+        proposalId,
+        name: existing.name,
+        revision: true,
+        changed,
+        previous: Object.fromEntries(changed.map((k) => [k, existing[k]])),
+        level: next.level,
+        audiences: next.audiences,
+        reasoning: next.reasoning,
+      }),
+      refs: [proposalId, ...next.evidence, ...(ctx.taskId ? [ctx.taskId] : [])],
+      promptVersion: ctx.promptVersion,
+      createdAt: new Date().toISOString(),
+    };
+    store.transaction(() => {
+      store.unitProposals.update(proposalId, { ...next, decisionId: revision.id });
+      store.decisions.insert(revision);
+    });
+    events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: revision });
+    return { ok: true, data: { proposalId, duplicate: true, updated: changed } };
+  }
   const proposal: UnitProposal = {
     id: newId('unit'),
     workspaceId: ctx.workspaceId,

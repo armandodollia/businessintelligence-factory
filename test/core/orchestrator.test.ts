@@ -64,7 +64,7 @@ describe('orchestrator phases', () => {
                   spec('flow_walkthrough'),
                   spec('discover_competitors', { model: { provider: 'claude', model: 'gpt-x' } }),
                   spec('news_scan'),
-                  spec('discover_competitors'),
+                  spec('discover_competitors', { brief: 'a different competitor sweep' }),
                 ],
                 results,
               )
@@ -113,6 +113,34 @@ describe('orchestrator phases', () => {
     expect(s.store.decisions.list({ kind: 'task_proposal' })).toHaveLength(2);
   });
 
+  it('concurrent identical propose_tasks calls insert once; near-duplicates are rejected', async () => {
+    const results: Array<Record<string, unknown>> = [];
+    const tasks = [spec('news_scan', { subject: 'Rival', brief: 'Scan news about Rival' })];
+    const s = setup({
+      pick: (r) => {
+        if (r.kind === 'orchestrate') {
+          return r.round === 1
+            ? async (t) => {
+                const [a, b] = await Promise.all([t.call('propose_tasks', { tasks }), t.call('propose_tasks', { tasks })]);
+                results.push(a as Record<string, unknown>, b as Record<string, unknown>);
+                // near-duplicate: same type, subject and brief modulo case/punctuation, different model
+                results.push((await t.call('propose_tasks', {
+                  tasks: [spec('news_scan', { subject: 'rival', brief: 'scan news about Rival!', model: { provider: 'claude', model: 'opus' } })],
+                })) as Record<string, unknown>);
+              }
+            : nothing;
+        }
+        return r.kind === 'work' ? submitWork({ summary: 'x' }, `claim ${r.task!.id}`) : review(9);
+      },
+    });
+    const rr = await startPhase('ws_a', 'deep_dives', s.deps);
+    expect(s.store.tasks.list({ runId: rr.id })).toHaveLength(1);
+    expect(results.filter((r) => r.duplicate === true)).toHaveLength(1);
+    const [taskId] = s.store.tasks.list({ runId: rr.id }).map((t) => t.id);
+    expect(results[2]).toMatchObject({ accepted: [], rejected: [{ index: 0, duplicateOf: taskId, reason: expect.stringMatching(/duplicate of task/) }] });
+    expect(s.store.decisions.list({ kind: 'task_proposal' })).toHaveLength(2);
+  });
+
   it('runs accepted tasks through review loop', async () => {
     const s = setup({
       pick: (r) =>
@@ -135,7 +163,12 @@ describe('orchestrator phases', () => {
 
   it('max 2 orchestrator rounds', async () => {
     const s = setup({
-      pick: (r) => (r.kind === 'orchestrate' ? propose([spec('news_scan')]) : r.kind === 'work' ? submitWork() : review(9)),
+      pick: (r) =>
+        r.kind === 'orchestrate'
+          ? propose([spec('news_scan', { brief: `scan round ${r.round}` })])
+          : r.kind === 'work'
+            ? submitWork({ summary: 'x' }, `claim ${r.task!.id}`)
+            : review(9),
     });
     const rr = await startPhase('ws_a', 'deep_dives', s.deps);
     const orch = s.requests.filter((r) => r.kind === 'orchestrate');
@@ -347,6 +380,38 @@ describe('resumeInterrupted', () => {
     expect(child.exitCode).toBeNull();
     expect(killOrphanGroup(child.pid!, started)).toBe(true);
     expect(await exited).toBe('SIGKILL');
+  });
+
+  it('a round interrupted mid-run is not started again on resume', async () => {
+    const s = setup({ pick: (r) => (r.kind === 'orchestrate' ? nothing : r.kind === 'work' ? submitWork() : review(9)) });
+    const rr: ResearchRun = { id: newId('rrun'), workspaceId: 'ws_a', phase: 'deep_dives', status: 'running', startedAt: new Date().toISOString() };
+    s.store.researchRuns.insert(rr);
+    // Round 1 started (marker) and had accepted one task when the server died.
+    recordHarnessDecision(
+      s.store,
+      { agentRunId: `orchestrator:${rr.id}:r1`, workspaceId: 'ws_a', role: 'orchestrator', model: { provider: 'claude', model: 'opus' }, promptVersion: 'p' },
+      'decision',
+      { event: 'orchestrator_round_started', researchRunId: rr.id, phase: rr.phase, round: 1 },
+      [rr.id],
+    );
+    seedTask(s.store, rr, { status: 'queued' });
+    const report = resumeInterrupted(s.deps);
+    await report.done;
+    expect(s.requests.filter((r) => r.kind === 'orchestrate').map((r) => r.round)).toEqual([2]);
+    expect(s.store.researchRuns.get(rr.id)!.status).toBe('done');
+  });
+
+  it('only re-queues tasks whose research run is still running', async () => {
+    const s = setup({ pick: () => nothing });
+    const doneRun: ResearchRun = { id: newId('rrun'), workspaceId: 'ws_a', phase: 'deep_dives', status: 'done', startedAt: '', endedAt: '' };
+    s.store.researchRuns.insert(doneRun);
+    const stale = seedTask(s.store, doneRun, { status: 'reviewing' });
+    const report = resumeInterrupted(s.deps);
+    await report.done;
+    expect(report.requeuedTasks).toEqual([]);
+    expect(report.abandonedTasks).toEqual([stale.id]);
+    expect(s.store.tasks.get(stale.id)!.status).toBe('failed');
+    expect(s.requests).toHaveLength(0);
   });
 
   it('re-queues running/reviewing tasks with the same round and continues the phase', async () => {

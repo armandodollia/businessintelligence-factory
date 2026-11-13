@@ -12,7 +12,16 @@ import { findReplay } from './idempotency.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
-  | { ok: true; data: unknown; images?: Array<{ data: string; mimeType: string }> }
+  | {
+      ok: true;
+      data: unknown;
+      images?: Array<{ data: string; mimeType: string }>;
+      /**
+       * Set by an extra handler that wrote its own judgment Decision atomically with its side
+       * effects (e.g. `propose_tasks`); the dispatcher then writes none.
+       */
+      recorded?: boolean;
+    }
   | { ok: false; error: string };
 
 export type ToolCallOptions = { signal?: AbortSignal };
@@ -118,10 +127,11 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
   ): Promise<ToolResult> {
     if (opts.signal?.aborted) return fail('call cancelled');
     // A replay of the same request from the same run (e.g. after a rate-limit retry) waits on the
-    // request that is already pending instead of asking the user twice.
-    const replayOf = store.userRequests
-      .list({ agentRunId: ctx.agentRunId, status: 'pending' })
-      .find((r) => r.workspaceId === ctx.workspaceId && r.kind === kind && r.site === site && r.details === details);
+    // request that is already pending, or gets the stored answer, instead of asking the user twice.
+    const same = store.userRequests
+      .list({ agentRunId: ctx.agentRunId })
+      .filter((r) => r.workspaceId === ctx.workspaceId && r.kind === kind && r.site === site && r.details === details);
+    const replayOf = same.find((r) => r.status === 'pending') ?? same.at(-1);
     const id = replayOf?.id ?? newId('ureq');
     // Register the waiter before the row exists so a fast resolve cannot be missed. `local`
     // tears the waiter down if the insert fails.
@@ -140,7 +150,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       return okData(data);
     };
     if (replayOf) {
-      // It may have been answered between the lookup and the waiter registration.
+      // Already answered (earlier, or between the lookup and the waiter registration): return the
+      // stored answer at once instead of asking the user again.
       const now = store.userRequests.get(id);
       if (now && now.status !== 'pending') {
         local.abort();
@@ -257,9 +268,26 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         .list({ taskId: task.id, claim: input.claim })
         .find((f) => f.workspaceId === ctx.workspaceId);
       if (dup) {
+        // Same (task, claim): update the mutable fields in place (keeping the id) and log a new
+        // score Decision when the judgment (criteria / subject) changed.
         const evidence = [...new Set([...dup.evidence, ...input.evidence])];
-        if (evidence.length !== dup.evidence.length) store.findings.update(dup.id, { evidence });
-        return okData({ findingId: dup.id, duplicate: true });
+        const judgmentChanged =
+          JSON.stringify(dup.criteria) !== JSON.stringify(input.criteria) || dup.subject !== input.subject;
+        if (!judgmentChanged && evidence.length === dup.evidence.length) {
+          return okData({ findingId: dup.id, duplicate: true });
+        }
+        const d = store.transaction(() => {
+          store.findings.update(dup.id, { evidence, criteria: input.criteria, subject: input.subject });
+          if (!judgmentChanged) return undefined;
+          return recordDecision(
+            ctx,
+            'score',
+            { tool: 'save_finding', findingId: dup.id, criteria: input.criteria, subject: input.subject, revision: true, previous: { criteria: dup.criteria, subject: dup.subject } },
+            [dup.id, ...evidence],
+          );
+        });
+        if (d) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
+        return okData({ findingId: dup.id, duplicate: true, updated: true });
       }
       const finding: Finding = {
         id: newId('fnd'),
@@ -373,7 +401,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       const result = await extra(ctx, parsed.data, deps, opts);
       const kind = EXTRA_DECISION_KIND[name];
       // A handler that recognised a replayed call (`duplicate: true`) already has its Decision.
-      const replayed = result.ok && (result.data as { duplicate?: unknown } | null)?.duplicate === true;
+      const replayed =
+        result.ok && (result.recorded === true || (result.data as { duplicate?: unknown } | null)?.duplicate === true);
       if (result.ok && kind && !replayed) {
         const d = recordDecision(ctx, kind, { tool: name, input: parsed.data, result: result.data }, ctx.taskId ? [ctx.taskId] : []);
         events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
