@@ -6,6 +6,7 @@ import { Competitors } from './Competitors.js';
 import { DecisionLog } from './DecisionLog.js';
 import { Findings } from './Findings.js';
 import { Interview } from './Interview.js';
+import { Knowledge } from './Knowledge.js'; // knowledge store KS-7
 import { PendingRequests } from './PendingRequests.js';
 import { Personas } from './Personas.js';
 import { Research } from './Research.js';
@@ -92,5 +93,7 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Schedule wsId={wsId} />;
     case 'usage':
       return <Usage wsId={wsId} />;
+    case 'knowledge': // knowledge store KS-7
+      return <Knowledge wsId={wsId} />;
   }
 }

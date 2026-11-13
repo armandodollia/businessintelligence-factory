@@ -227,3 +227,42 @@ export const outcomesApi = {
   getOutcomes: (id: string, opts: { tree?: boolean } = {}) =>
     get<OutcomeReport>(`${ws(id)}/outcomes${opts.tree ? '?scope=tree' : ''}`),
 };
+
+// --- knowledge store KS-7: Knowledge view (design §17) -------------------------------------------
+// `scope`: 'node' (this part of the business, default) or 'tree' (the whole business).
+type KScope = 'node' | 'tree';
+const kn = (wsId: string, rest: string, q: Record<string, string | number | undefined> = {}) => {
+  const qs = Object.entries(q)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${enc(k)}=${enc(String(v))}`)
+    .join('&');
+  return `${ws(wsId)}/knowledge${rest}${qs ? `?${qs}` : ''}`;
+};
+
+export const knowledgeApi = {
+  search: (wsId: string, q: string, scope: KScope, opts: { kinds?: string[]; cursor?: string } = {}) =>
+    get<import('./knowledge.js').SearchResult>(kn(wsId, '/search', { q, scope, kinds: opts.kinds?.join(','), cursor: opts.cursor })),
+  entities: (wsId: string, scope: KScope) => get<import('./knowledge.js').EntityRow[]>(kn(wsId, '/entities', { scope })),
+  card: (wsId: string, entityId: string, scope: KScope, cursor?: string) =>
+    get<import('./knowledge.js').CardView>(kn(wsId, `/entities/${enc(entityId)}`, { scope, cursor })),
+  item: (wsId: string, itemId: string, scope: KScope, cursor?: string) =>
+    get<import('./knowledge.js').ItemView>(kn(wsId, `/items/${enc(itemId)}`, { scope, cursor })),
+  artifactText: (wsId: string, artifactId: string, scope: KScope, cursor?: string) =>
+    get<import('./knowledge.js').ArtifactTextView>(kn(wsId, `/artifacts/${enc(artifactId)}`, { scope, mode: 'text', cursor })),
+  changes: (wsId: string, scope: KScope) => get<import('./knowledge.js').ChangesView>(kn(wsId, '/changes', { scope })),
+  stats: (wsId: string, scope: KScope) => get<import('./knowledge.js').KnowledgeStats>(kn(wsId, '/stats', { scope })),
+  stale: (wsId: string, scope: KScope) => get<{ facts: import('./knowledge.js').FactRow[]; more: number }>(kn(wsId, '/stale', { scope })),
+  conflicts: (wsId: string, scope: KScope) =>
+    get<{ conflicts: import('./knowledge.js').FactRow[]; unverifiedUpdates: import('./knowledge.js').FactRow[] }>(kn(wsId, '/conflicts', { scope })),
+  mergeSuggestions: (wsId: string, scope: KScope) => get<import('./knowledge.js').MergeSuggestionRow[]>(kn(wsId, '/merge-suggestions', { scope })),
+  acceptSuggestion: (wsId: string, id: string) => post<unknown>(kn(wsId, `/merge-suggestions/${enc(id)}/accept`)),
+  rejectSuggestion: (wsId: string, id: string) => post<unknown>(kn(wsId, `/merge-suggestions/${enc(id)}/reject`)),
+  retractFact: (wsId: string, id: string, reason?: string) => post<unknown>(kn(wsId, `/facts/${enc(id)}/retract`), reason ? { reason } : {}),
+  acceptReplacement: (wsId: string, id: string) => post<unknown>(kn(wsId, `/facts/${enc(id)}/accept-replacement`)),
+  setFactScopes: (wsId: string, id: string, workspaceIds: string[]) =>
+    request<{ workspaceIds: string[] }>('PUT', kn(wsId, `/facts/${enc(id)}/scopes`), { workspaceIds }),
+  gcReport: (wsId: string, scope: KScope) => get<import('./knowledge.js').GcReportView>(kn(wsId, '/gc', { scope })),
+  prune: (wsId: string, artifactIds: string[]) =>
+    post<{ pruned: string[]; bytes: number; decisionId: string }>(kn(wsId, '/gc/prune'), { artifactIds }),
+};
+// --- end knowledge store KS-7 --------------------------------------------------------------------

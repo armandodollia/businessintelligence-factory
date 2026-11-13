@@ -113,3 +113,14 @@ textarea.code { width: 100%; font-family: ui-monospace, monospace; font-size: 12
 /* WP-D: escalation questions */
 .escalation-options { border: none; margin: 0.3em 0; padding: 0; display: flex; flex-direction: column; gap: 0.2em; }
 .escalation-options label { display: flex; align-items: center; gap: 0.4em; }
+
+/* --- knowledge store KS-7: Knowledge view --- */
+.scope-toggle { border: none; padding: 0; gap: 1em; }
+.tag.upload { background: var(--warn-bg); border-color: var(--warn-line); }
+.evidence-text { margin: 0.3em 0; }
+.evidence-text pre { white-space: pre-wrap; word-break: break-word; margin: 0.2em 0; padding: 0.4em; background: var(--soft); border-left: 3px solid var(--line); font-size: 12px; }
+.knowledge .fields { display: grid; gap: 0.2em; margin: 0.4em 0; }
+.knowledge .fields dt { color: var(--muted); font-size: 12px; }
+.knowledge .fields dd { margin: 0 0 0.3em 0; white-space: pre-wrap; }
+.card-lines, .item-parts { padding-left: 1.2em; }
+/* --- end KS-7 --- */
