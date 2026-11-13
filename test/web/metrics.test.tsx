@@ -127,7 +127,7 @@ describe('Metrics page', () => {
     expect((await screen.findAllByText('Review pass rate')).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('img').length).toBeGreaterThanOrEqual(4); // one SVG chart per metric
     expect(screen.getByText('idle timeout')).toBeTruthy();
-    expect(screen.getByText(/2 experiment run/)).toBeTruthy();
+    expect(screen.getByText(/2 experiment \/ audit runs left out/)).toBeTruthy();
     expect(screen.getByText(/Human reads \(not agent context\): 7/)).toBeTruthy();
     expect(screen.getByTestId('lessons-slot')).toBeTruthy();
     // Opening the page never runs the export.

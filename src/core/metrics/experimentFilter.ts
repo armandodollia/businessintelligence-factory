@@ -1,18 +1,24 @@
 /**
- * Experiment-run filter for the metrics view (learning loop WP-G). WP-F tags the runs of an
- * experiment with `experiment_id` / `arm`; metrics leave those runs (and everything attributed to
- * them: tasks they started, ratings and outcomes of what they produced, usage) out by default so an
- * A/B arm does not skew the production trend.
+ * Experiment / audit run filter for the metrics view (learning loop WP-G, wired to WP-F at the wave-2
+ * integration). WP-F tags experiment arm runs (`agent_runs.experiment_id` / `arm`) and reviewer-audit
+ * runs (`agent_runs.audit_id`); metrics leave those runs (and everything attributed to them: tasks
+ * they started, ratings and outcomes of what they produced, usage) out by default so an A/B arm or an
+ * audit does not skew the production trend. `includeExperiments` brings both back.
  *
- * INTEGRATION SEAM (WP-F): this is the only place that decides what an experiment run is. It reads
- * `experimentId` off the run object, so once WP-F maps `agent_runs.experiment_id` to
- * `AgentRun.experimentId` in the repo spec it works with no change here. If WP-F names the field
- * differently (or tags decisions only), change this function alone.
+ * This is the only place the metrics view decides what an experiment run is; it reads WP-F's own
+ * predicate (`taggedRunIds` / `isTaggedRun`, i.e. NOT `NORMAL_RUN_SQL`).
  */
+import { isTaggedRun, taggedRunIds } from '../learning/runTags.js';
+import type { Store } from '../store/db.js';
 import type { AgentRun } from '../types.js';
 
-/** True when the run belongs to an experiment arm (WP-F tag present and non-empty). */
-export function isExperimentRun(run: AgentRun): boolean {
-  const id = (run as AgentRun & { experimentId?: unknown }).experimentId;
-  return typeof id === 'string' && id !== '';
+/** True when the run is an experiment arm run or a reviewer-audit run (WP-F tags). */
+export function isExperimentRun(store: Pick<Store, 'db'>, run: Pick<AgentRun, 'id'>): boolean {
+  return isTaggedRun(store, run.id);
+}
+
+/** The same predicate for many runs (one query). */
+export function experimentRunFilter(store: Pick<Store, 'db'>): (run: Pick<AgentRun, 'id'>) => boolean {
+  const tagged = taggedRunIds(store);
+  return (run) => tagged.has(run.id);
 }

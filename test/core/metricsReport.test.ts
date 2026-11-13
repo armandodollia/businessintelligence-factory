@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { learningRepos } from '../../src/core/learning/store.js';
+import { tagRun } from '../../src/core/learning/runTags.js';
 import { outcomeReport } from '../../src/core/learning/outcomes.js';
 import { isExperimentRun } from '../../src/core/metrics/experimentFilter.js';
 import { promptVersionMetrics } from '../../src/core/metrics/promptMetrics.js';
@@ -163,11 +164,20 @@ describe('metricsReport (WP-G)', () => {
     expect(on.experiments).toEqual({ included: true, excludedRuns: 0 });
   });
 
-  it('the default experiment predicate reads the WP-F run tag when present', () => {
-    const base = { id: 'r', workspaceId: 'w', role: 'worker', model: SONNET, token: 't', status: 'done', startedAt: 'x' } as AgentRun;
-    expect(isExperimentRun(base)).toBe(false);
-    expect(isExperimentRun({ ...base, experimentId: 'exp_1', arm: 'B' } as AgentRun)).toBe(true);
-    expect(isExperimentRun({ ...base, experimentId: null } as unknown as AgentRun)).toBe(false);
+  it('by default leaves out the runs WP-F tags (experiment and audit runs), with a toggle to include them', () => {
+    const { store, root } = setup();
+    // The real WP-F columns: x1 is an experiment arm run, rev1 a reviewer-audit run.
+    store.db.prepare("UPDATE agent_runs SET experiment_id = 'exp_1', arm = 'B' WHERE id = 'x1'").run();
+    tagRun(store, 'rev1', { auditId: 'aud_1', lessonsOff: true });
+    expect(isExperimentRun(store, store.agentRuns.get('x1')!)).toBe(true);
+    expect(isExperimentRun(store, store.agentRuns.get('rev1')!)).toBe(true);
+    expect(isExperimentRun(store, store.agentRuns.get('w1')!)).toBe(false);
+    const off = metricsReport(store, { workspaceId: root.id, scope: 'node' });
+    expect(off.experiments).toEqual({ included: false, excludedRuns: 2 });
+    expect(off.totals).toMatchObject({ runs: 3, costUsd: 1.6 });
+    const on = metricsReport(store, { workspaceId: root.id, scope: 'node', includeExperiments: true });
+    expect(on.experiments).toEqual({ included: true, excludedRuns: 0 });
+    expect(on.totals).toMatchObject({ runs: 5, costUsd: 6.85 });
   });
 
   it('time series by week and by day, gaps filled, inside the window', () => {

@@ -24,8 +24,8 @@
  * time. `since` / `until` (inclusive, ISO) and the buckets use that time; buckets are UTC days or
  * ISO weeks (key = the Monday). Knowledge figures use their own windows (retrieval time).
  *
- * Experiments (WP-F): runs `isExperimentRun` accepts — and every item attributed to them — are left
- * out unless `includeExperiments`. Knowledge figures are not filtered by experiment.
+ * Experiments and audits (WP-F): tagged runs (`experimentRunFilter`: experiment arm and reviewer-audit
+ * runs) — and every item attributed to them — are left out unless `includeExperiments`. Knowledge figures are not filtered by experiment.
  */
 import type { BifConfig } from '../config/schema.js';
 import { treeWorkspaceIds } from '../evidence/synthesis.js';
@@ -38,7 +38,7 @@ import { ratingDelta } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import type { AgentRun, Task } from '../types.js';
 import { rootOf } from '../workspace/tree.js';
-import { isExperimentRun as defaultIsExperimentRun } from './experimentFilter.js';
+import { experimentRunFilter } from './experimentFilter.js';
 import { originRunOfRating, ratingOriginIndex } from './promptMetrics.js';
 import { usageByRun } from './usage.js';
 
@@ -59,9 +59,9 @@ export type MetricsReportOptions = {
   groupBy?: MetricsGroupBy;
   /** Series bucket (default `day`). */
   bucket?: MetricsBucket;
-  /** Count experiment runs too (default false: production trend only). */
+  /** Count experiment and audit runs too (default false: production trend only). */
   includeExperiments?: boolean;
-  /** WP-F seam override; default `isExperimentRun` from `experimentFilter.ts`. */
+  /** Predicate override (tests); default `experimentRunFilter(store)` (WP-F tags). */
   isExperimentRun?: (run: AgentRun) => boolean;
   /** Passed to `knowledgeMetrics`. */
   config?: Pick<BifConfig, 'knowledge'>;
@@ -269,7 +269,7 @@ export function metricsReport(store: Store, opts: MetricsReportOptions): Metrics
   const groupBy = opts.groupBy ?? 'role';
   const bucket = opts.bucket ?? 'day';
   const includeExperiments = opts.includeExperiments === true;
-  const isExperiment = opts.isExperimentRun ?? defaultIsExperimentRun;
+  const isExperiment = opts.isExperimentRun ?? experimentRunFilter(store);
   const sinceMs = windowMs(opts.since, 'since');
   const untilMs = windowMs(opts.until, 'until');
   const ids = scope === 'node' ? [opts.workspaceId] : treeWorkspaceIds(store, opts.workspaceId);

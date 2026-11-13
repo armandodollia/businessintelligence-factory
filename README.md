@@ -405,8 +405,8 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   rate, rounds to pass, run failure rate, cost and rating agreement per day or week, with tables per
   role / task type / prompt version / model (pass, rounds, review issues, failures, ratings, outcome
   labels, cost), failures by reason, review issues by class and the knowledge-store metrics (human
-  reads apart). Scope is this part or the whole business, never another business. Experiment runs
-  are left out unless you tick "Include experiment runs". The training-export exclusion summary is
+  reads apart). Scope is this part or the whole business, never another business. Experiment and
+  reviewer-audit runs are left out unless you tick "Include experiment and audit runs". The training-export exclusion summary is
   computed only when you press its button (it runs the whole export). API:
   `GET /api/workspaces/:id/metrics[?scope=tree|node&since=&until=&groupBy=role|task_type|prompt_version|model&bucket=day|week&includeExperiments=1]`.
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is

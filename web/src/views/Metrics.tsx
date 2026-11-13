@@ -21,8 +21,8 @@ export function Metrics({ wsId }: { wsId: string }) {
             {r.scope === 'tree' ? `Whole business (${r.workspaceIds.length} part${r.workspaceIds.length === 1 ? '' : 's'})` : 'This part only'}
             {' · '}
             {r.experiments.included
-              ? 'experiment runs included'
-              : `${r.experiments.excludedRuns} experiment run${r.experiments.excludedRuns === 1 ? '' : 's'} left out`}
+              ? 'experiment and audit runs included'
+              : `${r.experiments.excludedRuns} experiment / audit run${r.experiments.excludedRuns === 1 ? '' : 's'} left out`}
             {' · '}times are when the work was done (the agent run's start)
           </p>
           <Kpis r={r} />
@@ -86,7 +86,7 @@ function Filters({ filter, onChange }: { filter: MetricsFilter; onChange: (p: Pa
       </label>
       <label className="inline">
         <input type="checkbox" checked={filter.includeExperiments} onChange={(e) => onChange({ includeExperiments: e.target.checked })} />
-        Include experiment runs
+        Include experiment and audit runs
       </label>
     </div>
   );
