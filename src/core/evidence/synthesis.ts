@@ -1,5 +1,7 @@
 import type { Store } from '../store/db.js';
-import type { Finding } from '../types.js';
+import type { Finding, Role } from '../types.js';
+import { defaultConfig, type BifConfig, type ProviderId } from '../config/schema.js'; // KS-5
+import { synthesisBriefing } from '../knowledge/briefing.js'; // KS-5
 import { descendants, rootOf, sameTree } from '../workspace/tree.js';
 
 /**
@@ -46,26 +48,19 @@ export function setIncludeInSynthesis(store: Store, findingId: string, include: 
   return store.findings.update(findingId, { includeInSynthesis: include ?? undefined });
 }
 
+// --- knowledge store KS-5: the synthesis briefing replaces the "every usable finding of the tree" list ---
 /**
- * Prompt section listing the findings usable for synthesis — from every node of the business tree,
- * tagged by source node when not the workspace itself — and how many were left out.
+ * Prompt section of the facts usable for synthesis (KS-5 `synthesisBriefing`): current, usable facts
+ * of this node, its sub-units and parents, grouped by entity, ranked, redacted then cut, fenced and fitted
+ * to the role's briefing budget, with counts of what is not shown and the tree-wide search instruction
+ * for causes. Sibling nodes' facts are counted, not listed (`search` with `scope: "tree"`; they may still
+ * be cited). Callers that put it into a run's prompt use `synthesisBriefing` directly for its `read`.
  */
-export function synthesisFindingsSection(store: Store, workspaceId: string): string {
-  const all = treeWorkspaceIds(store, workspaceId).flatMap((id) => store.findings.list({ workspaceId: id }));
-  const usable = all.filter(isSynthesisEligible);
-  const lines = usable.map(
-    (f) =>
-      `- [${f.id}] ${f.subject}: ${f.claim.length > 200 ? `${f.claim.slice(0, 200)}…` : f.claim}` +
-      `${f.workspaceId !== workspaceId ? ` (source ${f.workspaceId})` : ''}`,
-  );
-  const symptoms = store.symptoms.list({ workspaceId, kind: 'symptom' });
-  const parts = [
-    '## Findings usable for synthesis (verified, or included by the user; any node of this business tree)',
-    lines.join('\n') || '- (none)',
-    `${all.length - usable.length} other finding(s) are unverified, pending, superseded or excluded by the user and must NOT be used ` +
-      'or cited in recommendations (save_recommendation rejects them).',
-  ];
-  // Symptom ids for symptom_hypotheses workers (save_hypothesis takes symptom_id).
-  if (symptoms.length) parts.push('', '## Interview symptoms', ...symptoms.map((s) => `- [${s.id}] ${s.title}`));
-  return parts.join('\n');
+export function synthesisFindingsSection(
+  store: Store,
+  workspaceId: string,
+  opts: { config?: Pick<BifConfig, 'knowledge'>; role?: Role; provider?: ProviderId } = {},
+): string {
+  return synthesisBriefing({ store, config: opts.config ?? defaultConfig }, { workspaceId, role: opts.role ?? 'synthesizer', ...(opts.provider ? { provider: opts.provider } : {}) }).section;
 }
+// --- end KS-5 ---

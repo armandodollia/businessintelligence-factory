@@ -1024,3 +1024,67 @@ gate (reads by id, interviewer tools, `get_card` / `read_workspace` inputs).
   `(knowledge: N item(s) left out)` → `''` (budget too small to say anything); `factIds` (the slice)
   and evidence ids are never cut, and only shown text is logged. **KS-5:** briefings follow the same
   ladder.
+
+## KS-5 builder notes
+
+Smaller decisions taken while building KS-5 (no migration added; none changes §3, §9 or §12).
+
+- **Modules:** `knowledge/briefing.ts` (`fitBriefing` — the ladder; `orchestratorBriefing`, `synthesisBriefing`,
+  `workerBriefing`; `taskRecheckFactIds`; the local `crossNodeCausalEdges`), `businessMap.treeLines`. Hot files
+  (`orchestrator.ts`, `reviewLoop.ts`, `escalation.ts`, `interview.ts`, `synthesis.ts`, `diff.ts`) call in, in
+  delimited blocks. The string functions tests use (`orchestratorPrompt`, `workPrompt`, `revisePrompt`,
+  `currentOutputsSection`, `escalationPrompt`, `buildInterviewPrompt`, `synthesisFindingsSection`) stay; runs use
+  their `*WithReads` variants, which return the `PromptRead`s passed as `AgentRequest.promptReads` (interviewer:
+  `RunOptions.beforeStart`), so every row is written before the run starts and carries the run's prompt hash.
+- **One budget per section:** each briefing fits its role's `briefing` budget (orchestrator 1 500, synthesizer
+  4 000, worker 1 500; reviewer / escalation: the outputs section and KS-2's knowledge context are two sections,
+  each within the budget). Parts are capped by item count first (orchestrator: re-check 12, changes 8, causal
+  edges 10, symptoms 10, 10 entities × 3 facts, personas 6, recommendations 5), then the ladder fits the whole.
+- **Ladder** (as `factReview`): `(left out for length: N item(s); expand or search them: <≤ 20 ids>)` → `(left
+  out for length: N item(s); use search, get_card or list_changes)` → `(knowledge: N item(s) left out)` → `''`.
+  Group headings are not items and are dropped when none of their lines is shown. Intro / outro lines carry
+  only guidance and counts. A store with nothing in scope says so ("Nothing is stored … yet"), which is true.
+- **Served text:** every line goes through `servedLine` (redact whole, then cut; claims 200 chars in briefings,
+  160 in the orchestrator index, 1 500 for a reviewer's outputs), then the block is fenced (`<<<EVIDENCE
+  knowledge`; review / revise outputs: `outputs`) under `UNTRUSTED_RULE`.
+- **Reads:** `Briefing.read` exists whenever the section is non-empty (a count-only section logs `results: []`).
+  Also logged: the orchestrator's task-results summary (finding claims, ≤ 5 per task, the rest counted), the
+  revise prompt's current outputs, the reviewer's and the escalation agent's outputs section, the interviewer's
+  drill-down (now usable facts only: replaced versions with status `verified` were shown before). Reviewer row
+  order: KS-2 context first, then outputs.
+- **Scope:** node scope everywhere. Tree context = one line per parent / child / sibling (name, scope,
+  audiences; parents and children also their profile keys), no findings and no profile values. The synthesis
+  briefing counts usable facts elsewhere in the tree ("search with scope \"tree\""; they may still be cited).
+  The orchestrator lists usable facts in every phase (before KS-5 it listed unverified ones outside synthesis)
+  and counts the rest (`include_unverified`).
+- **User ruling (wide view):** "company level" = `scopeOf(ws).level === 'company'`. A cross-node edge is a live
+  `causes` / `addresses` edge whose two entities' home nodes and asserting record's node are not all one node,
+  tree-wide, labelled `source <ws>`. `crossNodeCausalEdges` is a local helper (KS-7's `aroundVisible` exception
+  can replace it at integration). `TREE_WIDE_CAUSES` is in the synthesis briefing (synthesizer and
+  symptom-hypothesis workers) and the synthesis-phase orchestrator briefing; `synthesizer.md` and
+  `hypotheses.md` say the same.
+- **Re-check / changes:** scheduled runs: facts whose TTL ends before the schedule's next cron occurrence
+  (cron-parser used directly in the orchestrator: importing `scheduler.ts` would be a cycle); manual runs: stale
+  only. "Changes since" = start of `previousRun` (same schedule and phase), else the node's last finished run,
+  through `runListChanges` (its `stale` items are skipped: they are under re-check).
+- **Stale outcome:** `recordStaleOutcome` for every stale fact a briefing shows (idempotent per
+  `last_confirmed_at`); the changes part calls `runListChanges`, which records it for every stale fact in scope,
+  as `list_changes` does.
+- **`recheck_fact_ids`** (≤ 50 per task): each must be a current fact of the tree, else that task is rejected
+  ("recheck_fact_ids: finding '<id>' not found" for unknown and other-tree ids alike; "… is <lifecycle>" for an
+  old version). Stored on the accepted entry of the `task_proposal` Decision (`taskRecheckFactIds`); a
+  `tasks.recheck_fact_ids` column would be cleaner (not added: no migrations).
+- **What changed:** `diffRuns` adds `replaced [{from, to}]`, `retracted`, `confirmed` from the run's applied
+  observations (`fact_observations.run_id`). `newFindings` excludes replacement versions and candidates; the
+  text match (fallback for facts saved `new`) also compares with facts the previous run confirmed;
+  `removedSubjects` counts facts the next run confirmed / replaced / retracted as covered; the screenshot diff
+  includes the evidence of confirmations. `contradictedFindings` skips lineages the next run observed and
+  non-current versions (a confirmed fact was reported `contradicted`). **KS-6:** the WP-C call
+  `recordWhatChangedOutcomes` is isolated in a marked block in `whatChanged.ts`; replace it there.
+- **Web:** `ChangeEntry` gains `replaced` / `retracted` / `confirmed`, `empty` accounts for them, and the
+  Research view shows one line each (delimited).
+- **Prompts:** "Knowledge store" sections in worker, orchestrator, synthesizer, hypotheses, reviewer, escalation
+  and interviewer prompts. Versions change through the run prompt store (`recordRunPrompt`); `promptStoreGaps`
+  is asserted empty after briefed runs.
+- **Not changed (pre-existing):** upload titles listed by id in the orchestrator and interviewer prompts are not
+  logged as reads (see the KS-5 report's question).

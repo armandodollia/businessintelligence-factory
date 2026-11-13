@@ -1,6 +1,7 @@
 import { priorRunLines } from '../harness/priorAttempt.js';
 import type { Store } from '../store/db.js';
 import type { Task, UserRequest } from '../types.js';
+import { servedLine } from '../knowledge/texts.js'; // KS-5
 
 /**
  * Escalation re-run context (WP-D). Kept free of research imports so `reviewLoop` can include it in
@@ -45,6 +46,8 @@ export function latestRerun(store: Store, task: Pick<Task, 'id' | 'workspaceId'>
   return latest;
 }
 
+// KS-5: identity secrets of the tree are redacted from the whole text before it is cut.
+const clipIn = (store: Store, workspaceId: string) => (s: string, n: number) => servedLine(store, workspaceId, s.replace(/\s+/g, ' ').trim(), n);
 const clip = (s: string, n: number) => {
   const one = s.replace(/\s+/g, ' ').trim();
   return one.length > n ? `${one.slice(0, n)}…` : one;
@@ -65,6 +68,7 @@ export function escalationRerunSection(store: Store, task: Task): string {
   const rerun = latestRerun(store, task);
   if (!rerun) return '';
   const answered = escalationRequests(store, task).filter((r) => r.status !== 'pending');
+  const clip = clipIn(store, task.workspaceId);
   const parts = [
     `## Previous attempt and the user's answers (escalation)\nYour previous attempt at this task ended ${rerun.previousStatus} in review round ${rerun.previousRound}.`,
   ];

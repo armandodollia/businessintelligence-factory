@@ -13,7 +13,10 @@ import { policyPrompt } from '../policy/actionPolicy.js';
 import { loadPrompt, promptVersion, type CalibrationScope } from '../prompts/index.js';
 import { recordHarnessDecision, runAgent, type ResearchDeps } from '../research/deps.js';
 import { runHistory, runTaskTracked } from '../research/orchestrator.js';
-import { loopSettings, roleForTask } from '../research/reviewLoop.js';
+import { loopSettings, reviewContext, roleForTask } from '../research/reviewLoop.js';
+import { defaultConfig } from '../config/schema.js'; // KS-5
+import type { PromptRead } from '../knowledge/promptReads.js'; // KS-5
+import { servedLine } from '../knowledge/texts.js'; // KS-5
 import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
@@ -123,8 +126,6 @@ export function escalationToolHandlers(): Partial<Record<ToolName, ExtraToolHand
 // ---------------------------------------------------------------------------
 // prompts
 
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
-
 /** The latest valid review of a task (last reviewer run that submitted one). */
 function lastReviewOf(store: Store, task: Task): { score: number; issues: ReviewIssue[] } | undefined {
   const runs = store.agentRuns.list({ taskId: task.id, role: 'reviewer' }).filter((r) => r.workspaceId === task.workspaceId);
@@ -149,7 +150,22 @@ export function escalationSystemPrompt(config: BifConfig, scope?: CalibrationSco
 }
 
 /** Escalation agent task prompt: the task, how it ended, its last review / failures and earlier answers. */
-export function escalationPrompt(store: Store, task: Task, maxQuestions = 3): string {
+export function escalationPrompt(store: Store, task: Task, maxQuestions = 3, config: Pick<BifConfig, 'knowledge'> = defaultConfig): string {
+  return escalationPromptWithReads(store, task, maxQuestions, config).prompt;
+}
+
+/**
+ * `escalationPrompt` and its prompt reads (KS-5): stored text (review issues, the deliverable, the task's
+ * outputs) is redacted before it is cut; the task's outputs are a reviewer-style briefing (escalation
+ * budget, fenced) whose read is logged on the run before it starts.
+ */
+export function escalationPromptWithReads(
+  store: Store,
+  task: Task,
+  maxQuestions = 3,
+  config: Pick<BifConfig, 'knowledge'> = defaultConfig,
+): { prompt: string; reads: PromptRead[] } {
+  const clip = (s: string, n: number) => servedLine(store, task.workspaceId, s, n);
   const parts = [
     [`Task id: ${task.id}`, `Task type: ${task.type}`, ...(task.subject ? [`Subject: ${task.subject}`] : [])].join('\n'),
     `## Brief\n${task.brief}`,
@@ -167,10 +183,17 @@ export function escalationPrompt(store: Store, task: Task, maxQuestions = 3): st
   const history = runHistory(store, task);
   if (history.length) parts.push(`## Run failures\n${history.map((h) => `- ${clip(h, 400)}`).join('\n')}`);
   if (task.result !== undefined) parts.push(`## Final deliverable\n\`\`\`json\n${clip(JSON.stringify(task.result, null, 2), 3000)}\n\`\`\``);
+  // KS-5: the task's outputs, as the reviewer sees them (escalation budget; its slice allows expand).
+  const context = reviewContext({ store, config: config as BifConfig }, task, 'escalation');
+  if (context.outputs) parts.push(context.outputs);
   const earlier = escalationRequests(store, task).filter((r) => r.status !== 'pending');
   if (earlier.length) parts.push(`## Earlier escalations for this task (already answered)\n${earlier.map(answerLine).join('\n')}`);
   parts.push(`Call \`submit_escalation\` exactly once with at most ${maxQuestions} question(s) (or none).`);
-  return parts.join('\n\n');
+  const reads: PromptRead[] = [];
+  if (context.outputsRead) reads.push(context.outputsRead);
+  const k = context.knowledge;
+  if (k) reads.push({ query: `review context: task ${task.id}`, scope: 'tree', results: k.results, tokensReturned: k.tokens, truncated: k.truncated, uploadDerived: k.uploadDerived });
+  return { prompt: parts.join('\n\n'), reads };
 }
 
 // ---------------------------------------------------------------------------
@@ -191,10 +214,12 @@ export async function runEscalation(deps: ResearchDeps, taskId: string): Promise
   const runs = store.agentRuns.list({ taskId, role: 'escalation' }).filter((r) => r.workspaceId === task.workspaceId);
   if (runs.length >= settings.maxPerTask) return [];
   const system = escalationSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId));
+  const { prompt, reads } = escalationPromptWithReads(store, task, settings.maxQuestions, config); // KS-5
   const res = await runAgent(deps, {
     kind: 'escalate', role: 'escalation', workspaceId: task.workspaceId, task, round: task.round, attempt: 1,
-    prompt: escalationPrompt(store, task, settings.maxQuestions), systemPrompt: system,
+    prompt, systemPrompt: system,
     model: settings.model, needsBrowser: false, promptVersion: promptVersion(system),
+    ...(reads.length ? { promptReads: reads } : {}),
   });
   return store.userRequests.list({ agentRunId: res.agentRunId, kind: ESCALATION_KIND });
 }

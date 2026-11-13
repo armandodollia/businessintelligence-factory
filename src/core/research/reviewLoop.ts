@@ -1,6 +1,5 @@
 import type { BifConfig } from '../config/schema.js';
 import { reviewerFor } from '../config/load.js';
-import { synthesisFindingsSection } from '../evidence/synthesis.js';
 import { AbortError } from '../events.js';
 import type { RunOutcome } from '../harness/supervisor.js';
 import { getRunOutputs, type ReviewIssue } from '../harness/tools/handlers.js';
@@ -18,6 +17,9 @@ import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 import { defaultConfig } from '../config/schema.js'; // KS-2
 import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
 import type { ReviewSlice } from '../knowledge/readCommon.js'; // KS-4
+import { briefingBudget, fitBriefing, promptReadsOf, synthesisBriefing, taskRecheckFactIds, workerBriefing, type BriefLine, type Briefing } from '../knowledge/briefing.js'; // KS-5
+import type { PromptRead } from '../knowledge/promptReads.js'; // KS-5
+import { servedLine } from '../knowledge/texts.js'; // KS-5
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -41,7 +43,8 @@ export function roleForTask(task: Pick<Task, 'type'>): Role {
 
 const ARTIFACT_ID = /\bart_[0-9A-Z]{26}\b/g;
 
-const trunc = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+/** Longest output text (claim, summary, hypothesis) shown to a reviewer (chars, after redaction). */
+const OUTPUT_TEXT = 1500;
 
 export type ReviewContext = {
   /** Evidence artifact ids: of the task's current outputs (transitively) and cited in the deliverable. */
@@ -50,6 +53,8 @@ export type ReviewContext = {
   outputs: string;
   /** Knowledge store KS-2: prior claims, confirmations / retractions and quotes shown (logged as a read). */
   knowledge?: ReviewFactContext;
+  /** KS-5: the outputs section is a briefing (redacted, cut, fenced, budgeted); its read is logged on the run. */
+  outputsRead?: PromptRead;
 };
 
 /**
@@ -59,7 +64,7 @@ export type ReviewContext = {
  * recommendations, and the evidence artifact ids reachable from all of these. Nothing else of the
  * workspace is included.
  */
-export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): ReviewContext {
+export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task, role: Role = 'reviewer'): ReviewContext {
   const { store } = deps;
   const outputs = taskOutputs(store, task);
   const current = currentOutputIds(store, task, outputs);
@@ -93,58 +98,61 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
   for (const c of competitors) for (const a of c.evidence) ids.add(a);
   if (task.result !== undefined) for (const m of JSON.stringify(task.result).matchAll(ARTIFACT_ID)) ids.add(m[0]);
 
+  // --- KS-5: the outputs are a briefing: every text redacted, then cut, then fenced; fitted to the role's
+  // briefing budget (left-out ids are named: the reviewer may `expand` them, they are in its slice). ---
+  const ws = task.workspaceId;
+  const line = (text: string, n: number) => servedLine(store, ws, text, n);
+  const lines: BriefLine[] = [];
+  const add = (title: string, items: BriefLine[]) => {
+    if (items.length) lines.push({ text: `### ${title}`, refs: [], upload: false, heading: true }, ...items);
+  };
+  const findingLine = (f: Finding, source = ''): BriefLine => ({
+    text:
+      `- [${f.id}] ${line(f.subject, 200)}: ${line(f.claim, OUTPUT_TEXT)}` +
+      `${Object.keys(f.criteria).length ? ` (criteria: ${JSON.stringify(f.criteria)})` : ''} (evidence: ${f.evidence.join(', ')})${source}`,
+    refs: [{ id: f.id, kind: 'fact' }], upload: f.uploadDerived === true,
+  });
+  const record = (id: string) => [{ id, kind: 'record' }];
+  add('Findings saved by this task', findings.map((f) => findingLine(f)));
+  add('Recommendations saved by this task', recs.map((r) => ({
+    text: `- [${r.id}] ${line(r.title, 200)}: ${line(r.summary, OUTPUT_TEXT)}\n  criteria: ${JSON.stringify(r.criteria)}\n  cites findings: ${r.findingIds.join(', ')}`,
+    refs: record(r.id), upload: false,
+  })));
+  add('Findings cited by these recommendations / hypotheses', cited.map((f) => findingLine(f, f.workspaceId !== task.workspaceId ? ` (source ${f.workspaceId})` : '')));
+  add('Personas saved by this task', personas.map((p) => ({
+    text: `- [${p.id}] ${line(p.slug, 120)} (${line(p.segment, 120)}; audience ${p.audience ?? 'external'})\n${Object.entries(p.profile)
+      .map(([k, v]) => `  - ${k}: ${line(v.value, 400)} (confidence ${v.confidence}; evidence: ${v.evidence.join(', ')})`)
+      .join('\n')}`,
+    refs: record(p.id), upload: false,
+  })));
+  add('Competitors saved by this task', competitors.map((c) => ({
+    text:
+      `- [${c.id}] ${line(c.name, 200)}${c.site ? ` (${line(c.site, 200)})` : ''}: threat ${c.threat}, directness ${c.directness}, ` +
+      `comparison ${JSON.stringify(c.comparison)} (evidence: ${c.evidence.join(', ')})`,
+    refs: record(c.id), upload: false,
+  })));
+  add('Symptom hypotheses saved by this task', hypotheses.map((h) => {
+    const symptom = store.symptoms.get(h.symptomId);
+    return {
+      text: `- [${h.id}] symptom ${h.symptomId}${symptom ? ` (${line(symptom.title, 200)})` : ''}: ${line(h.hypothesis, OUTPUT_TEXT)} (confidence ${h.confidence}%; evidence: ${h.evidence.join(', ')})`,
+      refs: [...record(h.id), ...(symptom ? record(symptom.id) : [])], upload: false,
+    };
+  }));
   const sections: string[] = [];
-  const findingLine = (f: Finding) =>
-    `- [${f.id}] ${f.subject}: ${f.claim}` +
-    `${Object.keys(f.criteria).length ? ` (criteria: ${JSON.stringify(f.criteria)})` : ''} (evidence: ${f.evidence.join(', ')})`;
-  if (findings.length) sections.push(`### Findings saved by this task\n${findings.map(findingLine).join('\n')}`);
-  if (recs.length) {
-    sections.push(
-      `### Recommendations saved by this task\n${recs
-        .map((r) => `- [${r.id}] ${r.title}: ${r.summary}\n  criteria: ${JSON.stringify(r.criteria)}\n  cites findings: ${r.findingIds.join(', ')}`)
-        .join('\n')}`,
-    );
+  let outputsRead: PromptRead | undefined;
+  if (lines.length) {
+    const env = { store, config: deps.config ?? defaultConfig };
+    const b = fitBriefing(env, {
+      title: '## Submitted outputs',
+      lines,
+      budget: briefingBudget(env, role, task.model.provider),
+      query: `review outputs: task ${task.id} round ${task.round}`,
+      label: 'outputs',
+    });
+    if (b.section) sections.push(b.section);
+    outputsRead = b.read;
   }
-  if (cited.length) {
-    sections.push(
-      `### Findings cited by these recommendations / hypotheses\n${cited
-        .map((f) => `${findingLine(f)}${f.workspaceId !== task.workspaceId ? ` (source ${f.workspaceId})` : ''}`)
-        .join('\n')}`,
-    );
-  }
-  if (personas.length) {
-    sections.push(
-      `### Personas saved by this task\n${personas
-        .map(
-          (p) =>
-            `- [${p.id}] ${p.slug} (${p.segment}; audience ${p.audience ?? 'external'})\n${Object.entries(p.profile)
-              .map(([k, v]) => `  - ${k}: ${trunc(v.value, 400)} (confidence ${v.confidence}; evidence: ${v.evidence.join(', ')})`)
-              .join('\n')}`,
-        )
-        .join('\n')}`,
-    );
-  }
-  if (competitors.length) {
-    sections.push(
-      `### Competitors saved by this task\n${competitors
-        .map(
-          (c) =>
-            `- [${c.id}] ${c.name}${c.site ? ` (${c.site})` : ''}: threat ${c.threat}, directness ${c.directness}, ` +
-            `comparison ${JSON.stringify(c.comparison)} (evidence: ${c.evidence.join(', ')})`,
-        )
-        .join('\n')}`,
-    );
-  }
-  if (hypotheses.length) {
-    sections.push(
-      `### Symptom hypotheses saved by this task\n${hypotheses
-        .map((h) => {
-          const symptom = store.symptoms.get(h.symptomId);
-          return `- [${h.id}] symptom ${h.symptomId}${symptom ? ` (${symptom.title})` : ''}: ${h.hypothesis} (confidence ${h.confidence}%; evidence: ${h.evidence.join(', ')})`;
-        })
-        .join('\n')}`,
-    );
-  }
+  // --- end KS-5 ---
   // --- knowledge store KS-2: lifecycle of the outputs, confirmations / retractions, verified quotes ---
   const knowledge = reviewFactContext(store, deps.config ?? defaultConfig, task, findings);
   for (const a of knowledge.evidence) ids.add(a);
@@ -152,8 +160,9 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
   // --- end KS-2 ---
   return {
     evidence: [...ids],
-    outputs: sections.length ? `## Submitted outputs\n${sections.join('\n\n')}` : '',
+    outputs: sections.join('\n\n'),
     ...(knowledge.results.length ? { knowledge } : {}),
+    ...(outputsRead ? { outputsRead } : {}),
   };
 }
 
@@ -193,28 +202,64 @@ export function answeredRequestsSection(deps: Pick<ResearchDeps, 'store'>, task:
 }
 
 /** Prompt for the initial worker run. Includes answers to the task's earlier user requests (after a restart). */
-export function workPrompt(deps: Pick<ResearchDeps, 'store'>, task: Task): string {
+export function workPrompt(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): string {
+  return workPromptWithReads(deps, task).prompt;
+}
+
+/**
+ * KS-5: the knowledge briefings of a worker / synthesizer run (synthesis tasks: usable facts and
+ * symptoms; every task: the facts it must re-check and the card of its subject). Each is a read.
+ */
+function taskBriefings(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): Briefing[] {
+  const env = { store: deps.store, config: deps.config ?? defaultConfig };
+  const role = roleForTask(task);
+  const provider = task.model.provider;
+  const out: Briefing[] = [];
+  if (task.phase === 'synthesis') out.push(synthesisBriefing(env, { workspaceId: task.workspaceId, role, provider }));
+  const recheck = taskRecheckFactIds(deps.store, task);
+  const worker = workerBriefing(env, {
+    workspaceId: task.workspaceId, role, provider, recheckFactIds: recheck,
+    ...(task.subject && task.phase !== 'synthesis' ? { subject: task.subject } : {}),
+  });
+  if (worker) out.push(worker);
+  return out;
+}
+
+/** `workPrompt` and its prompt reads (KS-5). */
+export function workPromptWithReads(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): { prompt: string; reads: PromptRead[] } {
+  const briefings = taskBriefings(deps, task);
   const parts = [
     taskHeader(task),
     `## Brief\n${task.brief}`,
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
+    ...briefings.map((b) => b.section).filter(Boolean),
   ];
-  if (task.phase === 'synthesis') parts.push(synthesisFindingsSection(deps.store, task.workspaceId));
   const answered = answeredRequestsSection(deps, task);
   if (answered) parts.push(answered);
   // WP-D: escalation re-run context and the role's recent policy denials (same business tree).
   parts.push(...wpdSections(deps, task));
   parts.push('Finish by calling `submit_result` with your deliverable.');
-  return parts.join('\n\n');
+  return { prompt: parts.join('\n\n'), reads: promptReadsOf(...briefings) };
 }
 
 /** Prompt for a revision run: brief, criteria, current deliverable and the reviewer's issues. */
 export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>): string {
+  return revisePromptWithReads(task, issues, deps).prompt;
+}
+
+/** `revisePrompt` and its prompt reads (KS-5). */
+export function revisePromptWithReads(
+  task: Task,
+  issues: ReviewIssue[],
+  deps?: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>,
+): { prompt: string; reads: PromptRead[] } {
   const issueLines = issues.map((i) => {
     const ev = i.evidence?.length ? ` (evidence: ${i.evidence.join(', ')})` : '';
     return `- [${i.id}] (${i.class}) ${i.description}${ev}`;
   });
-  return [
+  const outputs = deps ? currentOutputsBriefing(deps, task) : undefined;
+  const briefings = deps ? taskBriefings(deps, task) : [];
+  const prompt = [
     loadPrompt('revise').text,
     taskHeader(task),
     `## Brief\n${task.brief}`,
@@ -222,13 +267,14 @@ export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<Rese
     `## Your current deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     `## Review issues\n${issueLines.join('\n') || '- (none)'}`,
     deps ? workerDisputeSection(deps.store, task, issues, maxReasserts(deps.config)) : '', // learning loop WP-C
-    deps ? currentOutputsSection(deps, task) : '',
-    deps && task.phase === 'synthesis' ? synthesisFindingsSection(deps.store, task.workspaceId) : '',
+    outputs?.section ?? '',
+    ...briefings.map((b) => b.section),
     deps ? answeredRequestsSection(deps, task) : '',
     ...(deps ? wpdSections(deps, task) : []), // WP-D
   ]
     .filter(Boolean)
     .join('\n\n');
+  return { prompt, reads: promptReadsOf(outputs, ...briefings) };
 }
 
 // WP-D: prompt sections shared by work and revise prompts.
@@ -243,25 +289,43 @@ function wpdSections(deps: Pick<ResearchDeps, 'store'>, task: Task): string[] {
  * Revision prompt section: the task's current outputs and the superseded rule (outputs neither
  * re-saved in this revision nor cited by id in the resubmitted deliverable are superseded).
  */
-export function currentOutputsSection(deps: Pick<ResearchDeps, 'store'>, task: Task): string {
-  const outputs = taskOutputs(deps.store, task);
-  const current = currentOutputIds(deps.store, task, outputs);
-  const lines = [
-    ...outputs.findings.filter((f) => current.has(f.id)).map((f) => `- finding ${f.id}: ${trunc(f.claim, 200)}`),
-    ...outputs.recommendations.filter((r) => current.has(r.id)).map((r) => `- recommendation ${r.id}: ${trunc(r.title, 200)}`),
-    ...outputs.personas.filter((p) => current.has(p.id)).map((p) => `- persona ${p.id}: ${p.slug}`),
-    ...outputs.competitors.filter((c) => current.has(c.id)).map((c) => `- competitor ${c.id}: ${trunc(c.name, 200)}`),
-    ...outputs.hypotheses.filter((h) => current.has(h.id)).map((h) => `- hypothesis ${h.id}: ${trunc(h.hypothesis, 200)}`),
-    // KS-2: confirmations / retractions follow the same rule (re-call the tool, or cite the fact id).
-    // Ids only: the fact's text is another item's, and this prompt section is not a logged read.
-    ...liveObservations(deps.store, task).map((o) => `- ${o.kind === 'confirm' ? 'confirmation' : 'retraction'} of finding ${o.findingId}`),
+export function currentOutputsSection(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): string {
+  return currentOutputsBriefing(deps, task)?.section ?? '';
+}
+
+/**
+ * KS-5: the current outputs as a briefing (texts redacted, then cut, then fenced; the worker budget, with
+ * left-out ids named so they can still be cited) and its read: a revise run is a new run that is shown
+ * the earlier run's stored text.
+ */
+function currentOutputsBriefing(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): Briefing | undefined {
+  const { store } = deps;
+  const outputs = taskOutputs(store, task);
+  const current = currentOutputIds(store, task, outputs);
+  const line = (text: string) => servedLine(store, task.workspaceId, text, 200);
+  const record = (id: string) => [{ id, kind: 'record' }];
+  const lines: BriefLine[] = [
+    ...outputs.findings.filter((f) => current.has(f.id)).map((f) => ({ text: `- finding ${f.id}: ${line(f.claim)}`, refs: [{ id: f.id, kind: 'fact' }], upload: f.uploadDerived === true })),
+    ...outputs.recommendations.filter((r) => current.has(r.id)).map((r) => ({ text: `- recommendation ${r.id}: ${line(r.title)}`, refs: record(r.id), upload: false })),
+    ...outputs.personas.filter((p) => current.has(p.id)).map((p) => ({ text: `- persona ${p.id}: ${line(p.slug)}`, refs: record(p.id), upload: false })),
+    ...outputs.competitors.filter((c) => current.has(c.id)).map((c) => ({ text: `- competitor ${c.id}: ${line(c.name)}`, refs: record(c.id), upload: false })),
+    ...outputs.hypotheses.filter((h) => current.has(h.id)).map((h) => ({ text: `- hypothesis ${h.id}: ${line(h.hypothesis)}`, refs: record(h.id), upload: false })),
+    // KS-2: confirmations / retractions follow the same rule (re-call the tool, or cite the fact id). Ids only.
+    ...liveObservations(store, task).map((o) => ({ text: `- ${o.kind === 'confirm' ? 'confirmation' : 'retraction'} of finding ${o.findingId}`, refs: [], upload: false })),
   ];
-  if (!lines.length) return '';
-  return (
-    `## Your current outputs\n${lines.join('\n')}\n` +
-    'Outputs you neither re-save in this revision nor cite by id in your resubmitted deliverable are marked ' +
-    'superseded and are not used. Save corrected outputs anew (e.g. a corrected claim) and leave wrong ones out.'
-  );
+  if (!lines.length) return undefined;
+  const env = { store, config: deps.config ?? defaultConfig };
+  return fitBriefing(env, {
+    title: '## Your current outputs',
+    lines,
+    outro: [
+      'Outputs you neither re-save in this revision nor cite by id in your resubmitted deliverable are marked ' +
+        'superseded and are not used. Save corrected outputs anew (e.g. a corrected claim) and leave wrong ones out.',
+    ],
+    budget: briefingBudget(env, roleForTask(task), task.model.provider),
+    query: `current outputs: task ${task.id}`,
+    label: 'outputs',
+  });
 }
 
 /**
@@ -313,10 +377,12 @@ async function workerStep(
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
     throwIfAborted(deps.signal);
     const task = store.tasks.get(taskId)!;
-    const prompt = kind === 'work' ? workPrompt(deps, task) : revisePrompt(task, issues, deps);
+    // KS-5: the briefings in the prompt are reads, logged on the run before it starts.
+    const { prompt, reads } = kind === 'work' ? workPromptWithReads(deps, task) : revisePromptWithReads(task, issues, deps);
     const res = await runAgent(deps, {
       kind, role, workspaceId: task.workspaceId, task, round, attempt, prompt, systemPrompt: system,
       model: task.model, needsBrowser: task.needsBrowser, promptVersion: version,
+      ...(reads.length ? { promptReads: reads } : {}),
     });
     throwIfAborted(deps.signal);
     const outputs = getRunOutputs(store, res.agentRunId);
@@ -372,12 +438,17 @@ async function reviewStep(
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
     prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))), systemPrompt: system,
     model, needsBrowser: false, promptVersion: version,
-    ...(k
+    ...(k || context.outputsRead
       ? {
-          promptReads: [{
-            query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: k.results,
-            tokensReturned: k.tokens, truncated: k.truncated, uploadDerived: k.uploadDerived,
-          }],
+          promptReads: [
+            ...(k
+              ? [{
+                  query: `review context: task ${task.id} round ${round}`, scope: 'tree', results: k.results,
+                  tokensReturned: k.tokens, truncated: k.truncated, uploadDerived: k.uploadDerived,
+                }]
+              : []),
+            ...(context.outputsRead ? [context.outputsRead] : []), // KS-5: the outputs briefing
+          ],
         }
       : {}),
   });

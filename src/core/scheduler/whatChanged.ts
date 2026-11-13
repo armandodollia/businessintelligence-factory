@@ -57,11 +57,15 @@ export function recordWhatChanged(
           nextRunId: rr.id,
           ...diff,
         },
-        refs: [rr.id, prev.id, ...diff.newFindings, ...diff.changedArtifacts.map((c) => c.next)],
+        // KS-5: replaced (new versions) and retracted facts are referenced too.
+        refs: [...new Set([rr.id, prev.id, ...diff.newFindings, ...diff.changedArtifacts.map((c) => c.next), ...diff.replaced.map((r) => r.to), ...diff.retracted])],
       }),
     );
     // learning loop WP-C: findings the diff contradicts or changes get a `stale` outcome (one hook).
+    // KS-6 replaces this call with lineage `recordOutcome`s (design §13); KS-5 leaves it isolated here.
+    // --- WP-C text-diff outcome hook (KS-6 seam) ---
     recordWhatChangedOutcomes(store, { whatChangedDecisionId: out.at(-1)!.id, prev, next: rr, changedArtifacts: diff.changedArtifacts });
+    // --- end WP-C hook ---
   }
   return out;
 }

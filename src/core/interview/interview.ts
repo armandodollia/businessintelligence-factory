@@ -14,6 +14,12 @@ import type { Criteria, Decision, InterviewTurn, Symptom, Workspace } from '../t
 import { audiencesOf, scopeOf } from '../workspace/tree.js';
 // knowledge store KS-3
 import { linkSymptom } from '../knowledge/entityLinks.js';
+import { estimateTokens } from '../knowledge/budget.js'; // KS-5
+import { isFactUsable } from '../knowledge/facts.js'; // KS-5
+import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-5
+import { anyUploadDerived } from '../knowledge/readCommon.js'; // KS-5
+import { servedLine } from '../knowledge/texts.js'; // KS-5
+import type { RetrievalResultRef } from '../types.js'; // KS-5
 
 export const INTERVIEW_TOPICS = ['basics', 'revenue_model', 'customers', 'going_well', 'going_badly'] as const;
 export type InterviewTopic = (typeof INTERVIEW_TOPICS)[number];
@@ -71,6 +77,15 @@ export function interviewCoverage(workspaceId: string, deps: { store: Store }): 
 
 /** The per-turn user prompt: scope, audiences, coverage, profile, symptoms, uploads, transcript. */
 export function buildInterviewPrompt(ws: Workspace, store: Store): string {
+  return buildInterviewPromptWithReads(ws, store).prompt;
+}
+
+/**
+ * `buildInterviewPrompt` and its prompt read (KS-5): the drill-down shows stored hypotheses and fact
+ * claims, so it is a read logged on the run before it starts (`RunOptions.beforeStart`).
+ */
+export function buildInterviewPromptWithReads(ws: Workspace, store: Store): { prompt: string; reads: PromptRead[] } {
+  const drill = drillDownSection(store, ws.id, store.symptoms.list({ workspaceId: ws.id }));
   const scope = scopeOf(ws);
   const profile = store.profiles.get(ws.id)?.data ?? {};
   const coverage = interviewCoverage(ws.id, { store });
@@ -99,7 +114,7 @@ export function buildInterviewPrompt(ws: Workspace, store: Store): string {
       ? symptoms.map((s) => `- [${s.kind}] ${s.title} — ${JSON.stringify(s.criteria)} (id ${s.id})`)
       : ['(none yet)']),
     '',
-    ...drillDownSection(store, ws.id, symptoms),
+    ...drill.lines,
     '## Internal uploads (ids + titles; contents not included)',
     ...(uploads.length ? uploads.map((u) => `- ${u.id}: ${u.title}`) : ['(none)']),
     '',
@@ -108,21 +123,30 @@ export function buildInterviewPrompt(ws: Workspace, store: Store): string {
     '',
     'Reply to the latest user message with your next interviewer turn. Save what you learned with the tools first.',
   ];
-  return lines.join('\n');
+  const prompt = lines.join('\n');
+  if (!drill.refs.length) return { prompt, reads: [] };
+  const results = [...new Map(drill.refs.map((r) => [r.id, r])).values()];
+  return {
+    prompt,
+    reads: [{ query: 'interview drill-down', scope: 'node', results, tokensReturned: estimateTokens(drill.lines.join('\n')), uploadDerived: anyUploadDerived(store, results) }],
+  };
 }
 
 const MAX_VERIFIED_FINDINGS = 30;
-const clip = (s: string, n = 200) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 /**
  * Drill-down context (spec §8): research hypotheses per symptom (with the verified findings they
  * cite) and the titles of verified research findings, so the interviewer can ask targeted
  * follow-ups. Empty when research produced neither.
  */
-function drillDownSection(store: Store, workspaceId: string, symptoms: Symptom[]): string[] {
+function drillDownSection(store: Store, workspaceId: string, symptoms: Symptom[]): { lines: string[]; refs: RetrievalResultRef[] } {
+  // KS-5: stored text is redacted before it is cut, and only usable facts (current, verified or
+  // included by the user) are shown (design §7.2: the interviewer sees usable facts only).
+  const clip = (s: string, n = 200) => servedLine(store, workspaceId, s, n);
+  const refs: RetrievalResultRef[] = [];
   const byId = new Map(symptoms.map((s) => [s.id, s]));
   const hyps = drillDown(store, workspaceId);
-  const verified = store.findings.list({ workspaceId, status: 'verified' });
+  const verified = store.findings.list({ workspaceId, status: 'verified' }).filter(isFactUsable);
   const lines: string[] = [];
   if (hyps.size) {
     lines.push('## Research hypotheses per symptom (ask targeted follow-ups to confirm or refute them)');
@@ -131,17 +155,24 @@ function drillDownSection(store: Store, workspaceId: string, symptoms: Symptom[]
       lines.push(`- Symptom "${s?.title ?? symptomId}" (id ${symptomId}):`);
       for (const { hypothesis: h, verifiedFindings } of items) {
         lines.push(`  - Hypothesis (${h.confidence}% confidence): ${clip(h.hypothesis)}`);
-        for (const f of verifiedFindings) lines.push(`    - verified finding: ${f.subject}: ${clip(f.claim, 160)}`);
+        refs.push({ id: h.id, kind: 'record' });
+        for (const f of verifiedFindings.filter(isFactUsable)) {
+          lines.push(`    - verified finding: ${clip(f.subject, 120)}: ${clip(f.claim, 160)}`);
+          refs.push({ id: f.id, kind: 'fact' });
+        }
       }
     }
     lines.push('');
   }
   if (verified.length) {
     lines.push('## Verified research findings (titles)');
-    for (const f of verified.slice(-MAX_VERIFIED_FINDINGS)) lines.push(`- ${f.subject}: ${clip(f.claim, 160)}`);
+    for (const f of verified.slice(-MAX_VERIFIED_FINDINGS)) {
+      lines.push(`- ${clip(f.subject, 120)}: ${clip(f.claim, 160)}`);
+      refs.push({ id: f.id, kind: 'fact' });
+    }
     lines.push('');
   }
-  return lines;
+  return { lines, refs };
 }
 
 // ---------------------------------------------------------------------------
@@ -167,14 +198,16 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
   const userTurn = insertTurn(store, workspaceId, 'user', text);
 
   const prompt = loadPrompt('interviewer', calibrationScope(store, config.dataDir, workspaceId));
+  const built = buildInterviewPromptWithReads(ws, store); // KS-5: the drill-down is a prompt read
   let fakeReply: string | undefined;
   const opts: RunOptions = {
     ctx: { workspaceId, role: 'interviewer', model: config.roles.interviewer, promptVersion: prompt.version },
-    prompt: buildInterviewPrompt(ws, store),
+    prompt: built.prompt,
     systemPrompt: prompt.text,
     needsBrowser: false,
   };
   if (deps.signal) opts.signal = deps.signal;
+  if (built.reads.length) opts.beforeStart = (ctx) => void recordPromptReads({ store }, ctx, built.reads); // KS-5
   const fake = deps.fake;
   if (fake) {
     opts.fake = async (tools) => {

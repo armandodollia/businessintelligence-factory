@@ -178,6 +178,10 @@ describe('what changed', () => {
     expect(
       toChangeEntry(decision('d2', whatChanged({ newFindings: [], removedSubjects: [], changedArtifacts: [] })))?.empty,
     ).toBe(true);
+    // KS-5: a run that only confirmed, replaced or retracted facts is not "no changes".
+    const lineage = toChangeEntry(decision('d5', whatChanged({ newFindings: [], removedSubjects: [], changedArtifacts: [], replaced: [{ from: 'f1', to: 'f2' }], retracted: ['f3'], confirmed: 2 })));
+    expect(lineage).toMatchObject({ replaced: [{ from: 'f1', to: 'f2' }], retracted: ['f3'], confirmed: 2, empty: false });
+    expect(toChangeEntry(decision('d6', whatChanged({ newFindings: [], removedSubjects: [], changedArtifacts: [], confirmed: 1 })))?.empty).toBe(false);
     expect(toChangeEntry(decision('d3', { tool: 'set_scoring_weights' }))).toBeNull();
     expect(toChangeEntry(decision('d4', null))).toBeNull();
   });

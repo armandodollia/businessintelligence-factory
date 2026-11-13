@@ -133,6 +133,10 @@ function WhatChanged({ wsId }: { wsId: string }) {
             <b>{c.scheduleName}</b> · {c.phase} <span className="muted">{shortDate(c.createdAt)}</span>
             {c.empty && <span className="muted"> — no changes</span>}
             {c.newFindings.length > 0 && <div className="small">{c.newFindings.length} new finding(s)</div>}
+            {/* KS-5: fact lineage */}
+            {c.replaced.length > 0 && <div className="small">{c.replaced.length} finding(s) changed (new version)</div>}
+            {c.retracted.length > 0 && <div className="small">{c.retracted.length} finding(s) retracted</div>}
+            {c.confirmed > 0 && <div className="small">{c.confirmed} finding(s) confirmed unchanged</div>}
             {c.removedSubjects.length > 0 && (
               <div className="small">No longer found: {c.removedSubjects.join(', ')}</div>
             )}
