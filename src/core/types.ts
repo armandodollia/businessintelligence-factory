@@ -212,6 +212,21 @@ export interface InterviewTurn {
   createdAt: string;
 }
 
+/** Disposable identity used to sign up on a third-party site (one per workspace + site; migration 5). */
+export interface Identity {
+  id: string;
+  workspaceId: string;
+  /** Normalized host, e.g. `acme.com`. */
+  site: string;
+  name: string;
+  email: string;
+  /** Password for the site account. Never written to Decisions (redacted). */
+  password: string;
+  /** Password of the disposable inbox, when the provider has one. */
+  emailPassword?: string;
+  createdAt: string;
+}
+
 export interface Profile {
   workspaceId: string;
   data: Record<string, unknown>;

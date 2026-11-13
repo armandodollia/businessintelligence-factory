@@ -3,6 +3,7 @@ import { AbortError, type EventBus } from '../events.js';
 import type { FakeScript } from '../harness/adapter.js';
 import type { RunOutcome, Supervisor } from '../harness/supervisor.js';
 import type { TokenRegistry } from '../harness/tokens.js';
+import { redactIdentitySecrets } from '../identity/identities.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
@@ -88,7 +89,7 @@ export function recordHarnessDecision(
     role: run.role,
     model: run.model,
     kind,
-    payload: { tool: 'harness', ...payload },
+    payload: redactIdentitySecrets(store, run.workspaceId, { tool: 'harness', ...payload }),
     refs: [...new Set(refs)],
     promptVersion: run.promptVersion,
     createdAt: new Date().toISOString(),

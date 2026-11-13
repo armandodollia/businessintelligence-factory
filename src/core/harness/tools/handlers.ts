@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import type { BifConfig } from '../../config/schema.js';
 import { AbortError, type EventBus } from '../../events.js';
 import type { ArtifactStore } from '../../evidence/artifacts.js';
+import { redactIdentitySecrets } from '../../identity/identities.js';
 import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
 import type { Decision, Finding, Task, UserRequest } from '../../types.js';
@@ -91,7 +92,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       role: ctx.role,
       model: ctx.model,
       kind,
-      payload,
+      // Identity passwords never reach the decision log, whatever the agent wrote.
+      payload: redactIdentitySecrets(store, ctx.workspaceId, payload),
       refs: [...new Set(refs)],
       promptVersion: ctx.promptVersion,
       createdAt: new Date().toISOString(),

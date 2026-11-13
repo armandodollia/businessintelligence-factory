@@ -5,6 +5,7 @@ import type {
   Artifact,
   Decision,
   Finding,
+  Identity,
   InterviewTurn,
   Persona,
   Profile,
@@ -306,6 +307,14 @@ export const specs = {
     key: 'workspaceId',
     fields: { workspaceId: 'text', data: 'json' },
   } satisfies TableSpec<Profile>,
+  identities: {
+    table: 'identities',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', site: 'text', name: 'text', email: 'text', password: 'text',
+      emailPassword: 'text', createdAt: 'text',
+    },
+  } satisfies TableSpec<Identity>,
 } as const;
 
 export function createRepos(db: DatabaseSync) {
@@ -325,6 +334,7 @@ export function createRepos(db: DatabaseSync) {
     schedules: new Repo<Schedule, 'id'>(db, specs.schedules),
     interview: new Repo<InterviewTurn, 'id'>(db, specs.interview),
     profiles: new Repo<Profile, 'workspaceId'>(db, specs.profiles),
+    identities: new Repo<Identity, 'id'>(db, specs.identities),
   };
 }
 

@@ -124,8 +124,9 @@ async function workerStep(
   issues: ReviewIssue[],
 ): Promise<StepOutcome> {
   const { store, config } = deps;
-  const role = roleForTask(store.tasks.get(taskId)!);
-  const system = workerSystemPrompt(config, role);
+  const initial = store.tasks.get(taskId)!;
+  const role = roleForTask(initial);
+  const system = workerSystemPrompt(config, role, initial.needsBrowser);
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {

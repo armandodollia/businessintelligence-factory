@@ -229,4 +229,18 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE agent_runs ADD COLUMN pid INTEGER;
   `,
+  // 5: Section C — disposable identities per workspace + site (credentials stay local).
+  `
+  CREATE TABLE identities (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    site TEXT NOT NULL,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    password TEXT NOT NULL,
+    email_password TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX identities_ws_site ON identities (workspace_id, site);
+  `,
 ];
