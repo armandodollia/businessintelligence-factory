@@ -21,7 +21,15 @@ import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Competitor, Entity, Finding, Persona, RelationType, Symptom, SymptomHypothesis } from '../types.js';
 import { entityNameKey, survivorOf } from './entityKeys.js';
-import { companyEntity, resolveEntityDetailed, subjectEntity, type EntityContext, type EntityRef } from './entities.js';
+import {
+  companyEntity,
+  lookupEntity,
+  lookupSubjectEntity,
+  resolveEntityDetailed,
+  subjectEntity,
+  type EntityContext,
+  type EntityRef,
+} from './entities.js';
 import { addRelation } from './relations.js';
 import { scopeFor, type KnowledgeScope } from './scope.js';
 
@@ -67,6 +75,19 @@ export function findingEntity(
   const ctx = ctxFor(finding.workspaceId, c);
   if (ref) return resolveEntityDetailed(store, scope, ref, ctx).entity;
   return current(store, finding.entityId) ?? subjectEntity(store, scope, finding.subject, ctx).entity;
+}
+
+/**
+ * The entity `findingEntity(…, ref)` would give a NEW finding, without writing anything (KS-2's
+ * duplicate handshake decides sameness before anything is saved): its id, `null` when resolving
+ * would create it (so no stored fact has it), `undefined` when the workspace has no row (no entity).
+ * Throws `KnowledgeNotFoundError` for an id outside the tree, like `findingEntity`.
+ */
+export function peekFindingEntity(store: Store, workspaceId: string, subject: string, ref: EntityRef | undefined): string | null | undefined {
+  const scope = treeOf(store, workspaceId);
+  if (!scope) return undefined;
+  const e = ref ? lookupEntity(store, scope, ref) : lookupSubjectEntity(store, scope, subject);
+  return e ? e.id : null;
 }
 
 /** Adds the finding's `relations` (from its entity; source = the fact). The finding row must exist. */

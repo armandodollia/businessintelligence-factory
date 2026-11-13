@@ -149,6 +149,36 @@ export function subjectEntity(store: Store, scope: KnowledgeScope, subject: stri
 }
 
 // ---------------------------------------------------------------------------
+// lookup without creating (integration: KS-2's duplicate handshake)
+
+/**
+ * What `resolveEntity(ref)` would return, without writing anything: the surviving entity, or `null`
+ * when resolving would create it (so no record references it yet). Validates like `resolveEntity`:
+ * an id of another tree throws `notFound`, an unknown kind or an empty name throws.
+ */
+export function lookupEntity(store: Store, scope: KnowledgeScope, ref: EntityRef): Entity | null {
+  if ('id' in ref) return getEntity(store, scope, ref.id);
+  if (!isEntityKind(ref.kind)) throw new Error(`unknown entity kind '${String(ref.kind)}'`);
+  const key = entityNameKey(cleanEntityName(ref.name));
+  if (!key) throw new Error('entity name is empty');
+  return findEntityByKey(store, scope.rootId, [ref.kind], key) ?? null;
+}
+
+/**
+ * What `subjectEntity(subject)` would return, without writing anything (`null`: it would create the
+ * entity — a node's company entity on first use, or a topic).
+ */
+export function lookupSubjectEntity(store: Store, scope: KnowledgeScope, subject: string): Entity | null {
+  const key = entityNameKey(cleanEntityName(subject));
+  if (!key) throw new Error('subject is empty');
+  const existing = findEntityByKey(store, scope.rootId, SUBJECT_KINDS, key);
+  if (existing) return existing;
+  // A node named by the subject: its company entity would be created (no company with this key exists).
+  if (scope.treeIds.some((id) => { const w = store.workspaces.get(id); return !!w && entityNameKey(scopeOf(w).name) === key; })) return null;
+  return findEntityByKey(store, scope.rootId, ['topic'], key) ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // merge suggestions
 
 /** Character trigrams of a name key, padded with one space each side (`' acme '`). */

@@ -244,9 +244,39 @@ export function observeFact(
 
 export type SaveFindingInput = ToolInput<'save_finding'>;
 export type SaveFindingOptions = {
-  /** KS-3 seam: the entity resolved for this fact (`resolveEntity`); used for sameness and stored. */
+  /** An entity already resolved for this fact; used for sameness and stored. */
   entityId?: string;
+  /**
+   * KS-3 (`save_finding` in the dispatcher): the fact's entity, resolved lazily so that only a save
+   * that inserts a fact row can create one. The duplicate handshake and confirmations never write an
+   * entity (an entity nothing references reads as publicly attested, design §12). Wins over
+   * `entityId`.
+   */
+  entity?: FactEntityHooks;
 };
+
+export type FactEntityHooks = {
+  /** The entity a new fact would get, without writing (`null`: it would be created; `undefined`: none). */
+  peek(): string | null | undefined;
+  /**
+   * Resolve-or-create, inside the save transaction. `prior` = the version being replaced: without an
+   * explicit entity the new version keeps the prior's (its merge survivor).
+   */
+  resolve(prior?: Finding): string | undefined;
+  /** After the fact row is inserted (same transaction): `relations` asserted by the fact. */
+  link?(finding: Finding): void;
+};
+
+/** The entity a sameness check compares against (see `CandidateQuery.entityId`). */
+function candidateEntity(opts: SaveFindingOptions): string | null | undefined {
+  return opts.entity ? opts.entity.peek() : opts.entityId;
+}
+
+/** The entity stored on a fact row about to be inserted (inside its transaction). */
+function storedEntity(opts: SaveFindingOptions, prior?: Finding): string | undefined {
+  if (opts.entity) return opts.entity.resolve(prior);
+  return opts.entityId ?? prior?.entityId;
+}
 
 /**
  * `save_finding` beyond the replay rule (design §7.2, §9):
@@ -282,7 +312,10 @@ export async function saveFindingFact(
   if (relation === undefined) {
     const started = performance.now();
     const settings = knowledgeSettings(env.config).dedupe;
-    const found = findCandidates(store, scope, { claim: input.claim, subject: input.subject, excludeTaskId: task.id, ...(opts.entityId ? { entityId: opts.entityId } : {}) }, settings);
+    const entityId = candidateEntity(opts);
+    const found = findCandidates(
+      store, scope, { claim: input.claim, subject: input.subject, excludeTaskId: task.id, ...(entityId !== undefined ? { entityId } : {}) }, settings,
+    );
     if (found.exact && capturedByTask(store, task, evidence).length) {
       logCandidates(env, ctx, input.claim, [found.exact], { autoConfirmed: true }, started);
       const r = observeFact(env, ctx, task, found.exact.id, evidence, 'confirm', { via: 'handshake' });
@@ -413,10 +446,12 @@ function saveNew(
   explicit: boolean,
 ): ToolResult {
   const { store } = env;
-  const finding = { ...baseFinding(ctx, task, input, evidence), lifecycle: 'current' as const };
-  if (opts.entityId) finding.entityId = opts.entityId;
+  const finding: Finding = { ...baseFinding(ctx, task, input, evidence), lifecycle: 'current' };
   const d = store.transaction(() => {
+    const entityId = storedEntity(opts);
+    if (entityId) finding.entityId = entityId;
     store.findings.insert(finding);
+    opts.entity?.link?.(finding);
     insertRefs(store, finding.id, refs);
     addObservation(store, { workspaceId: ctx.workspaceId, finding, kind: 'create', task, agentRunId: ctx.agentRunId, evidence });
     if (differsFromHome(appliesTo, ctx.workspaceId)) setItemScopes(store, 'fact', finding.id, appliesTo!, 'agent');
@@ -427,7 +462,7 @@ function saveNew(
     return env.recordDecision(ctx, 'score', payload, [finding.id, ...evidence]);
   });
   emitDecision(env, ctx, d);
-  return ok({ findingId: finding.id });
+  return ok({ findingId: finding.id, ...(finding.entityId ? { entityId: finding.entityId } : {}) });
 }
 
 function saveReplacement(
@@ -458,14 +493,16 @@ function saveReplacement(
     replacesId: prior.id,
     lifecycle: 'candidate',
   };
-  const entityId = opts.entityId ?? prior.entityId;
-  if (entityId) finding.entityId = entityId;
   if (finding.ttlDays === undefined && prior.ttlDays !== undefined) finding.ttlDays = prior.ttlDays;
   // Without applies_to, the new version keeps the nodes the prior version was labelled with.
   const scopes = knowledgeRepos(store).itemScopes.list({ itemKind: 'fact', itemId: prior.id });
   const inherited = scopes.length && !(scopes.length === 1 && scopes[0]!.workspaceId === ctx.workspaceId) ? scopes : undefined;
   const d = store.transaction(() => {
+    // The prior's entity unless one is given (KS-3: resolved to its merge survivor).
+    const entityId = storedEntity(opts, prior);
+    if (entityId) finding.entityId = entityId;
     store.findings.insert(finding);
+    opts.entity?.link?.(finding);
     insertRefs(store, finding.id, refs);
     addObservation(store, {
       workspaceId: ctx.workspaceId, finding, kind: 'replace', priorFindingId: prior.id, task, agentRunId: ctx.agentRunId, evidence,
@@ -484,6 +521,7 @@ function saveReplacement(
   emitDecision(env, ctx, d);
   return ok({
     findingId: finding.id, relation: 'replaces', replaces: prior.id, version: finding.version, lifecycle: 'candidate',
+    ...(finding.entityId ? { entityId: finding.entityId } : {}),
     note: 'the new version becomes current when this task is verified',
   });
 }

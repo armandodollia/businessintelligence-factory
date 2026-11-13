@@ -19,7 +19,7 @@ import type { CaptureResult } from '../../evidence/artifacts.js';
 import { ingestorFor } from '../../knowledge/ingest.js';
 import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
 // knowledge store KS-3
-import { findingEntity, linkFindingRelations, relinkFinding } from '../../knowledge/entityLinks.js';
+import { findingEntity, linkFindingRelations, peekFindingEntity, relinkFinding } from '../../knowledge/entityLinks.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -347,8 +347,18 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         return okData({ findingId: dup.id, duplicate: true, updated: true, entityId });
       }
       // Knowledge store KS-2: relation / duplicate handshake / applies_to / evidence_refs / ttl_days
-      // (knowledge/factTools.ts). KS-3: pass the resolved entity as `{ entityId }`.
-      return saveFindingFact(factEnv, ctx, task, input, {});
+      // (knowledge/factTools.ts). KS-3: the entity (explicit, else the prior version's on `replaces`,
+      // else the subject rule) is peeked for the handshake's sameness and resolved — created if need
+      // be — only in the transaction that inserts the fact, together with its `relations`.
+      const link = { agentRunId: ctx.agentRunId };
+      return saveFindingFact(factEnv, ctx, task, input, {
+        entity: {
+          peek: () => peekFindingEntity(store, ctx.workspaceId, input.subject, input.entity),
+          resolve: (prior) =>
+            findingEntity(store, { workspaceId: ctx.workspaceId, subject: input.subject, entityId: prior?.entityId }, input.entity, link)?.id,
+          link: (finding) => linkFindingRelations(store, finding, input.relations ?? [], link),
+        },
+      });
     },
 
     // --- knowledge store KS-2: confirm / retract a current fact (design §7.2, §9) ---

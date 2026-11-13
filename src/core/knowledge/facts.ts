@@ -91,8 +91,12 @@ export type FactCandidate = {
 export type CandidateQuery = {
   claim: string;
   subject: string;
-  /** Resolved entity of the claim being saved (KS-3); without it, sameness falls back to the subject key. */
-  entityId?: string;
+  /**
+   * Resolved entity of the claim being saved (KS-3); `null` = an entity no stored fact has yet (it
+   * would be created on save), so only facts without an entity can match, by subject key. Without
+   * it, sameness falls back to the subject key.
+   */
+  entityId?: string | null;
   /** The saving task: its own outputs are never candidates. */
   excludeTaskId?: string;
 };

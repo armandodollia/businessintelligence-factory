@@ -7,7 +7,8 @@ import { EventBus } from '../../../src/core/events.js';
 import { ArtifactStore } from '../../../src/core/evidence/artifacts.js';
 import type { RunContext } from '../../../src/core/harness/tokens.js';
 import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js';
-import { mergeEntities, resolveEntity } from '../../../src/core/knowledge/entities.js';
+import { mergeEntities, resolveEntity, type EntityRef } from '../../../src/core/knowledge/entities.js';
+import { findingEntity, peekFindingEntity } from '../../../src/core/knowledge/entityLinks.js';
 import { ingestorFor } from '../../../src/core/knowledge/ingest.js';
 import { neighbours } from '../../../src/core/knowledge/relations.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
@@ -187,5 +188,143 @@ describe('KS-1 × KS-3: save_artifact resolves its entity with resolveEntity and
       ok: false, error: `entity 'ent_nope' not found`,
     });
     expect(env.store.artifacts.list()).toHaveLength(before);
+  });
+});
+
+describe('KS-2 × KS-3: save_finding files facts under the resolved entity (design §7.2, §7.4)', () => {
+  const entityCount = (env: Env) => env.k.entities.list({ rootWorkspaceId: 'R' }).length;
+
+  it('a new fact stores and returns its entity; relations are linked from it', async () => {
+    const env = setup();
+    const c = ctxFor(task(env.store));
+    const a = await saveText(env, c, 'widget page');
+    const r = data<{ findingId: string; entityId: string }>(
+      await env.handle(c, 'save_finding', {
+        claim: 'Widget ships SSO', subject: 'Widget', evidence: [a.artifactId], relation: 'new',
+        entity: { kind: 'product', name: 'Widget' }, relations: [{ type: 'part_of', to: { kind: 'competitor', name: 'Globex' } }],
+      }),
+    );
+    expect(env.k.entities.get(r.entityId)).toMatchObject({ kind: 'product', name: 'Widget' });
+    expect(env.store.findings.get(r.findingId)!.entityId).toBe(r.entityId);
+    expect(env.k.relations.list({ sourceKind: 'fact', sourceId: r.findingId })).toMatchObject([{ fromEntityId: r.entityId, type: 'part_of' }]);
+  });
+
+  it('the duplicate handshake and a confirmation never create an entity (§12: an unreferenced name reads as public)', async () => {
+    const env = setup();
+    const prior = await earlierFact(env, 'Globex Pro plan costs $10 per month');
+    // A legacy fact without an entity: sameness falls back to the subject key.
+    const legacy = env.store.findings.insert({ ...prior, id: newId('fnd'), entityId: undefined, subject: 'Zeta Labs', claim: 'Zeta Labs Pro plan costs $10 per month', lineageId: undefined });
+    const t = task(env.store);
+    const c = ctxFor(t);
+    const a = await saveText(env, c, 'zeta pricing today');
+    const n = entityCount(env);
+    const hs = data<{ saved: boolean; candidates: Array<{ id: string }> }>(
+      await env.handle(c, 'save_finding', { claim: 'Zeta Labs Pro plan costs $12 per month', subject: 'Zeta Labs', evidence: [a.artifactId] }),
+    );
+    expect(hs.saved).toBe(false);
+    expect(hs.candidates.map((x) => x.id)).toEqual([legacy.id]);
+    const conf = data(
+      await env.handle(c, 'save_finding', {
+        claim: 'Zeta Labs Pro plan costs $10 per month', subject: 'Zeta Labs', evidence: [a.artifactId], relation: { confirms: legacy.id },
+        entity: { kind: 'competitor', name: 'Zeta Labs' },
+      }),
+    );
+    expect(conf).toMatchObject({ findingId: legacy.id, relation: 'confirms' });
+    expect(entityCount(env)).toBe(n);
+  });
+
+  it('peekFindingEntity answers what findingEntity would resolve, without writing', () => {
+    const env = setup();
+    const scope = scopeFor(env.store, 'R');
+    const cases: Array<[string, EntityRef | undefined]> = [
+      ['Acme Payments', undefined], // a node's company entity, created on first use
+      ['Pricing pages', undefined], // a topic
+      ['x', { kind: 'product', name: 'Widget' }],
+    ];
+    for (const [subject, ref] of cases) {
+      const n = env.k.entities.list().length;
+      expect(peekFindingEntity(env.store, 'R', subject, ref)).toBeNull();
+      expect(env.k.entities.list()).toHaveLength(n);
+      const e = findingEntity(env.store, { workspaceId: 'R', subject }, ref)!;
+      expect(peekFindingEntity(env.store, 'R', subject, ref)).toBe(e.id);
+    }
+    const foreign = resolveEntity(env.store, scopeFor(env.store, 'Q'), { kind: 'product', name: 'Secret' });
+    expect(() => peekFindingEntity(env.store, 'R', 'x', { id: foreign.id })).toThrow(`entity '${foreign.id}' not found`);
+    expect(peekFindingEntity(env.store, 'ws_missing', 'x', undefined)).toBeUndefined();
+    expect(scope.rootId).toBe('R');
+  });
+
+  it('"same entity" in the handshake is the resolved entity, not the subject text', async () => {
+    const env = setup();
+    const globex = resolveEntity(env.store, scopeFor(env.store, 'R'), { kind: 'competitor', name: 'Globex' });
+    const prior = await earlierFact(env, 'Globex Pro plan costs $10 per month', { entity: { id: globex.id } });
+    expect(prior.entityId).toBe(globex.id);
+    const t = task(env.store);
+    const c = ctxFor(t);
+    const a = await saveText(env, c, 'pricing page today');
+    // Other subject text, same entity → offered as a duplicate.
+    const same = data<{ saved: boolean; candidates: Array<{ id: string }> }>(
+      await env.handle(c, 'save_finding', {
+        claim: 'Globex Pro plan costs $12 per month', subject: 'GX Holdings', evidence: [a.artifactId], entity: { id: globex.id },
+      }),
+    );
+    expect(same).toMatchObject({ saved: false, candidates: [{ id: prior.id }] });
+    // Same subject text, another entity → not a duplicate: saved.
+    const other = data<{ findingId: string; entityId: string }>(
+      await env.handle(c, 'save_finding', {
+        claim: 'Globex Pro plan costs $12 per month on mobile', subject: 'Globex', evidence: [a.artifactId],
+        entity: { kind: 'product', name: 'Globex Mobile' },
+      }),
+    );
+    expect(other.findingId).toBeDefined();
+    expect(env.k.entities.get(other.entityId)).toMatchObject({ kind: 'product', name: 'Globex Mobile' });
+    // The subject alone resolves to the competitor entity (subject rule) → duplicate again.
+    const bySubject = data<{ saved: boolean }>(
+      await env.handle(c, 'save_finding', { claim: 'Globex Pro plan now costs $12 per month', subject: 'globex', evidence: [a.artifactId] }),
+    );
+    expect(bySubject.saved).toBe(false);
+  });
+
+  it('replaces keeps the prior fact’s entity (its survivor) unless an entity is given', async () => {
+    const env = setup();
+    const scope = scopeFor(env.store, 'R');
+    const widget = resolveEntity(env.store, scope, { kind: 'product', name: 'Widget' });
+    const globex = resolveEntity(env.store, scope, { kind: 'competitor', name: 'Globex' });
+    const prior = await earlierFact(env, 'Widget costs $10', { entity: { id: widget.id } });
+    const t = task(env.store);
+    const c = ctxFor(t);
+    const a = await saveText(env, c, 'widget pricing today');
+    const n = entityCount(env);
+    const r = data<{ findingId: string; entityId: string; relation: string }>(
+      await env.handle(c, 'save_finding', {
+        claim: 'Widget costs $12', subject: 'Widget Pro edition', evidence: [a.artifactId], relation: { replaces: prior.id },
+        relations: [{ type: 'part_of', to: { id: globex.id } }],
+      }),
+    );
+    expect(r).toMatchObject({ relation: 'replaces', entityId: widget.id });
+    expect(env.store.findings.get(r.findingId)!.entityId).toBe(widget.id);
+    expect(entityCount(env)).toBe(n); // no topic "Widget Pro edition"
+    expect(env.k.relations.list({ sourceKind: 'fact', sourceId: r.findingId })).toMatchObject([
+      { fromEntityId: widget.id, type: 'part_of', toEntityId: globex.id },
+    ]);
+
+    // The prior's entity was merged away: the replacement follows the survivor.
+    const gizmo = resolveEntity(env.store, scope, { kind: 'product', name: 'Gizmo' });
+    const p2 = await earlierFact(env, 'Gizmo has 3 plans', { entity: { id: gizmo.id } });
+    mergeEntities(env.store, widget.id, gizmo.id, 'user');
+    const r2 = data<{ entityId: string }>(
+      await env.handle(c, 'save_finding', { claim: 'Gizmo has 4 plans', subject: 'Gizmo', evidence: [a.artifactId], relation: { replaces: p2.id } }),
+    );
+    expect(r2.entityId).toBe(widget.id);
+
+    // An explicit entity wins.
+    const p3 = await earlierFact(env, 'Widget has an API', { entity: { id: widget.id } });
+    const r3 = data<{ entityId: string }>(
+      await env.handle(c, 'save_finding', {
+        claim: 'Widget has a public API', subject: 'Widget', evidence: [a.artifactId], relation: { replaces: p3.id },
+        entity: { kind: 'feature', name: 'Widget API' },
+      }),
+    );
+    expect(env.k.entities.get(r3.entityId)).toMatchObject({ kind: 'feature', name: 'Widget API' });
   });
 });
