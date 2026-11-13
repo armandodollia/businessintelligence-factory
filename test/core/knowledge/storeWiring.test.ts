@@ -10,6 +10,10 @@ import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js'
 import { mergeEntities, resolveEntity, type EntityRef } from '../../../src/core/knowledge/entities.js';
 import { findingEntity, peekFindingEntity } from '../../../src/core/knowledge/entityLinks.js';
 import { ingestorFor } from '../../../src/core/knowledge/ingest.js';
+import { entityIsUploadOnly, itemIsUploadDerived } from '../../../src/core/knowledge/provenance.js';
+import { runIsUploadExposed } from '../../../src/core/knowledge/retrievalLog.js';
+import { uploadInternal } from '../../../src/core/internal/uploads.js';
+import { exportTrainingData } from '../../../src/core/scoring/export.js';
 import { neighbours } from '../../../src/core/knowledge/relations.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import { openStore, type Store } from '../../../src/core/store/db.js';
@@ -326,5 +330,50 @@ describe('KS-2 × KS-3: save_finding files facts under the resolved entity (desi
       }),
     );
     expect(env.k.entities.get(r3.entityId)).toMatchObject({ kind: 'feature', name: 'Widget API' });
+  });
+});
+
+describe('KS-2 export exclusion × KS-3 upload-only entities, through the tools (§12)', () => {
+  it('a fact citing an upload makes its new entity upload-only: decisions naming it leave the export until a public record attests it', async () => {
+    const env = setup();
+    const upload = uploadInternal('R', { name: 'board.txt', bytes: new TextEncoder().encode('Project Falcon launches in May'), mime: 'text/plain' }, env);
+    const t = task(env.store);
+    const c = ctxFor(t);
+    const saved = data<{ findingId: string; entityId: string }>(
+      await env.handle(c, 'save_finding', {
+        claim: 'Project Falcon launches in May', subject: 'Project Falcon', evidence: [upload.id], relation: 'new',
+        entity: { kind: 'product', name: 'Project Falcon' },
+      }),
+    );
+    expect(env.store.findings.get(saved.findingId)!.uploadDerived).toBe(true); // KS-2 materialized flag
+    expect(entityIsUploadOnly(env.store, saved.entityId)).toBe(true); // KS-3 rule
+    expect(itemIsUploadDerived(env.store, saved.entityId)).toBe(true);
+    const note = data<{ decisionId: string }>(
+      await env.handle(c, 'log_decision', { what: 'track it', why: 'w', confidence: 0.5, refs: [saved.entityId] }),
+    );
+    const exported = (all = false) => exportTrainingData('R', { store: env.store }, all);
+    expect(exported()).not.toContain(note.decisionId);
+    expect(exported(true)).toContain(note.decisionId);
+    // A run shown the upload-derived fact as a handshake candidate is upload-exposed.
+    const t2 = task(env.store);
+    const c2 = ctxFor(t2);
+    const pub = await saveText(env, c2, 'press release: Project Falcon launches in June');
+    const hs = data<{ saved: boolean; candidates: Array<{ flags?: string[] }> }>(
+      await env.handle(c2, 'save_finding', {
+        claim: 'Project Falcon launches in June', subject: 'x', evidence: [pub.artifactId], entity: { id: saved.entityId },
+      }),
+    );
+    expect(hs).toMatchObject({ saved: false, candidates: [{ flags: expect.arrayContaining(['upload']) }] });
+    expect(runIsUploadExposed(env.store, c2.agentRunId)).toBe(true);
+    // A public, usable fact on the same entity attests the name: the decision is exported again.
+    const pubFact = data<{ findingId: string; entityId: string }>(
+      await env.handle(c2, 'save_finding', {
+        claim: 'Project Falcon launches in June', subject: 'x', evidence: [pub.artifactId], entity: { id: saved.entityId }, relation: 'new',
+      }),
+    );
+    expect(pubFact.entityId).toBe(saved.entityId);
+    env.store.findings.update(pubFact.findingId, { status: 'verified' });
+    expect(entityIsUploadOnly(env.store, saved.entityId)).toBe(false);
+    expect(exported()).toContain(note.decisionId);
   });
 });
