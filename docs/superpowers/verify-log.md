@@ -21,3 +21,8 @@ Rounds 1–2 substantive issues fixed (fa6bf6d, 311c632). Round 3 remaining (rec
 
 ## Section E — NOT PASSED after 3 rounds (Sol 7/7/8, Opus 8/9/7)
 Rounds 1–2 substantive issues fixed (35fd436, ac6e7fb). Round 3 remaining → fixed post-cap (commit "fix: section E post-cap"): artifact serving security headers (archived third-party HTML could run on the app origin and reach PUT /api/config), Host/Origin guard against DNS rebinding, workspace-switch state leak in calibration UI, schedule-specific "what changed" baseline.
+
+## Final whole-branch review
+- Round 1: Opus 6, Sol 6 (1 blocking: per-run browser MCP vs single research profile; spec gaps in output review status, pipeline resume, model defaults, calibration isolation, competitors, export provenance). Fixed in three parallel groups (e7d5739, 71e9fb0/b80a31a, 1d599e6).
+- Fix-wave re-review: Opus 8, Sol 6 (blocking privacy leak in export). Targeted passes 4ac0c64, 4426636, be6f531.
+- Final scoped verification of provenance fixes: **Opus 8, Sol 8 — passed.** Last minor (reuse records in export judgments) fixed in 18b9146.
