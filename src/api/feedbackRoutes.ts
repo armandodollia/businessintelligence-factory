@@ -12,6 +12,7 @@ import type { Store } from '../core/store/db.js';
 
 const TARGET_TYPES = [
   'finding', 'recommendation', 'persona', 'competitor', 'hypothesis', 'profile', 'unit_proposal', 'user_request', 'scoring_weights', 'prompt',
+  'entity', 'artifact', // knowledge store KS-3 / KS-7
 ] as const satisfies readonly FeedbackTargetType[];
 
 const schemas = {

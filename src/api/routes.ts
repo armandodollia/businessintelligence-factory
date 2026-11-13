@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { ConfigError, parseConfig } from '../core/config/load.js';
 import { ROLES, type BifConfig } from '../core/config/schema.js';
 import type { EventBus } from '../core/events.js';
-import { ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
+import { ArtifactFileGoneError, ArtifactNotFoundError, ArtifactTooLargeError, type ArtifactStore } from '../core/evidence/artifacts.js';
 import { treeWorkspaceIds } from '../core/evidence/synthesis.js';
 import { lastReviewsByTask, withLastReview } from '../core/research/outputs.js';
 import { isPipelineLocked } from '../core/research/lock.js';
@@ -234,6 +234,7 @@ export function createApp(deps: AppDeps): Hono {
     if (err instanceof ConfigError) return c.json({ error: err.message, issues: err.issues }, 400);
     if (err instanceof ArtifactNotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof ArtifactTooLargeError) return c.json({ error: err.message }, 413);
+    if (err instanceof ArtifactFileGoneError) return c.json({ error: err.message }, 410); // knowledge store KS-7: pruned file
     console.error(`[bif] ${c.req.method} ${c.req.path} failed:`, err);
     return c.json({ error: (err as Error).message ?? String(err) }, 500);
   });

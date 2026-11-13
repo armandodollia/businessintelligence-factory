@@ -57,6 +57,10 @@ export const FEEDBACK_KINDS = [
   /** The user renamed an entity. */
   'entity_rename',
   // --- end knowledge store KS-3 ---
+  // --- knowledge store KS-7 (design §13, §14) ---
+  /** The user pruned an artifact's stored file (target: the artifact; row, hash and text stay). */
+  'artifact_prune',
+  // --- end knowledge store KS-7 ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -73,7 +77,9 @@ export type FeedbackTargetType =
   | 'scoring_weights'
   | 'prompt'
   // knowledge store KS-3: an entity (`entity_merge`, `entity_rename`)
-  | 'entity';
+  | 'entity'
+  // knowledge store KS-7: an artifact (`artifact_prune`)
+  | 'artifact';
 
 export interface FeedbackEvent {
   id: string;
