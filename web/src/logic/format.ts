@@ -1,5 +1,5 @@
 /** Pure display helpers shared by views (no state, no I/O). */
-import type { BusEvent, WorkspaceNode } from './types.js';
+import type { BusEvent, Criteria, Decision, WorkspaceNode } from './types.js';
 
 export function formatValue(v: unknown): string {
   if (v === null || v === undefined || v === '') return '—';
@@ -87,4 +87,18 @@ export function describeEvent(e: BusEvent): string {
 
 export function eventRunId(e: BusEvent): string | undefined {
   return 'agentRunId' in e ? e.agentRunId : undefined;
+}
+
+/** Ratable decision criteria (mirrors core `CRITERIA.decision`). */
+export const DECISION_CRITERIA = ['confidence', 'score'] as const;
+
+/**
+ * Agent values on a decision the user can rate: `confidence` (log_decision) and `score`
+ * (review). Empty for user / scheduler decisions.
+ */
+export function decisionCriteria(d: Pick<Decision, 'payload'>): Criteria {
+  const p = (d.payload ?? {}) as Record<string, unknown>;
+  const out: Criteria = {};
+  for (const k of DECISION_CRITERIA) if (typeof p[k] === 'number') out[k] = p[k] as number;
+  return out;
 }

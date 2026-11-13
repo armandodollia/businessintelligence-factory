@@ -303,7 +303,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', name: 'text', cron: 'text', phases: 'json', lastRunAt: 'text',
-      enabled: 'bool',
+      activatedAt: 'text', enabled: 'bool',
     },
   } satisfies TableSpec<Schedule>,
   interview: {

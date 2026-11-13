@@ -274,6 +274,11 @@ export interface Schedule {
   cron: string;
   phases: Phase[];
   lastRunAt?: string;
+  /**
+   * When the schedule was created or last re-enabled. The scheduler never runs an occurrence
+   * before this, so a new or re-enabled schedule waits for its next occurrence.
+   */
+  activatedAt?: string;
   enabled: boolean;
 }
 

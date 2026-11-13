@@ -35,6 +35,16 @@ export function validateCron(cron: string): void {
   }
 }
 
+/**
+ * Time after which the next occurrence is due: the later of `lastRunAt` and `activatedAt`
+ * (creation / last re-enable), so occurrences before a schedule existed or was re-enabled never
+ * run. Schedules with neither (legacy rows) are measured from the scheduler start.
+ */
+export function scheduleBaseline(s: Pick<Schedule, 'lastRunAt' | 'activatedAt'>, startedAt: number): number {
+  const times = [s.lastRunAt, s.activatedAt].filter((x): x is string => !!x).map(Date.parse).filter((n) => !Number.isNaN(n));
+  return times.length ? Math.max(...times) : startedAt;
+}
+
 /** The latest finished (`done`) run of the same workspace + phase that started before `rr`. */
 function previousRun(deps: ResearchDeps, rr: ResearchRun): ResearchRun | undefined {
   return deps.store.researchRuns
@@ -72,9 +82,9 @@ async function runSchedule(schedule: Schedule, deps: ResearchDeps): Promise<void
 /**
  * Starts the recurring-job loop. Every `intervalMs` (60 s) and once immediately, each enabled
  * schedule whose next cron occurrence after `lastRunAt` is due runs `runPipeline(workspaceId,
- * schedule.phases)`. Missed occurrences (server was down) run once, not once per occurrence. A
- * schedule that never ran is measured from the scheduler start, so it first runs at its next
- * occurrence. A workspace with a running research run (or an in-flight scheduled job) is skipped
+ * schedule.phases)`. Missed occurrences (server was down) run once, not once per occurrence.
+ * Occurrences are counted from `scheduleBaseline` (later of last run and creation/re-enable), so a
+ * new or re-enabled schedule first runs at its next occurrence. A workspace with a running research run (or an in-flight scheduled job) is skipped
  * until a later tick. `lastRunAt` is set when the job starts.
  */
 export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now): SchedulerHandle {
@@ -89,7 +99,7 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
     const t = now();
     for (const s of deps.store.schedules.list({ enabled: true })) {
       if (busy.has(s.workspaceId)) continue;
-      const base = s.lastRunAt ? Date.parse(s.lastRunAt) : startedAt;
+      const base = scheduleBaseline(s, startedAt);
       let due: number;
       try {
         due = nextDue(s.cron, new Date(base)).getTime();

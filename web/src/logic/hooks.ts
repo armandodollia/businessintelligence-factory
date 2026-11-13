@@ -3,7 +3,7 @@
  * live here; views render what these return and call the returned actions.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, artifactUrl, exportUrl } from './api.js';
+import { ApiError, api, artifactUrl, exportUrl } from './api.js';
 import { subscribe } from './sse.js';
 import {
   PATCH_ROLES,
@@ -309,10 +309,15 @@ export function useInterview(wsId: string | null | undefined) {
   const [uploads, setUploads] = useState<Artifact[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Sends one user message. Resolves `true` when the server stored it (even if the interviewer then
+   * failed: a 502 carries the stored turns + coverage, which are applied), `false` when it was not
+   * stored, so the caller can put the text back in the composer.
+   */
   const send = useCallback(
-    async (text: string) => {
+    async (text: string): Promise<boolean> => {
       const trimmed = text.trim();
-      if (!wsId || !trimmed) return;
+      if (!wsId || !trimmed) return false;
       setSending(true);
       setError(null);
       const local: InterviewTurn = {
@@ -331,8 +336,17 @@ export function useInterview(wsId: string | null | undefined) {
           res.mutate((s) => ({ turns: [...(s?.turns ?? []), reply], coverage: s?.coverage ?? {} }));
         }
         await res.reload();
+        return true;
       } catch (e) {
         setError(errMsg(e));
+        const body = e instanceof ApiError ? e.body : undefined;
+        if (body && typeof body === 'object' && Array.isArray((body as InterviewState).turns)) {
+          const state = body as InterviewState;
+          res.mutate(() => ({ turns: state.turns, coverage: state.coverage ?? {} }));
+          return state.turns.some((t) => t.role === 'user' && t.text === trimmed);
+        }
+        res.mutate((s) => (s ? { ...s, turns: s.turns.filter((t) => t.id !== local.id) } : s));
+        return false;
       } finally {
         setSending(false);
       }
@@ -864,19 +878,22 @@ export function useRequests(wsId: string | null | undefined) {
 export function useSchedules(wsId: string | null | undefined) {
   const res = useResource(`schedules:${wsId ?? ''}`, wsId ? () => api.listSchedules(wsId) : null);
   const action = useAction();
+  /** Resolves `true` when the schedule was created; on failure `error` is set and it resolves `false`. */
   const create = useCallback(
-    async (input: NewSchedule) => {
-      if (!wsId) return;
-      await action.run(() => api.createSchedule(wsId, input));
+    async (input: NewSchedule): Promise<boolean> => {
+      if (!wsId) return false;
+      const created = await action.run(() => api.createSchedule(wsId, input));
       await res.reload();
+      return created !== undefined;
     },
     [wsId, action.run, res.reload],
   );
   const update = useCallback(
-    async (id: string, patch: SchedulePatch) => {
-      if (!wsId) return;
-      await action.run(() => api.updateSchedule(wsId, id, patch));
+    async (id: string, patch: SchedulePatch): Promise<boolean> => {
+      if (!wsId) return false;
+      const updated = await action.run(() => api.updateSchedule(wsId, id, patch));
       await res.reload();
+      return updated !== undefined;
     },
     [wsId, action.run, res.reload],
   );
@@ -894,13 +911,14 @@ export function useConfig() {
   const res = useResource('config', api.getConfig);
   const action = useAction();
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  /** Resolves `true` when the server accepted the config; on failure `error` is set and it resolves `false`. */
   const save = useCallback(
-    async (config: BifConfig) => {
+    async (config: BifConfig): Promise<boolean> => {
       const saved = await action.run(() => api.putConfig(config));
-      if (saved !== undefined) {
-        res.mutate(() => saved ?? config);
-        setSavedAt(new Date().toISOString());
-      }
+      if (saved === undefined) return false;
+      res.mutate(() => saved ?? config);
+      setSavedAt(new Date().toISOString());
+      return true;
     },
     [action.run, res.mutate],
   );
@@ -927,15 +945,12 @@ export function useConfigEditor() {
     setText,
     parseError,
     dirty: text !== null,
-    personaWeight: parsed?.scoring?.personaWeight ?? 0,
-    setPersonaWeight: (w: number) => {
-      if (!parsed) return;
-      setText(JSON.stringify({ ...parsed, scoring: { ...parsed.scoring, personaWeight: w } }, null, 2));
-    },
-    save: async () => {
-      if (!parsed) return;
-      await cfg.save(parsed);
-      setText(null);
+    /** Keeps the draft when the save fails (the error is in `error`). */
+    save: async (): Promise<boolean> => {
+      if (!parsed) return false;
+      const ok = await cfg.save(parsed);
+      if (ok) setText(null);
+      return ok;
     },
     revert: () => setText(null),
   };

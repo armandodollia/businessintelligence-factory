@@ -26,7 +26,11 @@ function setup() {
   return { ...t, ws, calls };
 }
 
-function addSchedule(store: Store, workspaceId: string, extra: { enabled?: boolean; lastRunAt?: string; cron?: string } = {}) {
+function addSchedule(
+  store: Store,
+  workspaceId: string,
+  extra: { enabled?: boolean; lastRunAt?: string; cron?: string; activatedAt?: string } = {},
+) {
   return store.schedules.insert({
     id: newId('sch'),
     workspaceId,
@@ -35,6 +39,7 @@ function addSchedule(store: Store, workspaceId: string, extra: { enabled?: boole
     phases: ['scoring'],
     enabled: extra.enabled ?? true,
     ...(extra.lastRunAt ? { lastRunAt: extra.lastRunAt } : {}),
+    ...(extra.activatedAt ? { activatedAt: extra.activatedAt } : {}),
   });
 }
 
@@ -84,6 +89,42 @@ describe('scheduler', () => {
     await sched.idle();
     sched.stop();
     expect(t.calls).toEqual([t.ws.id]);
+  });
+
+  it('a schedule created after its occurrence today waits until the next day (creation baseline)', async () => {
+    const t = setup();
+    // Server starts 08:00 local; a daily 09:00 schedule is created at 10:00.
+    const start = new Date(2026, 10, 12, 8, 0, 0).getTime();
+    let now = start;
+    const sched = startScheduler(t.deps, () => now);
+    await sched.idle();
+    now = new Date(2026, 10, 12, 10, 0, 0).getTime();
+    addSchedule(t.store, t.ws.id, { activatedAt: new Date(now).toISOString() });
+    await sched.tick();
+    await sched.idle();
+    expect(t.calls).toEqual([]); // the 09:00 occurrence predates the schedule
+    now = new Date(2026, 10, 13, 8, 59, 0).getTime();
+    await sched.tick();
+    await sched.idle();
+    expect(t.calls).toEqual([]);
+    now = new Date(2026, 10, 13, 9, 0, 30).getTime();
+    await sched.tick();
+    await sched.idle();
+    sched.stop();
+    expect(t.calls).toEqual([t.ws.id]);
+  });
+
+  it('re-enabled schedule does not run occurrences missed while disabled', async () => {
+    const t = setup();
+    const now = new Date(2026, 10, 12, 10, 0, 0).getTime();
+    addSchedule(t.store, t.ws.id, {
+      lastRunAt: new Date(now - 5 * DAY).toISOString(),
+      activatedAt: new Date(now - 60_000).toISOString(),
+    });
+    const sched = startScheduler(t.deps, () => now);
+    await sched.idle();
+    sched.stop();
+    expect(t.calls).toEqual([]);
   });
 
   it('skips a workspace that already has a running research run', async () => {

@@ -278,4 +278,8 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE tasks ADD COLUMN review_issues TEXT;
   ALTER TABLE agent_runs ADD COLUMN pid_started_at TEXT;
   `,
+  // 8: Section E fix r1 — schedule activation baseline (creation / last re-enable time).
+  `
+  ALTER TABLE schedules ADD COLUMN activated_at TEXT;
+  `,
 ];
