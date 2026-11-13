@@ -31,6 +31,7 @@ import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.j
 // Knowledge store KS-1: extraction queue (one per artifact store).
 import { ingestorFor } from '../core/knowledge/ingest.js';
 import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
+import { retroJobs, retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
 export const scoringRunner: PhaseRunner = async (workspaceId, deps) => {
@@ -110,6 +111,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...scoringToolHandlers(),
       ...marketToolHandlers({ dataDir }),
       ...escalationToolHandlers(), // WP-D
+      ...retroToolHandlers(), // learning loop WP-E
     },
   });
   const supervisorDeps: SupervisorDeps = {
@@ -187,7 +189,8 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
         `${report.continuedPipelines.length} pipelines continued`,
     );
   }
-  const scheduler = startScheduler(runtime.research);
+  // Learning loop WP-E: the weekly retro of every business tree runs as a scheduler system job.
+  const scheduler = startScheduler({ ...runtime.research, systemJobs: () => retroJobs(runtime.research) });
   // KS-1: artifacts whose text is still `pending` (saved before a restart, or by older code paths)
   // are extracted in the background.
   const ingestor = ingestorFor({ store: runtime.store, artifacts: runtime.artifacts, config: runtime.config });

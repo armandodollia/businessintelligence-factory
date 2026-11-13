@@ -268,7 +268,7 @@ export type KnowledgeConfig = z.infer<typeof knowledgeConfigSchema>;
 export const KNOWLEDGE_DEFAULTS = {
   budgets: {
     default: { search: 1200, card: 800, expand: 2000, briefing: 1500 },
-    roles: { reviewer: { expand: 3000 }, synthesizer: { briefing: 4000 }, retro: { briefing: 4000 } /* learning loop WP-E */ },
+    roles: { reviewer: { expand: 3000 }, synthesizer: { briefing: 4000 } },
     providers: {},
   },
   hardMaxTokens: 8000,
