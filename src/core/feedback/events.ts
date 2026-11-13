@@ -57,6 +57,10 @@ export const FEEDBACK_KINDS = [
   /** The user renamed an entity. */
   'entity_rename',
   // --- end knowledge store KS-3 ---
+  // --- knowledge store KS-6 (design §13, §14; wave-1 hook 1): the gc prune is a human action ---
+  /** The user pruned an artifact's stored file (target type `artifact`; KS-7's prune writes it). */
+  'artifact_prune',
+  // --- end knowledge store KS-6 ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -73,7 +77,9 @@ export type FeedbackTargetType =
   | 'scoring_weights'
   | 'prompt'
   // knowledge store KS-3: an entity (`entity_merge`, `entity_rename`)
-  | 'entity';
+  | 'entity'
+  // knowledge store KS-6: an artifact (`artifact_prune`)
+  | 'artifact';
 
 export interface FeedbackEvent {
   id: string;

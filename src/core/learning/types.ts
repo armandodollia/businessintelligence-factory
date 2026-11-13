@@ -20,6 +20,9 @@ import type { Role, TaskType } from '../config/schema.js';
  * - `reviewer-false-positive`: the reviewer dropped an issue after the worker pushed back on it.
  * - `worker-miss`: the worker pushed back, the reviewer upheld the issue, and the worker then fixed it.
  * - `run-failed`: the task failed (worker runs failed, or it could not run).
+ * - `duplicate-saved` (knowledge store KS-6): the agent answered a duplicate handshake with `new` and
+ *   the user later merged the result with a fact the handshake had shown (entity merge, or a
+ *   retraction as a duplicate of that fact).
  */
 export const OUTCOME_LABELS = [
   'confirmed',
@@ -33,6 +36,7 @@ export const OUTCOME_LABELS = [
   'reviewer-false-positive',
   'worker-miss',
   'run-failed',
+  'duplicate-saved', // knowledge store KS-6
 ] as const;
 export type OutcomeLabel = (typeof OUTCOME_LABELS)[number];
 

@@ -1,51 +1,100 @@
 /**
- * The scheduled "what changed" text-diff outcome hook (learning loop WP-C), isolated in ONE function
- * so the knowledge store can replace it (design §13: fact lineage events call `recordOutcome` with
- * `stale` / `changed` instead). `recordWhatChanged` (src/core/scheduler/whatChanged.ts) calls it once
- * per diffed phase run; nothing else does.
+ * The scheduled "what changed" outcome hook (learning loop WP-C), isolated in ONE function.
+ * Knowledge store KS-6 (design §13: "this replaces WP-C's text-diff hook for scheduled changes")
+ * replaced its text diff with fact lineage: `recordWhatChanged` (src/core/scheduler/whatChanged.ts)
+ * calls it once per diffed phase run; nothing else does.
  */
-import { contradictedFindings } from '../scheduler/diff.js';
+import type { BifConfig } from '../config/schema.js';
+import { recordStaleOutcome } from '../knowledge/facts.js';
+import { lineageOutcomesOfRun, observedLineages } from '../knowledge/outcomes.js';
 import type { Store } from '../store/db.js';
-import type { ResearchRun } from '../types.js';
+import type { Finding, ResearchRun } from '../types.js';
 import { outputSaveDecision, recordOutcome } from './outcomes.js';
 import type { DecisionOutcome } from './types.js';
 
+export type WhatChangedOutcomesInput = {
+  whatChangedDecisionId: string;
+  prev: ResearchRun;
+  next: ResearchRun;
+  changedArtifacts: Array<{ prev: string; next: string }>;
+  /** With a config, facts of `prev` the next run did not observe and that are past their TTL get `stale`. */
+  config?: Pick<BifConfig, 'knowledge'>;
+  now?: Date;
+};
+
 /**
- * Outcomes of a scheduled "what changed" diff (`stale`, on each previous finding's save decision):
- * `contradicted` when the next run re-researched the subject but no longer found the claim (e.g.
- * "$10/mo" became "$12/mo"); `changed` when a screenshot the finding cites changed. Subjects the
- * next run did not cover at all record nothing. Idempotent.
+ * Outcomes of a scheduled "what changed" diff, from fact lineage (design §11, §13):
+ * 1. Lineage events of the NEXT run: `confirmed` / `changed` / `retracted` were written when its
+ *    observations were applied at task end (`applyObservations`, keyed by observation id). They are
+ *    returned here, never written twice.
+ * 2. Facts of the previous run (saved or observed in it) whose lineage the next run did NOT observe:
+ *    - text fallback, only against facts the next run saved as `new` (design §11): when the next run
+ *      saved a new fact on the same subject and none with the same claim, `contradicted` / `stale`
+ *      (source `what_changed`) — e.g. "$10/mo" then a new "$12/mo" instead of a replacement;
+ *    - a screenshot the fact cites changed in the next run: `changed` / `stale` (source `what_changed`);
+ *    - with `config`: past its TTL now → the lazy `stale` lineage outcome (`recordStaleOutcome`,
+ *      once per lapse, shared with `list_changes` and the briefing).
+ * A fact the next run confirmed, replaced or retracted never gets a text-diff outcome (the old hook
+ * flagged a confirmed fact as contradicted whenever its subject also had a new claim). Idempotent.
  */
-export function recordWhatChangedOutcomes(
-  store: Store,
-  input: {
-    whatChangedDecisionId: string;
-    prev: ResearchRun;
-    next: ResearchRun;
-    changedArtifacts: Array<{ prev: string; next: string }>;
-  },
-): DecisionOutcome[] {
-  const out: DecisionOutcome[] = [];
-  const contradicted = contradictedFindings(input.prev.id, input.next.id, { store });
+export function recordWhatChangedOutcomes(store: Store, input: WhatChangedOutcomesInput): DecisionOutcome[] {
+  const out: DecisionOutcome[] = [...lineageOutcomesOfRun(store, input.next.id)];
+  const observed = observedLineages(store, input.next.id);
   const base = { whatChangedDecisionId: input.whatChangedDecisionId, prevRunId: input.prev.id, nextRunId: input.next.id };
-  const write = (findingId: string, outcome: string, evidence: Record<string, unknown>) => {
-    const save = outputSaveDecision(store, 'finding', findingId);
+  const write = (f: Finding, outcome: string, evidence: Record<string, unknown>) => {
+    const save = outputSaveDecision(store, 'finding', f.id);
     if (!save) return;
-    const taskId = store.findings.get(findingId)?.taskId;
     const o = recordOutcome(store, {
       decisionId: save.id, outcome, label: 'stale', source: 'what_changed', evidence: { ...base, ...evidence },
-      targetType: 'finding', targetId: findingId, ...(taskId && store.tasks.get(taskId) ? { taskId } : {}),
+      targetType: 'finding', targetId: f.id, ...(f.taskId && store.tasks.get(f.taskId) ? { taskId: f.taskId } : {}),
     });
     if (o) out.push(o);
   };
-  for (const id of contradicted) write(id, 'contradicted', {});
+
+  const unobserved = factsOfRun(store, input.prev).filter((f) => !observed.has(f.lineageId ?? f.id));
+  const next = store.findings.list({ runId: input.next.id }).filter((f) => f.status !== 'superseded');
+  const nextKeys = new Set(next.map(findingKey));
+  const newSubjects = new Set(next.filter(savedAsNew).map((f) => norm(f.subject)));
   const changed = new Map(input.changedArtifacts.map((c) => [c.prev, c.next]));
-  if (changed.size) {
-    for (const f of store.findings.list({ runId: input.prev.id })) {
-      if (f.workspaceId !== input.prev.workspaceId || f.status === 'superseded') continue;
-      const hits = f.evidence.filter((a) => changed.has(a));
-      if (hits.length) write(f.id, 'changed', { changedArtifacts: hits.map((a) => ({ prev: a, next: changed.get(a) })) });
+  for (const f of unobserved) {
+    if ((f.lifecycle ?? 'current') !== 'current') continue;
+    if (newSubjects.has(norm(f.subject)) && !nextKeys.has(findingKey(f))) write(f, 'contradicted', {});
+    const hits = f.evidence.filter((a) => changed.has(a));
+    if (hits.length) write(f, 'changed', { changedArtifacts: hits.map((a) => ({ prev: a, next: changed.get(a) })) });
+    if (input.config) {
+      const o = recordStaleOutcome(store, input.config, store.findings.get(f.id) ?? f, input.now);
+      if (o && !out.some((x) => x.id === o.id)) out.push(o);
     }
   }
   return out;
 }
+
+/** Facts of a run: findings it saved (not superseded) and the current facts it observed (applied). */
+function factsOfRun(store: Store, run: ResearchRun): Finding[] {
+  const out = new Map<string, Finding>();
+  for (const f of store.findings.list({ runId: run.id })) {
+    if (f.workspaceId === run.workspaceId && f.status !== 'superseded') out.set(f.id, f);
+  }
+  const observed = store.db
+    .prepare(`SELECT DISTINCT finding_id AS id FROM fact_observations WHERE run_id = ? AND status = 'applied' AND workspace_id = ?`)
+    .all(run.id, run.workspaceId) as Array<{ id: string }>;
+  for (const { id } of observed) {
+    const f = store.findings.get(id);
+    if (f && !out.has(f.id)) out.set(f.id, f);
+  }
+  return [...out.values()];
+}
+
+/** A fact saved as a new lineage (not a replacement of an earlier version). */
+const savedAsNew = (f: Finding) => !f.replacesId && (f.version ?? 1) === 1;
+
+/** Lowercase, punctuation removed, whitespace collapsed (the scheduler diff's text normalization). */
+const norm = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}$€£%.\s]/gu, ' ')
+    .replace(/\.(?!\d)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const findingKey = (f: Finding) => `${norm(f.subject)}|${norm(f.claim)}`;

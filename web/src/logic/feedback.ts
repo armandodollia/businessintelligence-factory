@@ -28,6 +28,8 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   // knowledge store KS-3
   entity_merge: 'entities merged',
   entity_rename: 'entity renamed',
+  // knowledge store KS-6
+  artifact_prune: 'artifact file pruned',
 };
 
 const short = (v: unknown, max = 80): string => {
