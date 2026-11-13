@@ -89,7 +89,7 @@ describe('config.knowledge (KS-0)', () => {
 });
 
 describe('budgets (KS-0)', () => {
-  it('budgetFor: role override, else default; provider scale; hard cap; caller may only lower it', () => {
+  it('budgetFor: role override, else default; provider scale; hard cap; caller may lower it or raise it up to the hard maximum (re-gate)', () => {
     expect(budgetFor(defaultConfig, 'worker', 'claude', 'search')).toBe(1200);
     expect(budgetFor(defaultConfig, 'reviewer', 'codex', 'expand')).toBe(3000);
     expect(budgetFor(defaultConfig, 'reviewer', 'codex', 'search')).toBe(1200);
@@ -102,7 +102,9 @@ describe('budgets (KS-0)', () => {
     expect(budgetFor(cfg, 'worker', 'claude', 'expand')).toBe(6000); // hard cap
     expect(budgetFor(cfg, 'worker', 'codex', 'search')).toBe(600); // scaled
     expect(budgetFor(cfg, 'worker', 'claude', 'search', 300)).toBe(300); // caller lowers
-    expect(budgetFor(cfg, 'worker', 'claude', 'search', 99_999)).toBe(1200); // caller cannot raise
+    expect(budgetFor(cfg, 'worker', 'claude', 'search', 2000)).toBe(2000); // caller raises (recovery pointers)
+    expect(budgetFor(cfg, 'worker', 'claude', 'search', 99_999)).toBe(6000); // up to the hard maximum
+    expect(budgetFor(cfg, 'worker', 'codex', 'search', 99_999)).toBe(3000); // scaled for the provider
     expect(budgetFor(cfg, 'worker', 'claude', 'search', 0)).toBe(1); // never below 1
   });
 
@@ -132,10 +134,10 @@ describe('budgets (KS-0)', () => {
     expect(cursorKey({ kinds: ['fact'], query: 'pricing', tool: 'search' })).toBe(key); // key order irrelevant
     expect(cursorKey({ tool: 'search', query: 'pricing!', kinds: ['fact'] })).not.toBe(key);
     const c = encodeCursor({ key, offset: 7 });
-    expect(c).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(c).toMatch(/^c1\.[0-9a-f]{16}\.7\.[0-9a-f]{8}$/);
     expect(decodeCursor(c, key)).toBe(7);
     expect(() => decodeCursor(c, cursorKey({ other: true }))).toThrow(InvalidCursorError);
-    for (const bad of ['', 'garbage', encodeCursor({ key, offset: -1 }), Buffer.from('{"v":1}').toString('base64url')]) {
+    for (const bad of ['', 'garbage', encodeCursor({ key, offset: -1 }), Buffer.from('{"v":1}').toString('base64url'), `c1.${key}.07.x`, `c1.${key}.1.0.x`]) {
       expect(() => decodeCursor(bad, key), bad).toThrow(InvalidCursorError);
     }
   });

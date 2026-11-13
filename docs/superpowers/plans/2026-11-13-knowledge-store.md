@@ -1234,3 +1234,30 @@ Merged into `feat/learning-loop` in the order KS-5, KS-6, KS-7 (`--no-ff`), then
   `exportTrainingData` returns its JSONL. API: the `x-bif-export-summary` header and `/export/summary`. Web:
   `logic/exportSummary.ts`, `useExportSummary`, Decision log.
 - **Bus events test:** KS-5 reviewer prompt reads now emit `retrieval` bus events (persisted by KS-6, ids only).
+
+## KS-8 re-gate builder notes (recovery shapes)
+
+Binding shapes from the design thread; the choices made inside them (no migration):
+
+- **Pointer object:** `full: { kind, tool, input }`, `kind` in `RECOVERY_KINDS` (`readCommon.ts`):
+  `expand_id`, `expand_chunk`, `get_card_line`, `read_workspace_line`, `same_call`. `kind` stays in the
+  served JSON (about 6 tokens) so an agent and the tests can tell the shapes apart.
+- **Per list:** search hits → `expand_id` (the hit is one store item). `list_changes` items → `same_call`
+  (a change carries dates, both claims and a reason that no single `expand` returns). Entity card lines
+  (`get_card <entity>`) → `same_call`. Node card lines (`get_card` / `read_workspace` / `expand` of a
+  node) → `read_workspace_line` with a cursor keyed to that `read_workspace` request. `expand` of an
+  entity → `get_card_line` (the line found by its text on the 15-fact card), else `same_call` for a line
+  only the fuller card lists. Fact quotes are items (`type: 'quote'`, `chunk_id` when known); a quote
+  too long for a page → `expand_chunk`, else `same_call`. Every other `expand` / `read_artifact` item →
+  `same_call`.
+- **Budget:** `max_tokens` may now raise a response's budget up to `hardMaxTokens` × min(1, provider
+  scale) (`maxRequestTokens`); without it the role budget applies. A pointer asks for the budget that
+  holds the item whole plus the request's role-note reserve; above the maximum the item is flagged
+  `too_large` with `size_tokens` instead.
+- **Cursor:** compact `c1.<key>.<offset>[.<pos>].<check>` (was base64 JSON, about 80 characters) so a
+  page at the 100-token floor can still carry a bare cut item with its pointer. A cursor at item 0
+  carries `pos` 1 (for `expand`: "header served").
+- **Known floor:** at `max_tokens` 100 a card page (node or entity header) cannot hold even a bare cut line
+  with its pointer; the response is the genuine "nothing fits, raise max_tokens" note (never false:
+  tested). Lines of a node card are at most about 60 tokens, so in practice they are cut only near the
+  floor; `expand` of a node never cuts them (its later pages carry only the id).

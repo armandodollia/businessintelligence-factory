@@ -153,7 +153,9 @@ describe('expand and read_artifact (design §9)', () => {
     const ex = await t.call<{ claim: string; items: Array<Record<string, unknown>> }>(t.ctx('ws_a'), 'expand', { id: v2.id });
     expect(ex.claim).toBe('Acme Pro costs 49 dollars');
     expect(ex.items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'evidence', artifact_id: a.id, title: 'Pricing', description: `<<<EVIDENCE ${a.id}\nPricing page, Pro plan visible\n>>>`, quotes: [`<<<EVIDENCE ${a.id}\ncosts 49 dollars per seat\n>>>`] }),
+      expect.objectContaining({ type: 'evidence', artifact_id: a.id, title: 'Pricing', description: `<<<EVIDENCE ${a.id}\nPricing page, Pro plan visible\n>>>` }),
+      // Re-gate (binding): each quote is an item of its own.
+      expect.objectContaining({ type: 'quote', artifact_id: a.id, quote: `<<<EVIDENCE ${a.id}\ncosts 49 dollars per seat\n>>>` }),
       expect.objectContaining({ type: 'version', id: v1.id, lifecycle: 'replaced', claim: 'Acme Pro costs 39 dollars' }),
       expect.objectContaining({ type: 'unverified_update', id: v3.id, claim: 'Acme Pro costs 59 dollars' }),
     ]));
@@ -259,17 +261,23 @@ describe('edge cases', () => {
     expect(t.seen.filter((e) => e.type === 'policy_blocked')).toEqual([]);
   });
 
-  it('an item larger than the whole budget is shortened and marked cut, and paging goes on (never stalls)', async () => {
+  it('thirty quotes are thirty items: the fact\'s cursor pages through them whole, never stalls (re-gate)', async () => {
     const t = ks4(opened);
     const a = await t.page('ws_a', 'Quote source text.');
     const f = t.fact('ws_a', 'Big evidence', { evidence: [a.id] });
     for (let i = 0; i < 30; i++) knowledgeRepos(t.store).findingEvidence.insert({ findingId: f.id, seq: i, artifactId: a.id, quote: `quote ${i} ${'q'.repeat(500)}` });
     const c = t.ctx('ws_a');
-    const r = await t.call<{ items: Array<Record<string, unknown>>; cursor?: string; tokens: number }>(c, 'expand', { id: f.id, max_tokens: 300 });
-    expect(r.tokens).toBeLessThanOrEqual(300);
-    expect(r.items.length).toBeGreaterThan(0);
-    expect(r.items[0]).toMatchObject({ type: 'evidence', artifact_id: a.id, cut: true });
-    expect((r.items[0]!.quotes as string[])[0]).toMatch(/^<<<EVIDENCE \S+\nquote 0 q+…\n>>>$/);
+    const quotes: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 80; i++) {
+      const r = await t.call<{ items: Array<Record<string, unknown>>; cursor?: string; tokens: number }>(c, 'expand', { id: f.id, max_tokens: 300, ...(cursor ? { cursor } : {}) });
+      expect(r.tokens).toBeLessThanOrEqual(300);
+      for (const it of r.items) if (it.type === 'quote') { expect(it.cut).toBeUndefined(); quotes.push(it.quote as string); }
+      if (!r.cursor) break;
+      cursor = r.cursor;
+    }
+    expect(quotes).toHaveLength(30);
+    expect(quotes[29]).toMatch(/^<<<EVIDENCE \S+\nquote 29 q{500}\n>>>$/);
   });
 
   it('image / raw modes on a missing stored file answer with a note, not a failure', async () => {

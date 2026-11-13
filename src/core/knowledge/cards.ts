@@ -291,7 +291,8 @@ export function nodeCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode): C
   const lines: CardLine[] = [];
   const profile = store.profiles.get(node.id)?.data ?? {};
   const keys = Object.keys(profile);
-  if (keys.length) lines.push({ text: `profile keys: ${keys.map((k) => servedLine(store, ws, k, 60)).join(', ')}`, refs: [], upload: false });
+  // Re-gate (binding): one line per profile key (not one long line), so the card's cursor reaches every key.
+  for (const k of keys) lines.push({ text: `profile key: ${servedLine(store, ws, k, 200)}`, refs: [], upload: false });
 
   // Counts (inside the scope predicate).
   const current = store.db

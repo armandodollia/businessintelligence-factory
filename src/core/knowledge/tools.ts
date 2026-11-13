@@ -17,13 +17,13 @@ import type { BifConfig, ModelRef } from '../config/schema.js';
 import type { EventBus } from '../events.js';
 import type { Store } from '../store/db.js';
 import type { RetrievalRole } from '../types.js';
-import { budgetFor, cursorKey, estimateTokens, InvalidCursorError } from './budget.js';
+import { budgetFor, cursorKey, estimateTokens, InvalidCursorError, maxRequestTokens } from './budget.js';
 import { entityCard, nodeCard, type Card } from './cards.js';
 import { runListChanges } from './changes.js';
 import { artifactNotFound, assertEntityReadable, expandNotFound, runExpand, runReadArtifact, type ArtifactBytes, type ReadArtifactMode } from './expand.js';
 import {
-  anyUploadDerived, BUDGET_KIND, inSlice, pageOf, readableById, uniqueRefs, usableOnly,
-  type ReadEnv, type ReadOutput, type ReviewSlice,
+  anyUploadDerived, BUDGET_KIND, cursorAtItem, inSlice, nodeLineRecover, pageOf, readableById, uniqueRefs, usableOnly,
+  type ReadEnv, type ReadOutput, type Recover, type ReviewSlice,
 } from './readCommon.js';
 import { recordRetrieval } from './retrievalLog.js';
 import { factScope } from './facts.js';
@@ -129,17 +129,14 @@ function narrowed(store: Store, scope: KnowledgeScope, workspaceId: string | und
   return v;
 }
 
-function cardOutput(card: Card, budget: number, key: string, cursor: string | undefined, query: string, scopeLabel: string): ReadOutput {
+function cardOutput(
+  card: Card, budget: number, key: string, cursor: string | undefined, query: string, scopeLabel: string,
+  recover: (line: unknown, index: number, need: number) => Recover | undefined,
+): ReadOutput {
   const lines = card.lines.map((l) => l.text);
-  // A line too big for a whole page comes back as { text, cut: true, full } (never skipped). It is
-  // recovered by the id it names when it names one, else by the card's own id (relation lines).
-  const h = card.header as { entity?: { id?: unknown }; node?: { id?: unknown }; workspace_id?: unknown; id?: unknown };
-  const cardId = [h.entity?.id, h.node?.id, h.workspace_id, h.id].find((v): v is string => typeof v === 'string' && v.length > 0);
-  const idOf = (_line: unknown, i: number) => {
-    const refs = card.lines[i]?.refs ?? [];
-    return refs.length === 1 ? refs[0]!.id : cardId;
-  };
-  const page = pageOf<string | { text: string; cut: true }>(lines, card.header, budget, { key, itemsKey: 'lines', idOf, ...(cursor ? { cursor } : {}) });
+  // A line too big for a whole page comes back as { text, cut: true, full } (never skipped); `full` is the
+  // call that returns it whole (re-gate: entity card → the same call; node card → read_workspace).
+  const page = pageOf<string | { text: string; cut: true }>(lines, card.header, budget, { key, itemsKey: 'lines', recover, ...(cursor ? { cursor } : {}) });
   const shown = card.lines.slice(page.offset, page.offset + page.items.length);
   const out: ReadOutput = {
     data: { ...card.header, lines: page.items },
@@ -189,6 +186,18 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   // comma, plus `,"notes":[]` when the page had no notes of its own.
   const noteChars = roleNotes.reduce((n, x) => n + JSON.stringify(x).length + 1, 0) + ',"notes":[]'.length;
   const pageBudget = roleNotes.length ? Math.max(1, budget - Math.ceil(noteChars / 4)) : budget;
+  // Re-gate (binding recovery shapes): pointers of shortened items. A pointer asks for the budget that
+  // holds the item whole plus this request's role-note reserve; above the hard maximum there is none.
+  const maxRequest = Math.max(MIN_RESPONSE_TOKENS, maxRequestTokens(deps.config, caller.model?.provider));
+  env.pointerBudget = (need) => {
+    const n = Math.max(MIN_RESPONSE_TOKENS, need + (budget - pageBudget) + 4);
+    return n <= maxRequest ? n : undefined;
+  };
+  env.keyFor = (t, inp) => cursorKey({ tool: t, ws: caller.workspaceId, role: caller.role, ...inp });
+  env.again = (at, need) => {
+    const m = env.pointerBudget!(need);
+    return m === undefined ? undefined : { kind: 'same_call', tool, input: { ...rest, cursor: at, max_tokens: m } };
+  };
 
   // Reviewer / escalation: only ids of the task's review slice (design §9). Same "not found" text.
   if (deps.slice) {
@@ -227,12 +236,12 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
         if (input.entity_id && tool === 'get_card') {
           assertEntityReadable(env, input.entity_id);
           const card = entityCard(env, scope, mode, input.entity_id);
-          out = cardOutput(card, pageBudget, key, cursor, `entity ${input.entity_id}`, mode);
+          out = cardOutput(card, pageBudget, key, cursor, `entity ${input.entity_id}`, mode, (_l, i, need) => env.again!(cursorAtItem(key, i), need));
         } else {
           const view = narrowed(store, scope, input.workspace_id ?? caller.workspaceId);
           if (!readableById(scope, mode, scope.nodeIds.includes(view.workspaceId))) throw notFound('workspace', view.workspaceId);
           out = cardOutput(nodeCard(env, view, mode), pageBudget, key, cursor, `node ${view.workspaceId}`,
-            view.workspaceId === caller.workspaceId ? mode : `${mode}:${view.workspaceId}`);
+            view.workspaceId === caller.workspaceId ? mode : `${mode}:${view.workspaceId}`, nodeLineRecover(env, view.workspaceId, input.scope));
         }
         break;
       }

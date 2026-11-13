@@ -122,7 +122,7 @@ export function itemPart(i: Record<string, unknown>): ItemPart {
   const type = String(i.type ?? 'item');
   const str = (k: string) => (typeof i[k] === 'string' ? (i[k] as string) : undefined);
   const evidence: EvidenceText[] = [];
-  for (const k of ['text', 'description', 'note']) {
+  for (const k of ['text', 'description', 'note', 'quote']) { // re-gate: a fact's quote is an item (`type: 'quote'`)
     const v = str(k);
     if (v?.startsWith('<<<EVIDENCE')) evidence.push(parseEvidence(v));
   }

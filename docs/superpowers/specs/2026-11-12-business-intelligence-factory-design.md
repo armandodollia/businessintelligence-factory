@@ -142,8 +142,11 @@ Start with Claude Code and Codex; OpenCode third. Every raw event stream is pers
   carries `tokens`, `truncated`, `cursor` and `content_trust: "untrusted"`; evidence text is redacted and fenced
   `<<<EVIDENCE … >>>`. Paging never skips content: a text page ends mid-passage with `cut: true` and the next
   `cursor` continues from that character; a list item that does not fit the rest of a page starts the next page,
-  and only one too big for a whole page is shortened (`cut: true`, dropped list entries counted in `omitted_entries`,
-  `full: "expand <id> for the full item"`); the header of `expand` / `read_artifact` is on the first page only. Every call writes one
+  and only one too big for a whole page is shortened (`cut: true`, dropped list entries counted in `omitted_entries`)
+  with `full`, the exact call that returns it whole (knowledge store design §9 "Recovery"; `max_tokens` may raise a
+  budget up to the hard maximum for it; a value above the hard maximum is flagged `too_large` with its size); the
+  header of `expand` / `read_artifact` is on the first page only, and an item that does not fit after it starts the
+  next page whole. Every call writes one
   `retrieval_events` row. Roles: worker, orchestrator and synthesizer get all six; the interviewer gets `search`,
   `get_card`, `expand`, `read_artifact`, `read_workspace` (usable facts only, as the synthesizer); reviewer and
   escalation runs get `expand` and `read_artifact` limited to the task's review slice.

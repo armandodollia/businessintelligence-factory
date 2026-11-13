@@ -103,10 +103,23 @@ describe('tool responses at tiny configured budgets (clamped to MIN_RESPONSE_TOK
     const f = t.fact('ws_a', 'Big evidence', { evidence: [a.id] });
     for (let i = 0; i < 3; i++) knowledgeRepos(t.store).findingEvidence.insert({ findingId: f.id, seq: i, artifactId: a.id, quote: `quote ${i} ${'q'.repeat(1500)}` });
     const c = t.ctx('ws_a');
-    const r = await t.call<{ tokens: number; items: Array<{ type: string; cut?: boolean; omitted?: boolean }> }>(c, 'expand', { id: f.id, max_tokens: 300 });
-    expect(r.tokens).toBeLessThanOrEqual(300);
-    expect(r.items[0]).toMatchObject({ type: 'evidence', cut: true });
-    expect(JSON.stringify(r)).not.toMatch(/retry_cursor|omitted/);
+    // Re-gate (binding): a quote too long for a page (no passage id) points at this request, at it, with
+    // the budget that holds it; following that pointer serves the whole quote.
+    const items: Array<Record<string, unknown>> = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 20; i++) {
+      const r = await t.call<{ tokens: number; cursor?: string; items: Array<Record<string, unknown>> }>(c, 'expand', { id: f.id, max_tokens: 300, ...(cursor ? { cursor } : {}) });
+      expect(r.tokens).toBeLessThanOrEqual(300);
+      items.push(...r.items);
+      if (!r.cursor) break;
+      cursor = r.cursor;
+    }
+    const cut = items.filter((x) => x.type === 'quote' && x.cut === true);
+    expect(cut).toHaveLength(3);
+    const back = await t.call<{ items: Array<Record<string, unknown>> }>(c, 'expand', (cut[1]!.full as { input: Record<string, unknown> }).input);
+    expect(cut[1]!.full).toMatchObject({ kind: 'same_call', tool: 'expand' });
+    expect(back.items[0]!.quote).toBe(`<<<EVIDENCE ${a.id}\nquote 1 ${'q'.repeat(1500)}\n>>>`);
+    expect(JSON.stringify(items)).not.toMatch(/retry_cursor/);
   });
 });
 

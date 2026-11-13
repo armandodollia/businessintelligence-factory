@@ -92,6 +92,9 @@ describe('knowledge logic', () => {
     expect(formatBytes(2048)).toBe('2 KB');
     expect(itemPart({ type: 'relation', relation: 'offers', from: { id: 'ent_1', name: 'A', source: 'ws_0' }, to: { id: 'ent_2', name: 'B' } }).text).toBe('A (ws_0) offers B');
     expect(itemPart({ type: 'evidence', artifact_id: 'art_1', outside_scope: true })).toMatchObject({ open: 'art_1', outside: true });
+    // Re-gate: a fact's quotes are items of their own (`type: 'quote'`), shown as evidence text.
+    expect(itemPart({ type: 'quote', artifact_id: 'art_1', chunk_id: 'chk_1', quote: '<<<EVIDENCE art_1\nverbatim words\n>>>' }))
+      .toMatchObject({ label: 'quote', evidence: [{ artifactId: 'art_1', text: 'verbatim words' }] });
   });
 });
 

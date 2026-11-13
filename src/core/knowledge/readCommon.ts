@@ -43,7 +43,48 @@ export type ReadEnv = {
    * the slice are left out of a response. `undefined` for every other role.
    */
   slice?: ReviewSlice;
+  /**
+   * Re-gate (binding recovery shapes): the same request at `cursor` with `max_tokens` = `need` plus the
+   * role-note reserve — the pointer of last resort for a shortened item (`same_call`); `undefined` when
+   * that exceeds the hard maximum (the item is then flagged `too_large` with its size). Set by
+   * `knowledgeRead`; absent in direct calls (tests, briefings), where no pointer is given.
+   */
+  again?: (cursor: string, need: number) => Recover | undefined;
+  /** Cursor key of another read tool's request by the same caller (pointers into another tool). */
+  keyFor?: (tool: string, input: Record<string, unknown>) => string;
+  /** The largest `max_tokens` a pointer may ask for, after the role-note reserve (hard maximum × provider scale). */
+  pointerBudget?: (need: number) => number | undefined;
 };
+
+/**
+ * Re-gate (binding recovery shapes): how a shortened item is recovered. In order of preference:
+ * 1. content of this response is an item of it (the request's `cursor` reaches it; no pointer);
+ * 2. the exact call that returns that content — `expand_id` (a hit's own item), `expand_chunk` (a quote
+ *    too long for a page: its passage, position-paged), `get_card_line` (a line of `expand` of an
+ *    entity: that line of the entity card), `read_workspace_line` (a node card line);
+ * 3. `same_call`: the same request at that item with a larger `max_tokens` (up to the hard maximum).
+ * A value larger than the hard maximum is served cut, `too_large: true`, with `size_tokens`.
+ */
+export const RECOVERY_KINDS = ['expand_id', 'expand_chunk', 'get_card_line', 'read_workspace_line', 'same_call'] as const;
+export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
+export type Recover = { kind: RecoveryKind; tool: string; input: Record<string, unknown> };
+
+/** A cursor that starts a page AT item `index` (for item 0: after the header, `pos` 1 — ignored by plain lists). */
+export const cursorAtItem = (key: string, index: number): string => encodeCursor({ key, offset: index, ...(index === 0 ? { pos: 1 } : {}) });
+
+/**
+ * Re-gate (binding): a node card line too big for a page is recovered by `read_workspace <node>` at that
+ * line, with the budget that holds it (its cursor is keyed to that request, whichever tool showed the line).
+ */
+export function nodeLineRecover(env: ReadEnv, workspaceId: string, scope: ScopeMode | undefined) {
+  const input: Record<string, unknown> = { workspace_id: workspaceId, ...(scope ? { scope } : {}) };
+  return (_line: unknown, index: number, need: number): Recover | undefined => {
+    const m = env.pointerBudget?.(need);
+    if (m === undefined || !env.keyFor) return undefined;
+    return { kind: 'read_workspace_line', tool: 'read_workspace', input: { ...input, cursor: cursorAtItem(env.keyFor('read_workspace', input), index), max_tokens: m } };
+  };
+}
+
 
 /** Roles that only ever see usable facts and records (design §9). */
 export function usableOnly(role: RetrievalRole): boolean {
@@ -194,7 +235,11 @@ export function pageOf<T>(
   items: readonly T[],
   header: Record<string, unknown>,
   budget: number,
-  opts: { key: string; cursor?: string; notes?: readonly string[]; itemsKey?: string; idOf?: (item: T, index: number) => string | undefined },
+  opts: {
+    key: string; cursor?: string; notes?: readonly string[]; itemsKey?: string;
+    /** Pointer of a shortened item (`need`: tokens of a page holding it whole); `undefined` = flag it `too_large`. */
+    recover?: (item: T, index: number, need: number) => Recover | undefined;
+  },
 ): ItemPage<T> {
   const offset = opts.cursor ? Math.min(decodeCursor(opts.cursor, opts.key), items.length) : 0;
   const overhead =
@@ -218,8 +263,12 @@ export function pageOf<T>(
       if (cursor) page.cursor = cursor;
       return page;
     }
-    const id = opts.idOf ? opts.idOf(rest[0]!, offset) : itemExpandId(rest[0]);
-    const short = shortenItem(rest[0], alone, id ? { id } : {}) as T | undefined;
+    const need = estimateTokens(JSON.stringify({
+      ...header, [opts.itemsKey ?? 'items']: [rest[0]], tokens: 99_999, truncated: true, more: rest.length,
+      cursor: cursorAtItem(opts.key, offset + 1), content_trust: CONTENT_TRUST, ...(opts.notes?.length ? { notes: opts.notes } : {}),
+    })) + 2;
+    const full = opts.recover?.(rest[0]!, offset, need);
+    const short = shortenItem(rest[0], alone, full ? { full } : { size: need }) as T | undefined;
     if (short === undefined) return { items: [], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length, stalled: true };
     const page: ItemPage<T> = { items: [short], truncated: true, more: rest.length - 1, offset, startCursor, remaining: rest.length };
     if (rest.length > 1) page.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
@@ -280,12 +329,14 @@ function atTokenBoundary(s: string, prefix: string): string {
  * Text first: every text field longer than a common cap is cut to it (`cutServedText`), lists kept
  * whole. Only when that is not enough does every list field keep just its first entries; then
  * `omitted_entries` counts the dropped entries per field path (`quotes`, `nested.notes`), so no entry
- * disappears without a count. With `opts.id` the item says `full: "expand <id> for the full item"`.
+ * disappears without a count. With `opts.full` the item carries its recovery pointer (`full`, see
+ * `RECOVERY_KINDS`); with `opts.size` instead it is flagged `too_large` with `size_tokens` (no call can
+ * return it whole: it is larger than the hard maximum).
  * The largest caps that fit win. Ids, kinds, states and dates are kept whole. `undefined` when even the
  * barest form does not fit.
  */
-export function shortenItem(item: unknown, fits: (x: unknown) => boolean, opts: { id?: string } = {}): unknown {
-  const full = opts.id ? { full: `expand ${opts.id} for the full item` } : {};
+export function shortenItem(item: unknown, fits: (x: unknown) => boolean, opts: { full?: Recover; size?: number } = {}): unknown {
+  const full = opts.full ? { full: opts.full } : opts.size !== undefined ? { too_large: true, size_tokens: opts.size } : {};
   const omittedOf = (m: number): Record<string, number> => {
     const out: Record<string, number> = {};
     const walk = (v: unknown, path: string, key?: string): void => {
@@ -345,7 +396,7 @@ export function shortenItem(item: unknown, fits: (x: unknown) => boolean, opts: 
   }
   // Last resort (an item no cap makes fit): its identity only — kind, id and the pointer to the full
   // item — with every array entry it held counted in `omitted_entries` (no entry disappears uncounted).
-  if (item && typeof item === 'object' && !Array.isArray(item) && opts.id) {
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
     const o = item as Record<string, unknown>;
     const bare: Record<string, unknown> = {};
     for (const k of ['kind', 'type', 'change', 'id']) if (typeof o[k] === 'string') bare[k] = o[k];

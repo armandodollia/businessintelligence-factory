@@ -444,8 +444,20 @@ exactly that character (no placeholder, no `retry_cursor`). In lists (hits, card
 expanded items; final-gate ruling): an item that does not fit the rest of a page ends the page and the
 cursor points at it, so it opens the next page whole; only an item too big for a whole page on its own
 is shortened and served alone — text fields cut first; list entries dropped only if that is not enough,
-counted per field in `omitted_entries`; marked `cut: true` with `full: "expand <id> for the full item"`.
-The role notes a page carries count against its budget, so a page never overflows into "nothing fits". The header of `expand` / `read_artifact` goes on the first page only (a page
+counted per field in `omitted_entries`; marked `cut: true`. The role notes a page carries count against
+its budget, so a page never overflows into "nothing fits".
+
+Recovery (re-gate ruling, binding): what is shortened or left out is recovered by the first that applies —
+(1) it is an item of this response, so the request's `cursor` reaches it (a fact's quotes are items of
+`expand <fact>`; a node card has one line per profile key); (2) `full` names the exact call that returns
+it, `{kind, tool, input}`: `expand_id` (a search hit: `expand <id>`), `expand_chunk` (a quote too long for
+a page: `expand <its chunk>`, position-paged), `get_card_line` (a line of `expand <entity>`: that line of
+`get_card <entity>`, cursor and budget), `read_workspace_line` (a node card line: `read_workspace <node>`
+at it); (3) `same_call`: this request at the item (its cursor) with the `max_tokens` that holds it.
+`max_tokens` may raise a response's budget up to the hard maximum (scaled for the provider) for this.
+Stated limit: a single value larger than the hard maximum (default 8 000 tokens) is served cut, flagged
+`too_large: true` with `size_tokens`, and has no pointer. `expand` of a node id returns its node card.
+Cursors are compact strings (`c1.<key>.<offset>[.<pos>].<check>`). The header of `expand` / `read_artifact` goes on the first page only (a page
 too small for it gets a shortened header, `header_cut: true`); later pages carry the id, the items
 and the envelope. Agents are told: follow `cursor` until it is absent and you have read everything.
 

@@ -136,7 +136,7 @@ describe('business tree', () => {
     if (!ok.ok) throw new Error(ok.error);
     // KS-4: the node card plus counts (profile keys, not values; facts through search / get_card).
     expect(ok.data).toMatchObject({ node: { id: t.company.id, level: 'company', scope: 'Acme' }, content_trust: 'untrusted' });
-    expect((ok.data as { lines: string[] }).lines).toEqual(expect.arrayContaining(['profile keys: revenue', expect.stringMatching(/^counts: facts 1 current/)]));
+    expect((ok.data as { lines: string[] }).lines).toEqual(expect.arrayContaining(['profile key: revenue', expect.stringMatching(/^counts: facts 1 current/)]));
     const denied = await handle(ctx(t.product.id, { role: 'orchestrator' }), 'read_workspace', { workspace_id: t.other.id });
     expect(denied).toEqual({ ok: false, error: `workspace '${t.other.id}' not found` });
     const unknown = await handle(ctx(t.product.id, { role: 'orchestrator' }), 'read_workspace', { workspace_id: 'ws_nope' });

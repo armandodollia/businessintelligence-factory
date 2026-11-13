@@ -139,8 +139,11 @@ describe('read_artifact text pages by position (KS-8 ruling)', () => {
   it('a hand-edited cursor (position changed) is rejected: pass it exactly as returned', async () => {
     const { t, a, c } = await setup();
     const p = await t.call<Page>(c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: 160 });
-    const state = JSON.parse(Buffer.from(p.cursor!, 'base64url').toString('utf8')) as Record<string, unknown>;
-    const forged = Buffer.from(JSON.stringify({ ...state, p: Number(state.p ?? 0) + 1 })).toString('base64url');
+    // c1.<key>.<offset>[.<pos>].<check>: move the position by one, keep the check value.
+    const parts = p.cursor!.split('.');
+    const forged = parts.length === 5
+      ? [parts[0], parts[1], parts[2], String(Number(parts[3]) + 1), parts[4]].join('.')
+      : [parts[0], parts[1], parts[2], '1', parts[3]].join('.');
     const r = await t.handle(c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: 160, cursor: forged });
     expect(r).toMatchObject({ ok: false });
     expect((r as { error: string }).error).toMatch(/exactly as returned/);
@@ -204,7 +207,10 @@ describe('lists never skip an item (KS-8 ruling)', () => {
     const evidence = pages.flatMap((p) => p.items ?? []).filter((i) => i.type === 'evidence');
     expect(evidence.map((e) => e.artifact_id)).toEqual([a.id, b.id, g.id]);
     expect(evidence.some((e) => e.cut === true)).toBe(false); // each fits a later page whole
-    for (const e of evidence) for (const q of e.quotes as string[]) expect(q).toMatch(FENCED);
+    // Re-gate (binding): each quote is an item of its own, fenced.
+    const quotes = pages.flatMap((p) => p.items ?? []).filter((i) => i.type === 'quote');
+    expect(quotes.map((q) => q.artifact_id)).toEqual([a.id, b.id, g.id]);
+    for (const q of quotes) expect(q.quote as string).toMatch(FENCED);
     expect(JSON.stringify(pages)).not.toMatch(/retry_cursor|"omitted"/);
   });
 
@@ -227,17 +233,26 @@ describe('lists never skip an item (KS-8 ruling)', () => {
     const e = resolveEntity(t.store, scopeFor(t.store, 'ws_a'), { kind: 'competitor', name: 'Globex' });
     const facts = Array.from({ length: 4 }, (_, i) => t.fact('ws_a', `Globex claim ${i} ${'with a long tail of detail '.repeat(12)}end of claim ${i}`, { entityId: e.id }));
     const c = t.ctx('ws_a');
-    const pages = await follow(t, c, 'get_card', { entity_id: e.id, max_tokens: 100 });
-    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(100);
-    const lines = pages.flatMap((p) => (p.lines as Array<string | { text: string; cut?: boolean; full?: string }>) ?? []);
-    // A line names its fact in its text, or (shortened) in `full`: "expand <id> for the full item".
-    const text = (l: string | { text: string; full?: string }) => (typeof l === 'string' ? l : `${l.text} ${l.full ?? ''}`);
-    for (const f of facts) expect(lines.some((l) => text(l).includes(f.id)), f.id).toBe(true);
-    const cut = lines.find((l): l is { text: string; cut: true; full: string } => typeof l !== 'string' && l.cut === true && /^expand fnd_/.test(l.full ?? ''));
-    expect(cut).toBeDefined();
-    const id = /^expand (fnd_[A-Za-z0-9]+) for the full item$/.exec(cut!.full)![1]!;
-    const full = await t.call<{ claim: string }>(c, 'expand', { id });
-    expect(full.claim).toMatch(/end of claim \d$/);
+    // 160: at the 100-token floor a card page cannot hold even a bare cut line with its pointer.
+    const pages = await follow(t, c, 'get_card', { entity_id: e.id, max_tokens: 160 });
+    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(160);
+    type Line = string | { text: string; cut?: boolean; full?: { tool: string; input: Record<string, unknown> } };
+    const lines = pages.flatMap((p) => (p.lines as Line[]) ?? []);
+    // Re-gate (binding): a cut line carries the call that returns it whole (this card, at it, larger budget).
+    const recovered: string[] = [];
+    for (const l of lines) {
+      if (typeof l === 'string') recovered.push(l);
+      else if (l.cut && l.full) {
+        expect(l.full.tool).toBe('get_card');
+        const back = await t.call<{ lines: string[] }>(c, 'get_card', l.full.input);
+        recovered.push(back.lines[0]!);
+      } else recovered.push(l.text);
+    }
+    // Every fact line is back whole; a card line summarises its claim (≤ 300 chars), `expand` of the id has all of it.
+    for (const f of facts) {
+      expect(recovered.some((l) => l.includes(f.id)), f.id).toBe(true);
+      expect((await t.call<{ claim: string }>(c, 'expand', { id: f.id })).claim).toMatch(/end of claim \d$/);
+    }
   });
 });
 
@@ -276,7 +291,7 @@ describe('read tool descriptions (KS-8 ruling)', () => {
     expect(TOOL_DESCRIPTIONS.read_artifact).toMatch(/follow `cursor` until it is absent and you have read everything/);
     expect(TOOL_DESCRIPTIONS.read_artifact).not.toMatch(/retry_cursor|larger max_tokens/);
     expect(TOOL_DESCRIPTIONS.expand).toMatch(/follow `cursor` until it is absent/);
-    expect(TOOL_DESCRIPTIONS.search).toMatch(/an item marked `cut` is shortened, and `expand` on its id returns it in full/);
+    expect(TOOL_DESCRIPTIONS.search).toMatch(/an item marked `cut` is shortened: make the call in its `full`/);
   });
 });
 

@@ -4,7 +4,7 @@
  *    never shortened because the page is nearly full.
  * 2. An item is shortened only when it is too big for a whole page on its own.
  * 3. A shortened item: text fields are cut first; dropped array entries are counted per field
- *    (`omitted_entries`); it is marked `cut: true` and says "expand <id> for the full item" (`full`).
+ *    (`omitted_entries`); it is marked `cut: true` and carries `full`, the call that returns it whole.
  * 4. Pages joined equal the full list at every budget at which every item fits a page; no array entry
  *    disappears without a count; an item larger than a page is cut, flagged and recoverable by `expand`.
  */
@@ -19,6 +19,7 @@ import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
 import type { Role } from '../../../src/core/types.js';
 import { ks4, T0, type Ks4 } from './ks4fixture.js';
+import { expectRecovered } from './recoveryHelpers.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -28,7 +29,6 @@ afterEach(() => {
 type Page = Record<string, unknown> & { cursor?: string; notes?: string[]; tokens: number; truncated: boolean };
 type Tool = 'search' | 'get_card' | 'list_changes';
 const LIST_KEY: Record<Tool, string> = { search: 'hits', get_card: 'lines', list_changes: 'changes' };
-const FULL = /^expand (\S+) for the full item$/;
 
 function world(role: Role = 'worker') {
   const t = ks4(opened, (c) => {
@@ -121,22 +121,27 @@ describe('list paging ruling: end the page before an item that does not fit; sho
           // pointer to the full item) on a page of this request would exceed the budget.
           const next = ref[pages.slice(0, -1).flatMap((p) => itemsOf(p, k.tool)).length];
           const id = idOf(next) ?? w.e.id;
+          // The pointer the code gives such an item: its own `expand` (hits) or this request at it.
+          const full = k.tool === 'search'
+            ? { kind: 'expand_id', tool: 'expand', input: { id } }
+            : { kind: 'same_call', tool: k.tool, input: { ...input, cursor: last.cursor, max_tokens: 100 } };
           const bare = typeof next === 'string'
-            ? { text: '…', cut: true, full: `expand ${id} for the full item` }
+            ? { text: '…', cut: true, full }
             : {
                 ...Object.fromEntries(['kind', 'type', 'change'].filter((f) => typeof (next as Record<string, unknown>)[f] === 'string').map((f) => [f, (next as Record<string, unknown>)[f]])),
-                id, cut: true, full: `expand ${id} for the full item`,
+                id, cut: true, full,
               };
           const page = { ...fixed, [LIST_KEY[k.tool]]: [bare], tokens: budget, truncated: true, more: ref.length, cursor: last.cursor, ...(recurringNotes.length ? { notes: recurringNotes } : {}) };
-          expect(estimateTokens(JSON.stringify(page)), `budget ${budget}: false "nothing fits"`).toBeGreaterThan(budget);
+          // Within the estimate's rounding (a cursor at item 0 is a few characters longer).
+          expect(estimateTokens(JSON.stringify(page)), `budget ${budget}: false "nothing fits"`).toBeGreaterThan(budget - 4);
           continue;
         }
         const joined = pages.flatMap((p) => itemsOf(p, k.tool));
         expect(joined.length, `budget ${budget}`).toBe(ref.length);
-        joined.forEach((item, i) => {
+        for (const [i, item] of joined.entries()) {
           if (!isCut(item)) {
             expect(item, `budget ${budget} item ${i}`).toEqual(ref[i]);
-            return;
+            continue;
           }
           sawCut = true;
           const page = pages.find((p) => itemsOf(p, k.tool).includes(item))!;
@@ -145,11 +150,9 @@ describe('list paging ruling: end the page before an item that does not fit; sho
           const fullPage = { ...page, [LIST_KEY[k.tool]]: [ref[i]] };
           expect(estimateTokens(JSON.stringify(fullPage)), `budget ${budget}: item ${i} was cut but fits a page`).toBeGreaterThan(budget);
           const o = item as Record<string, unknown>;
-          expect(typeof o.full === 'string' ? o.full : JSON.stringify(o)).toMatch(FULL);
-          // A card line that names no single item (e.g. the "left out" line) points at the card's entity.
-          expect(FULL.exec(o.full as string)![1]).toBe(idOf(ref[i]) ?? (k.tool === 'get_card' ? w.e.id : undefined));
+          await expectRecovered(w.t, w.c, o, ref[i], `${k.tool} budget ${budget} item ${i}`);
           if (typeof ref[i] === 'object') arraysAccounted(ref[i], o);
-        });
+        }
         if (!joined.some(isCut)) sawUncutRun = true;
       }
       if (!k.role) expect(sawCut, 'some budget is small enough to cut the longest item').toBe(true);
@@ -157,7 +160,7 @@ describe('list paging ruling: end the page before an item that does not fit; sho
     });
   }
 
-  it('an item larger than a page is cut, flagged and recoverable through expand (search hit, card line, change)', async () => {
+  it('an item larger than a page is cut, flagged and recoverable through its pointer (search hit, card line, change)', async () => {
     const w = world();
     const longest = w.facts[8]!;
     for (const [tool, input] of [
@@ -165,14 +168,21 @@ describe('list paging ruling: end the page before an item that does not fit; sho
       ['get_card', { entity_id: w.e.id }],
       ['list_changes', {}],
     ] as const) {
-      const pages = await follow(w.t, w.c, tool, { ...input, max_tokens: 100 });
-      const cut = pages
-        .flatMap((p) => itemsOf(p, tool))
-        .find((x) => isCut(x) && (x as { full?: string }).full === `expand ${longest.id} for the full item`) as Record<string, unknown> | undefined;
-      expect(cut, tool).toBeDefined();
-      expect(cut!.full).toBe(`expand ${longest.id} for the full item`);
-      const full = await w.t.call<{ claim: string }>(w.c, 'expand', { id: longest.id });
-      expect(full.claim).toBe(longest.claim);
+      const ref = (await follow(w.t, w.c, tool, { ...input, max_tokens: 8000 })).flatMap((p) => itemsOf(p, tool));
+      let longestRecovered = false;
+      // Every budget at which the longest item is cut (and a page still holds its bare form with the pointer).
+      for (let budget = 100; budget <= 300; budget += 10) {
+        const pages = await follow(w.t, w.c, tool, { ...input, max_tokens: budget });
+        if (NOTHING_FITS.test(JSON.stringify(pages.at(-1)!.notes ?? []))) continue;
+        const joined = pages.flatMap((p) => itemsOf(p, tool));
+        expect(joined.length, tool).toBe(ref.length);
+        for (const [i, item] of joined.entries()) {
+          if (!isCut(item)) continue;
+          await expectRecovered(w.t, w.c, item as Record<string, unknown>, ref[i], `${tool} budget ${budget} item ${i}`);
+          if (JSON.stringify(ref[i]).includes(longest.claim.slice(0, 120))) longestRecovered = true;
+        }
+      }
+      expect(longestRecovered, tool).toBe(true);
     }
   });
 });
@@ -182,11 +192,11 @@ describe('shortenItem (ruling 3)', () => {
 
   it('cuts text fields first: lists stay whole while shorter text is enough', () => {
     const item = { id: 'fnd_1', title: 't'.repeat(600), tags: ['a', 'b', 'c'] };
-    const s = shortenItem(item, fits(60), { id: 'fnd_1' }) as Record<string, unknown>;
+    const s = shortenItem(item, fits(80), { full: { kind: 'expand_id', tool: 'expand', input: { id: 'fnd_1' } } }) as Record<string, unknown>;
     expect(s.tags).toEqual(['a', 'b', 'c']);
     expect(s.omitted_entries).toBeUndefined();
     expect(String(s.title).length).toBeLessThan(600);
-    expect(s).toMatchObject({ id: 'fnd_1', cut: true, full: 'expand fnd_1 for the full item' });
+    expect(s).toMatchObject({ id: 'fnd_1', cut: true, full: { kind: 'expand_id', tool: 'expand', input: { id: 'fnd_1' } } });
   });
 
   it('counts every dropped array entry per field, nested too', () => {
@@ -195,24 +205,24 @@ describe('shortenItem (ruling 3)', () => {
       quotes: Array.from({ length: 30 }, (_, i) => `<<<EVIDENCE art_1\nq${i} ${'q'.repeat(200)}\n>>>`),
       nested: { notes: Array.from({ length: 12 }, (_, i) => `note ${i} ${'n'.repeat(100)}`) },
     };
-    const s = shortenItem(item, fits(200), { id: 'art_1' }) as Record<string, unknown>;
+    const s = shortenItem(item, fits(220), { full: { kind: 'same_call', tool: 'expand', input: { id: 'fnd_1' } } }) as Record<string, unknown>;
     expect(s.cut).toBe(true);
     arraysAccounted(item, s);
     expect(Object.keys(s.omitted_entries as object).sort()).toEqual(['nested.notes', 'quotes']);
   });
 
   it('a string becomes { text, cut, full }', () => {
-    const s = shortenItem(`[fnd_ABC] ${'claim '.repeat(100)}`, fits(40), { id: 'fnd_ABC' }) as Record<string, unknown>;
-    expect(s).toMatchObject({ cut: true, full: 'expand fnd_ABC for the full item' });
+    const s = shortenItem(`[fnd_ABC] ${'claim '.repeat(100)}`, fits(60), { full: { kind: 'expand_id', tool: 'expand', input: { id: 'fnd_ABC' } } }) as Record<string, unknown>;
+    expect(s).toMatchObject({ cut: true, full: { kind: 'expand_id', input: { id: 'fnd_ABC' } } });
     expect(String(s.text).startsWith('[fnd_ABC] claim')).toBe(true);
   });
 });
 
 describe('list tool descriptions (ruling 5)', () => {
-  it('say: follow cursor until it is absent; an item marked cut is shortened, and expand on its id returns it in full', () => {
+  it('say: follow cursor until it is absent; an item marked cut carries the call that returns it whole', () => {
     for (const tool of ['search', 'get_card', 'list_changes'] as const) {
       expect(TOOL_DESCRIPTIONS[tool], tool).toContain(
-        'follow `cursor` until it is absent; an item marked `cut` is shortened, and `expand` on its id returns it in full',
+        'follow `cursor` until it is absent; an item marked `cut` is shortened: make the call in its `full` ({tool, input}) to get it whole; `too_large` = larger than the hard maximum, served cut with its `size_tokens`.',
       );
     }
   });
@@ -223,7 +233,7 @@ describe('shortened text never splits an id (Opus finding 6)', () => {
     const ids = Array.from({ length: 6 }, (_, i) => `ent_01M7BD${'ABCDEFGHJK'.slice(i, i + 4)}QZ7537H4RHT1HW3G`);
     const line = `competes_with ${ids.map((id, i) => `Rival company number ${i} [${id}]`).join(', ')}`;
     for (let n = 20; n <= 120; n += 1) {
-      const s = shortenItem(line, (x) => estimateTokens(JSON.stringify(x)) <= n, { id: 'ent_card' }) as { text: string } | undefined;
+      const s = shortenItem(line, (x) => estimateTokens(JSON.stringify(x)) <= n + 15, { full: { kind: 'same_call', tool: 'get_card', input: {} } }) as { text: string } | undefined;
       if (!s) continue;
       const text = s.text.replace(/…$/, '');
       for (const m of text.matchAll(/[a-z]+_[A-Za-z0-9]*/g)) expect(ids.concat(['competes_with']), `n=${n}: ${text}`).toContain(m[0]);
@@ -253,7 +263,9 @@ describe('expand of a non-text item shortens its header like text reads (Opus fi
         if (!p.cursor) break;
         cursor = p.cursor;
       }
-      expect(pages[0]).toMatchObject({ id: f.id, header_cut: true });
+      // Re-gate (Opus 1): the header is shortened only when it cannot fit a page alone; else it is whole.
+      if (pages[0]!.header_cut === true) expect(pages[0]).toMatchObject({ id: f.id });
+      else expect(pages[0]).toMatchObject({ id: f.id, claim: f.claim });
       expect(pages.flatMap((p) => (p.items as unknown[]) ?? []).length, `budget ${budget}`).toBe(ref.length);
     }
   });

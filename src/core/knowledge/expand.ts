@@ -30,16 +30,16 @@ import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Artifact, Finding, RetrievalResultRef, TextChunk } from '../types.js';
 import { estimateTokens, decodeCursorAt, encodeCursor } from './budget.js';
-import { entityCard, type CardLine } from './cards.js';
+import { entityCard, nodeCard, type CardLine } from './cards.js';
 import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
 import { itemIsUploadDerived } from './provenance.js';
 import {
   aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, itemExpandId, outsideScopeNote, pageOf, readableById, shortenItem,
   sourceLabel, uniqueRefs, usableOnly,
-  type ItemPage, type ReadEnv, type ReadOutput,
+  cursorAtItem, nodeLineRecover, type ItemPage, type ReadEnv, type ReadOutput, type Recover,
 } from './readCommon.js';
-import { notFound, type ScopeMode } from './scope.js';
+import { narrowTo, notFound, type ScopeMode } from './scope.js';
 import { artifactChunks, canonicalArtifactId, servedChunkText, servedLine, servedTextState, type ServedTextState } from './texts.js';
 import { CONTENT_TRUST, fenceEvidence, redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
 
@@ -55,7 +55,12 @@ export const expandNotFound = (id: string) => notFound('item', id);
 export const artifactNotFound = (id: string) => notFound('artifact', id);
 
 type Item = Record<string, unknown> & { type: string };
-type Built = { header: Record<string, unknown>; items: Item[]; refs: Map<Item, RetrievalResultRef[]>; headerRefs: RetrievalResultRef[]; upload: boolean; itemUpload: Map<Item, boolean>; notes: string[]; outside: number };
+type Built = {
+  header: Record<string, unknown>; items: Item[]; refs: Map<Item, RetrievalResultRef[]>; headerRefs: RetrievalResultRef[]; upload: boolean;
+  itemUpload: Map<Item, boolean>; notes: string[]; outside: number;
+  /** Re-gate: the call that returns a shortened item whole, when it is not this request (see `RECOVERY_KINDS`). */
+  recover?: (item: Item, index: number, need: number) => Recover | undefined;
+};
 
 function built(header: Record<string, unknown>, headerRefs: RetrievalResultRef[], upload: boolean): Built {
   return { header, items: [], refs: new Map(), headerRefs, upload, itemUpload: new Map(), notes: [], outside: 0 };
@@ -94,6 +99,8 @@ const cursorAt = (cursor: string | undefined, key: string) => (cursor ? decodeCu
 function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
   if (b.outside) b.notes.push(outsideScopeNote(b.outside));
   const at = cursorAt(cursor, key);
+  const recover = (item: Item, index: number, need: number): Recover | undefined =>
+    b.recover?.(item, index, need) ?? env.again?.(cursorAtItem(key, index), need);
   const assemble = (page: ItemPage<Item>, header: Record<string, unknown>, notes: string[], first: boolean): ReadOutput => {
     // A shortened item is a new object: its refs are those of the item it was cut from.
     const src = b.items.slice(page.offset, page.offset + page.items.length);
@@ -126,7 +133,7 @@ function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: str
       assemble({ items: [], truncated: true, more: b.items.length, cursor: laterCursor, offset: 0, startCursor: encodeCursor({ key, offset: 0 }), remaining: b.items.length }, header, notes, true);
     const wholeHeader = estimateTokens(JSON.stringify({ ...b.header, items: [] })) + (b.notes.length ? estimateTokens(JSON.stringify(b.notes)) : 0) + envelope <= budget;
     if (wholeHeader) {
-      const page = pageOf(b.items, b.header, budget, { key, notes: b.notes });
+      const page = pageOf(b.items, b.header, budget, { key, notes: b.notes, recover });
       if (page.items.length && (page.items[0] as { cut?: unknown }).cut !== true) return assemble(page, b.header, b.notes, true);
       if (fitsLater) return headerOnly(b.header, b.notes);
     } else if (fitsLater) {
@@ -138,12 +145,13 @@ function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: str
   // envelope and the barest form of that item (Opus finding 4, §9), then the item shortened to fit.
   const next = b.items[at.offset];
   const nextId = next !== undefined ? itemExpandId(next) : undefined;
+  // The barest shortened item: its type, id, `cut` and the longest pointer (same call, cursor, budget).
   const minItem = next === undefined ? 0 : estimateTokens(JSON.stringify({
-    ...(typeof (next as Item).type === 'string' ? { type: (next as Item).type } : {}),
-    ...(nextId ? { id: nextId, full: `expand ${nextId} for the full item` } : {}), cut: true,
+    ...(typeof (next as Item).type === 'string' ? { type: (next as Item).type } : {}), ...(nextId ? { id: nextId } : {}), cut: true,
+    full: { kind: 'same_call', tool: 'read_artifact', input: { id: b.header.id, cursor: cursorAtItem(key, b.items.length), max_tokens: 99_999 } },
   }));
   const { header, first, notes } = textHeader(b, at, budget - envelopeTokens(budget, key, b.items.length, 0) - minItem);
-  return assemble(pageOf(b.items, header, budget, { key, notes, ...(cursor ? { cursor } : {}) }), header, notes, first);
+  return assemble(pageOf(b.items, header, budget, { key, notes, recover, ...(cursor ? { cursor } : {}) }), header, notes, first);
 }
 
 /**
@@ -302,10 +310,15 @@ function evidenceItems(env: ReadEnv, b: Built, f: Finding): void {
     const item: Item = { type: 'evidence', artifact_id: aid, artifact_kind: a.kind, ...sourceLabel(env, a.workspaceId) };
     if (a.title || a.sourceUrl) item.title = servedLine(store, ws, stripFences(a.title ?? a.sourceUrl ?? ''), 160);
     if (a.description) item.description = fenceEvidence(aid, servedLine(store, ws, a.description, 300));
-    const quotes = refsRows.filter((r) => r.artifactId === aid && r.quote).map((r) => fenceEvidence(aid, servedLine(store, ws, r.quote!, 600)));
-    if (quotes.length) item.quotes = quotes;
     push(b, item, [{ id: aid, kind: 'artifact' }], a.uploadDerived === true);
+    // Re-gate (binding): each verified quote is its own item, so the fact's cursor pages through all of them.
+    for (const r of refsRows.filter((x) => x.artifactId === aid && x.quote)) {
+      const q: Item = { type: 'quote', artifact_id: aid, ...(r.chunkId ? { chunk_id: r.chunkId } : {}), quote: fenceEvidence(aid, servedLine(store, ws, r.quote!, CLAIM_MAX)) };
+      push(b, q, [{ id: aid, kind: 'artifact' }, ...(r.chunkId ? [{ id: r.chunkId, kind: 'chunk' as const }] : [])], a.uploadDerived === true);
+    }
   }
+  // A quote too long for a page: its passage (position-paged) when it has one, else this request at it.
+  b.recover = (item) => (item.type === 'quote' && typeof item.chunk_id === 'string' ? { kind: 'expand_chunk', tool: 'expand', input: { id: item.chunk_id } } : undefined);
 }
 
 function expandFact(env: ReadEnv, id: string): Built {
@@ -541,6 +554,34 @@ function expandEntity(env: ReadEnv, id: string): Built {
   }
   const b = built({ kind: 'entity', ...card.header }, card.headerRefs, card.headerUpload);
   for (const l of card.lines) push(b, { type: 'line', text: l.text }, l.refs, l.upload);
+  // Re-gate (binding): a line too long for a page points at `get_card <entity>` at that line (the entity
+  // card lists fewer facts, so the line is found by its text); a line only this fuller card lists is
+  // recovered by this request at it.
+  const scopeIn = env.mode === 'tree' ? { scope: 'tree' } : {};
+  const cardInput: Record<string, unknown> = { entity_id: id, ...scopeIn };
+  const plain = entityCard(env, env.scope, modeOf(env), id);
+  b.recover = (item, _index, need) => {
+    const j = plain.lines.findIndex((l) => l.text === item.text);
+    if (j < 0 || !env.keyFor || !env.pointerBudget) return undefined;
+    const at = cursorAtItem(env.keyFor('get_card', cardInput), j);
+    const onCard = estimateTokens(JSON.stringify({ ...plain.header, lines: [item.text], tokens: 99_999, truncated: true, more: plain.lines.length, cursor: at, content_trust: CONTENT_TRUST })) + 2;
+    const m = env.pointerBudget(Math.max(need, onCard));
+    return m === undefined ? undefined : { kind: 'get_card_line', tool: 'get_card', input: { ...cardInput, cursor: at, max_tokens: m } };
+  };
+  return b;
+}
+
+/** Re-gate (binding): `expand` of a node id returns its node card (lines as items), as `read_workspace` does. */
+function expandNode(env: ReadEnv, id: string): Built {
+  const node = env.store.workspaces.get(id);
+  if (!node || !env.scope.treeIds.includes(id)) throw expandNotFound(id);
+  const view = narrowTo(env.store, env.scope, id);
+  if (!view || !readableById(env.scope, modeOf(env), env.scope.nodeIds.includes(id))) throw expandNotFound(id);
+  const card = nodeCard(env, view, modeOf(env));
+  const b = built({ kind: 'node', id, ...card.header }, card.headerRefs, card.headerUpload);
+  for (const l of card.lines) push(b, { type: 'line', text: l.text }, l.refs, l.upload);
+  const lineRecover = nodeLineRecover(env, id, env.mode === 'tree' ? 'tree' : undefined);
+  b.recover = (item, index, need) => lineRecover(item, index, need);
   return b;
 }
 
@@ -617,6 +658,7 @@ export function runExpand(env: ReadEnv, input: ExpandInput, budget: number, key:
     const x = expandChunk(env, id, input.around ?? 0);
     return finishText(x.b, x.owner.id, x.passages, budget, key, input.cursor, id);
   } else if (id.startsWith('ent_')) b = expandEntity(env, id);
+  else if (env.store.workspaces.get(id)) b = expandNode(env, id);
   else {
     const type = Object.entries(RECORD_PREFIX).find(([p]) => id.startsWith(p))?.[1];
     if (!type) throw expandNotFound(id);

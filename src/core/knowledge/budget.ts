@@ -7,7 +7,7 @@
  *   skips an item — so `offset + items.length` is where the next page starts (no loss, no repeat).
  *   An item larger than the whole budget is not returned (`items: []`, `truncated`): the read tools
  *   then shorten it (`shortenItem`) or page its text by position (KS-8 ruling).
- * - Cursors are opaque base64url strings bound to the request (`cursorKey` of its parameters), so a
+ * - Cursors are opaque compact strings (`c1.<key>.<offset>[.<pos>].<check>`) bound to the request (`cursorKey` of its parameters), so a
  *   cursor replayed against another query is rejected, and checked (`cursorCheck`), so a hand-edited
  *   one is rejected too. They carry no ids or text; scope and tree
  *   checks are redone on every call, so a forged offset can only page within what the caller sees.
@@ -32,8 +32,17 @@ export function budgetFor(
   const base = (role !== 'user' ? k.budgets.roles[role]?.[kind] : undefined) ?? k.budgets.default[kind];
   const scale = provider ? (k.budgets.providers[provider] ?? 1) : 1;
   let budget = Math.min(Math.floor(base * scale), k.hardMaxTokens);
-  if (requested !== undefined && Number.isFinite(requested)) budget = Math.min(budget, Math.floor(requested));
+  // Re-gate (binding recovery shapes): `max_tokens` may lower the role's budget or raise it up to the
+  // hard maximum (scaled for the provider), so a recovery pointer "same call, larger max_tokens" works.
+  if (requested !== undefined && Number.isFinite(requested)) budget = Math.min(Math.floor(requested), maxRequestTokens(config, provider));
   return Math.max(1, budget);
+}
+
+/** The largest budget a request may ask for: the hard maximum, scaled for the provider. */
+export function maxRequestTokens(config: Pick<BifConfig, 'knowledge'>, provider: ProviderId | undefined): number {
+  const k = knowledgeSettings(config);
+  const scale = provider ? (k.budgets.providers[provider] ?? 1) : 1;
+  return Math.max(1, Math.floor(k.hardMaxTokens * Math.min(1, scale)));
 }
 
 export type Fitted<T> = {
@@ -101,10 +110,9 @@ export function cursorKey(parts: unknown): string {
  * KS-8 ruling): the character inside that passage where the previous page stopped.
  */
 export function encodeCursor(state: { key: string; offset: number; pos?: number }): string {
-  const c: Record<string, unknown> = { v: 1, k: state.key, o: state.offset };
-  if (state.pos) c.p = state.pos;
-  c.c = cursorCheck(state.key, state.offset, state.pos ?? 0);
-  return Buffer.from(JSON.stringify(c)).toString('base64url');
+  // Re-gate: compact (`c1.<key>.<offset>[.<pos>].<check>`, ~32 characters) — a cursor is in every
+  // truncated page and in every recovery pointer, so its size is paid on the smallest pages.
+  return ['c1', state.key, state.offset, ...(state.pos ? [state.pos] : []), cursorCheck(state.key, state.offset, state.pos ?? 0)].join('.');
 }
 
 /**
@@ -118,17 +126,14 @@ function cursorCheck(key: string, offset: number, pos: number): string {
 
 /** Where a cursor points (item offset and position inside it); throws `InvalidCursorError` when malformed or from another request. */
 export function decodeCursorAt(cursor: string, key: string): { offset: number; pos: number } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-  } catch {
-    throw new InvalidCursorError();
-  }
-  const c = parsed as { v?: unknown; k?: unknown; o?: unknown; p?: unknown; c?: unknown } | null;
-  const index = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-  if (!c || c.v !== 1 || c.k !== key || !index(c.o) || (c.p !== undefined && !index(c.p))) throw new InvalidCursorError();
-  const at = { offset: c.o as number, pos: (c.p as number | undefined) ?? 0 };
-  if (c.c !== cursorCheck(key, at.offset, at.pos)) throw new InvalidCursorError();
+  const parts = typeof cursor === 'string' ? cursor.split('.') : [];
+  const index = (v: string | undefined) => (v !== undefined && /^(0|[1-9][0-9]{0,15})$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : undefined);
+  if ((parts.length !== 4 && parts.length !== 5) || parts[0] !== 'c1' || parts[1] !== key) throw new InvalidCursorError();
+  const offset = index(parts[2]);
+  const pos = parts.length === 5 ? index(parts[3]) : 0;
+  if (offset === undefined || pos === undefined || (parts.length === 5 && pos === 0)) throw new InvalidCursorError();
+  const at = { offset, pos };
+  if (parts.at(-1) !== cursorCheck(key, at.offset, at.pos)) throw new InvalidCursorError();
   return at;
 }
 

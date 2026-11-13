@@ -15,7 +15,7 @@ import type { Finding, RetrievalResultRef } from '../types.js';
 import { cursorKey } from './budget.js';
 import { getEntity } from './entities.js';
 import { factFreshness, recordStaleOutcome } from './facts.js';
-import { day, factVisibleSql, pageOf, usableOnly, visParams, artifactVisibleSql, type ReadEnv, type ReadOutput } from './readCommon.js';
+import { artifactVisibleSql, cursorAtItem, day, factVisibleSql, pageOf, usableOnly, visParams, type ReadEnv, type ReadOutput } from './readCommon.js';
 import { notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { servedLine } from './texts.js';
 import { factUsableSql } from './usable.js';
@@ -153,7 +153,13 @@ export function runListChanges(env: ReadEnv, view: KnowledgeScope, input: Change
 
   const header = { since, scope: mode, ...(input.runId ? { run_id: input.runId } : {}) };
   const notes = hide ? ['usable facts only: old and retracted claims are shown as ids'] : [];
-  const page = pageOf(changes.map((c) => c.item), header, budget, { key: cursorKey(cursorParts), notes, itemsKey: 'changes', ...(input.cursor ? { cursor: input.cursor } : {}) });
+  const key = cursorKey(cursorParts);
+  // Re-gate (binding): a change carries more than any one item's `expand` returns (dates, both claims,
+  // a reason), so a shortened change points at this same request, at it, with the budget that holds it.
+  const page = pageOf(changes.map((c) => c.item), header, budget, {
+    key, notes, itemsKey: 'changes', ...(input.cursor ? { cursor: input.cursor } : {}),
+    recover: (_c, i, need) => env.again?.(cursorAtItem(key, i), need),
+  });
   const shown = changes.slice(page.offset, page.offset + page.items.length);
   const out: ReadOutput = {
     data: { ...header, changes: page.items },

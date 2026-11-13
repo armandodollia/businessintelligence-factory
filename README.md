@@ -243,7 +243,11 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   with a `cursor` that never skips anything: a text page that ends mid-passage says `cut: true` and the
   next page continues from that character. A list item that does not fit the rest of a page starts the
   next page; only one too big for a whole page is shortened (`cut: true`, dropped list entries counted
-  in `omitted_entries`, `full: "expand <id> for the full item"`). Evidence text is redacted and served inside `<<<EVIDENCE … >>>` fences as
+  in `omitted_entries`) and carries `full`, the exact call that returns it whole (its own `expand`, its
+  passage, that line of `get_card` / `read_workspace`, or the same request at it with a larger
+  `max_tokens`, which may go up to the hard maximum). A value larger than the hard maximum is served
+  cut with `too_large` and its size. A fact's quotes are items of their own; a node card lists one line
+  per profile key; `expand` of a node id returns its card. Evidence text is redacted and served inside `<<<EVIDENCE … >>>` fences as
   untrusted data. Reviewers (and
   escalation agents) can only `expand` / `read_artifact` the ids of their task's review slice.
   Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,
