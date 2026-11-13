@@ -542,7 +542,18 @@ fallback for facts saved as `new`.
     exposed task T1 saves fact F; synthesis task T2 saves recommendation R citing F;
     T2's judgments, the persona feedback on R and the user's ratings of R and of that
     feedback are all excluded. Feedback events, request answers, interview turns,
-    retrieval events and fact observations follow the same rules.
+    retrieval events and fact observations follow the same rules (a fact-observation line
+    also follows the task rule: the line of a task whose outputs cite such an output is left
+    out like that task's decisions).
+  - **Fact lineage (final-gate ruling, binding).** `replaces` is a citation edge, followed
+    **forward only**: a later version of a fact inherits the exposed-output status of the
+    version it replaces, to any depth (F → F2 → F3: a judgment citing F3 is excluded when F
+    is an exposed task's output); an earlier version never inherits from a later one.
+    **Observations are outputs of their task**: a confirm, retract or replace observation
+    written by an exposed task is that task's output, so judgments that reference it are
+    excluded and so is its export line; but a confirm or retract by an exposed task does
+    **not** taint the fact it targets, which keeps its own status (and judgments citing that
+    fact stay exported).
   - **The bound.** Only citing excludes. A later run that is only *shown* one of those
     outputs (by search, a card, a briefing or `expand`) is not exposed by that, and its
     reads are exported. A task that cites such an output is not itself exposed: its

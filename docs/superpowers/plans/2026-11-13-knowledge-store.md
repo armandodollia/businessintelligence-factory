@@ -1261,3 +1261,17 @@ Binding shapes from the design thread; the choices made inside them (no migratio
   with its pointer; the response is the genuine "nothing fits, raise max_tokens" note (never false:
   tested). Lines of a node card are at most about 60 tokens, so in practice they are cut only near the
   floor; `expand` of a node never cuts them (its later pages carry only the id).
+
+## KS-8 final-gate ruling: exposure along a fact's lineage (binding)
+
+Recorded from the design thread (implemented in `scoring/export.ts`, tested in
+`test/core/knowledge/exportLineage.test.ts`; design §12 "Fact lineage"):
+
+- `replaces` is a citation edge for the export, followed forward only: a later version inherits
+  exposed-output status from the version it replaces, to any depth; an earlier version never inherits
+  from a later one.
+- Fact observations (confirm, retract, replace) are outputs of the task that wrote them: judgments that
+  reference an exposed task's observation are excluded, and so is the observation's export line.
+- A confirm or retract by an exposed task does not taint the fact it targets: the target keeps its
+  existing status.
+- Fact-observation export lines follow the same task rule as decisions (`taskCitesExposedOutput`).
