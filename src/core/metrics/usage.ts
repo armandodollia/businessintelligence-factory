@@ -212,3 +212,38 @@ export function resolveRunScope(
   if (!rr || rr.workspaceId !== run.workspaceId) return {};
   return rr.pipelineId ? { researchRunId: rr.id, pipelineId: rr.pipelineId } : { researchRunId: rr.id };
 }
+
+// --- learning loop WP-G: usage per agent run (metrics view) ------------------------------------
+export type RunUsage = UsageTotals & {
+  runId: string;
+  workspaceId: string;
+  role: string;
+  provider: string;
+  model: string;
+  promptVersion: string | null;
+  /** Earliest usage row of the run (time anchor when the run row is missing). */
+  firstAt: string;
+};
+
+/** Usage totals per agent run of the given workspaces (same sums and cost rule as `usageTotals`). */
+export function usageByRun(store: Store, workspaceIds: readonly string[]): RunUsage[] {
+  if (!workspaceIds.length) return [];
+  const rows = store.db
+    .prepare(
+      `SELECT run_id AS runId, MIN(workspace_id) AS workspaceId, MIN(role) AS role, MIN(provider) AS provider, MIN(model) AS model,
+              MIN(prompt_version) AS promptVersion, MIN(created_at) AS firstAt, ${SUMS}
+       FROM agent_usage WHERE workspace_id IN (${workspaceIds.map(() => '?').join(', ')}) GROUP BY run_id ORDER BY run_id`,
+    )
+    .all(...workspaceIds) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    runId: String(r.runId),
+    workspaceId: String(r.workspaceId),
+    role: String(r.role),
+    provider: String(r.provider),
+    model: String(r.model),
+    promptVersion: r.promptVersion === null || r.promptVersion === undefined ? null : String(r.promptVersion),
+    firstAt: String(r.firstAt),
+    ...totalsOf(r),
+  }));
+}
+// --- end WP-G -----------------------------------------------------------------------------------

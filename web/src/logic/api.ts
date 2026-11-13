@@ -301,3 +301,9 @@ export const wpfApi = {
   getExperiment: (id: string) => get<import('./types.js').ExperimentComparison>(`/api/experiments/${enc(id)}`),
 };
 // --- end WP-F ---------------------------------------------------------------------------------
+// --- learning loop WP-G: metrics view ------------------------------------------------------------
+export const metricsApi = {
+  /** `query`: from `metricsQuery` (scope, groupBy, bucket, since, until, includeExperiments). */
+  getMetrics: (wsId: string, query: string) => get<import('./metrics.js').MetricsReport>(`${ws(wsId)}/metrics${query ? `?${query}` : ''}`),
+};
+// --- end WP-G ------------------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import { Interview } from './Interview.js';
 import { Knowledge } from './Knowledge.js'; // knowledge store KS-7
 import { Lessons } from './Lessons.js'; // learning loop WP-E
 import { Experiments } from './Experiments.js'; // learning loop WP-F
+import { Metrics } from './Metrics.js'; // learning loop WP-G
 import { PendingRequests } from './PendingRequests.js';
 import { Personas } from './Personas.js';
 import { Research } from './Research.js';
@@ -101,5 +102,7 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Lessons wsId={wsId} />;
     case 'experiments': // learning loop WP-F
       return <Experiments wsId={wsId} />;
+    case 'metrics': // learning loop WP-G
+      return <Metrics wsId={wsId} />;
   }
 }
