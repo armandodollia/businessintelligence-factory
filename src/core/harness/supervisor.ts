@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { BifConfig } from '../config/schema.js';
 import { AbortError, type EventBus } from '../events.js';
@@ -95,8 +95,11 @@ export class Supervisor {
   private readonly browsers: Semaphore | null;
   private readonly backoff: Backoff;
   private readonly killGraceMs: number;
+  /** `deps.dataDir` made absolute: CLIs run in their own cwd, so every path we hand them must be absolute. */
+  private readonly dataDir: string;
 
   constructor(private readonly deps: SupervisorDeps) {
+    this.dataDir = resolvePath(deps.dataDir);
     this.workers = new Semaphore(deps.config.limits.maxParallelWorkers);
     const maxBrowser = deps.config.limits.maxBrowserRuns;
     this.browsers = maxBrowser > 0 ? new Semaphore(maxBrowser) : null;
@@ -124,7 +127,8 @@ export class Supervisor {
   }
 
   private async execute(opts: RunOptions): Promise<RunOutcome> {
-    const { store, events, tokens, dataDir } = this.deps;
+    const { store, events, tokens } = this.deps;
+    const dataDir = this.dataDir;
     const ctx: RunContext = { ...opts.ctx, agentRunId: newId('arun') };
     const token = tokens.issue(ctx);
     const all: RunEvent[] = [];
@@ -171,7 +175,8 @@ export class Supervisor {
     all: RunEvent[],
     setAttempt: (n: number) => void,
   ): Promise<RunOutcome> {
-    const { store, events, tokens, dataDir } = this.deps;
+    const { store, events, tokens } = this.deps;
+    const dataDir = this.dataDir;
     const runDir = join(dataDir, ctx.workspaceId, 'runs', ctx.agentRunId);
     const cwd = join(runDir, 'cwd');
     mkdirSync(cwd, { recursive: true });
@@ -380,6 +385,10 @@ export class Supervisor {
         detached: process.platform !== 'win32',
       });
       const pid = child.pid;
+      if (pid !== undefined) {
+        // Persisted so crash recovery (Task 9) can kill an orphaned process group.
+        this.deps.store.agentRuns.update(ctx.agentRunId, { pid });
+      }
 
       // Kill the CLI if it ignores SIGTERM; descendants are reaped after it exits (reapGroup).
       const kill = (why: string) => {
@@ -410,6 +419,9 @@ export class Supervisor {
         if (reason) emit({ t: 'error', message: reason, rateLimited: false });
         // Process exit code wins when non-zero; otherwise trust the stream (OpenCode exits 0 on error).
         let code = exitCode !== 0 ? exitCode : (lastDone ?? 0);
+        // A rate-limit error without a successful terminal event is a failed (retryable) attempt,
+        // even when the CLI exits 0.
+        if (rateLimited && lastDone !== 0 && code === 0) code = 1;
         if (reason && code === 0) code = 1;
         if (lastDone !== code) emit({ t: 'done', exitCode: code });
         const res: AttemptResult = { exitCode: code, rateLimited };
@@ -447,6 +459,8 @@ export class Supervisor {
       let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
       child.on('exit', (code, signal) => {
         exitInfo = { code, signal };
+        // The CLI is gone: stop the watchdog so reaping descendants can't flip a clean exit to failed.
+        dog.stop();
         const exitCode = code ?? (signal === 'SIGKILL' ? 137 : signal === 'SIGTERM' ? 143 : 1);
         void (async () => {
           // Leftovers in the group (MCP servers, browsers) must be gone before the run resolves and

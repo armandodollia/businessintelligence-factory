@@ -90,6 +90,11 @@ export interface AgentRun {
   endedAt?: string;
   /** Prompt version the run was started with (migration 2). */
   promptVersion?: string;
+  /**
+   * PID of the CLI subprocess (latest attempt), which is also its process-group id since CLIs are
+   * spawned detached (migration 4). Absent for in-process fake runs.
+   */
+  pid?: number;
 }
 
 export interface Decision {

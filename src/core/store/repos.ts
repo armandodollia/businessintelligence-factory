@@ -236,7 +236,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', taskId: 'text', role: 'text', model: 'json', token: 'text',
-      status: 'text', exitCode: 'int', startedAt: 'text', endedAt: 'text', promptVersion: 'text',
+      status: 'text', exitCode: 'int', startedAt: 'text', endedAt: 'text', promptVersion: 'text', pid: 'int',
     },
   } satisfies TableSpec<AgentRun>,
   decisions: {

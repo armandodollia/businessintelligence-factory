@@ -225,4 +225,8 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX user_requests_status ON user_requests (status);
   CREATE INDEX user_requests_task ON user_requests (task_id);
   `,
+  // 4: Section B — CLI process id (also its process-group id) for orphan cleanup after a crash.
+  `
+  ALTER TABLE agent_runs ADD COLUMN pid INTEGER;
+  `,
 ];

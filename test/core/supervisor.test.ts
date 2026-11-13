@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { defaultConfig, type BifConfig } from '../../src/core/config/schema.js';
 import { EventBus, type BusEvent } from '../../src/core/events.js';
@@ -335,6 +335,56 @@ describe('Supervisor fix round 1', () => {
     const res = await sup.run(cli({ lines: [...CLAUDE_FIXTURE, CLAUDE_FIXTURE.at(-1)!] }));
     expect(res.events.at(-1)!.t).toBe('done');
     expect(res.events.filter((e) => e.t === 'done').length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Supervisor post-cap fixes', () => {
+  it('relative dataDir: paths handed to the CLI are absolute and exist', async () => {
+    const { dir, store, config, tokens, events, handle } = setup();
+    const rel = relative(process.cwd(), dir);
+    expect(isAbsolute(rel)).toBe(false);
+    const sup = new Supervisor({ store, config, tokens, events, handle, dataDir: rel, mcpBaseUrl: 'http://x' });
+    const res = await sup.run(cli({ lines: CLAUDE_FIXTURE }));
+    expect(res.status).toBe('done');
+    const cwd = join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd');
+    const argv = JSON.parse(readFileSync(join(cwd, 'argv.json'), 'utf8')) as string[];
+    const mcpPath = argv[argv.indexOf('--mcp-config') + 1]!;
+    expect(isAbsolute(mcpPath)).toBe(true);
+    expect(readFileSync(mcpPath, 'utf8')).toContain('"bif"');
+    expect(mcpPath).toBe(join(cwd, '.bif-mcp.json'));
+  });
+
+  it('rate-limit error then exit 0 without a successful done → failed attempt, retried', async () => {
+    const { dir, sup } = setup();
+    const counterFile = join(dir, 'count');
+    const rejected = JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } });
+    const res = await sup.run(cli({ counterFile, attempts: [{ lines: [rejected], exitCode: 0 }, { lines: CLAUDE_FIXTURE }] }));
+    expect(readFileSync(counterFile, 'utf8')).toBe('2');
+    expect(res).toMatchObject({ status: 'done', exitCode: 0, attempts: 2 });
+    expect(res.events.filter((e) => e.t === 'done')).toEqual([{ t: 'done', exitCode: 1 }, { t: 'done', exitCode: 0 }]);
+
+    // a rate-limit blip followed by a successful result is still success
+    const ok = await sup.run(cli({ lines: [rejected, ...CLAUDE_FIXTURE] }));
+    expect(ok).toMatchObject({ status: 'done', attempts: 1 });
+  });
+
+  it('records the CLI pid on the AgentRun', async () => {
+    const { store, sup } = setup();
+    const res = await sup.run(cli({ lines: CLAUDE_FIXTURE }));
+    const run = store.agentRuns.get(res.agentRunId)!;
+    expect(typeof run.pid).toBe('number');
+    expect(run.pid).toBeGreaterThan(0);
+    const fake = await sup.run({ ctx: baseCtx, prompt: 'p', systemPrompt: 's', needsBrowser: false, fake: async () => {} });
+    expect(store.agentRuns.get(fake.agentRunId)!.pid).toBeUndefined();
+  });
+
+  it('a clean exit is not flipped to failed while descendants are reaped', async () => {
+    // idle timeout shorter than the reap grace: the watchdog must already be stopped
+    const { dir, store, config, tokens, events, handle } = setup((c) => (c.limits.idleTimeoutMs = 300)); // > fake-cli's 200 ms start-up delay
+    const sup = new Supervisor({ store, config, tokens, events, handle, dataDir: dir, mcpBaseUrl: 'http://x', killGraceMs: 900 });
+    const res = await sup.run(cli({ lines: CLAUDE_FIXTURE, stubbornChild: true }));
+    expect(res).toMatchObject({ status: 'done', exitCode: 0 });
+    expect(res.reason).toBeUndefined();
   });
 });
 
