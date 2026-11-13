@@ -70,6 +70,8 @@ export interface CrossCuttingGroup {
   key: string;
   title: string;
   sourceWorkspaceIds: string[];
+  /** Top-level children of the queried workspace the sources roll up to (always ≥ 2). */
+  childWorkspaceIds: string[];
   symptoms: Sourced<Symptom>[];
 }
 
@@ -122,6 +124,16 @@ export interface Task {
   status: 'queued' | 'running' | 'reviewing' | 'waiting_user' | 'verified' | 'unverified' | 'failed';
   round: number;
   result?: unknown;
+  /**
+   * Review-loop step to run next / being run (migration 7): `work` (initial deliverable), `review`
+   * (deliverable of `round` is complete), `revise` (answering `reviewIssues` for `round`). Lets a
+   * resumed task continue exactly where it stopped.
+   */
+  step?: 'work' | 'review' | 'revise';
+  /** Last round whose deliverable was fully submitted. */
+  submittedRound?: number;
+  /** Issues of the last review, handed to the revise step (also after a restart). */
+  reviewIssues?: Array<{ id: string; class: 'blocking' | 'substantive' | 'nit' | 'scope_expansion'; description: string; evidence?: string[] }>;
   createdAt: string;
 }
 
@@ -152,6 +164,8 @@ export interface AgentRun {
    * spawned detached (migration 4). Absent for in-process fake runs.
    */
   pid?: number;
+  /** `ps -o lstart=` of `pid` at spawn, used to verify the process before killing it after a crash (migration 7). */
+  pidStartedAt?: string;
 }
 
 export interface Decision {

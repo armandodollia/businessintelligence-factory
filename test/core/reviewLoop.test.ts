@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadPrompt, promptVersion } from '../../src/core/prompts/index.js';
 import { MALFORMED_REVIEW_ISSUE, runTaskWithReview } from '../../src/core/research/reviewLoop.js';
 import type { Store } from '../../src/core/store/db.js';
-import { addTask, researchSetup, review, revise, submitWork } from './helpers/research.js';
+import { addTask, researchSetup, review, revise, submitWork, tick } from './helpers/research.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -255,5 +255,120 @@ describe('finding idempotency (rate-limit retries replay tool calls)', () => {
     const findings = s.store.findings.list({ taskId: task.id });
     expect(findings).toHaveLength(1);
     expect(findings[0]!.evidence).toHaveLength(2);
+  });
+});
+
+describe('fix round 1', () => {
+  it('crash during round-2 revise -> resume runs revise (same issues), not review', async () => {
+    const ac = new AbortController();
+    let reviews = 0;
+    const s = researchSetup(opened, {
+      pick: (r) => {
+        if (r.kind === 'work') return submitWork();
+        if (r.kind === 'review') {
+          reviews++;
+          return review(4, [{ class: 'substantive', description: 'MISSING_PRICING' }]);
+        }
+        // The server dies in the middle of the revision run.
+        return async () => {
+          ac.abort();
+          await new Promise<void>(() => {});
+        };
+      },
+    });
+    s.deps.signal = ac.signal;
+    const task = addTask(s.store);
+    await expect(runTaskWithReview(task, s.deps)).rejects.toThrow(/cancel/);
+    const stopped = s.store.tasks.get(task.id)!;
+    expect(stopped).toMatchObject({ step: 'revise', round: 2, submittedRound: 1 });
+    expect(stopped.reviewIssues).toEqual([{ id: 'I1', class: 'substantive', description: 'MISSING_PRICING' }]);
+
+    // Restart: same store, no abort.
+    delete s.deps.signal;
+    const before = s.requests.length;
+    s.state.pick = (r) => (r.kind === 'revise' ? revise('fix')(r) : review(9));
+    const out = await runTaskWithReview(stopped, s.deps);
+    const after = s.requests.slice(before);
+    expect(after.map((r) => r.kind)).toEqual(['revise', 'review']);
+    expect(after[0]!.round).toBe(2);
+    expect(after[0]!.prompt).toContain('[I1] (substantive) MISSING_PRICING');
+    expect(out).toMatchObject({ status: 'verified', round: 2, step: 'review', submittedRound: 2 });
+    expect(reviews).toBe(1);
+  });
+
+  it('revise with zero responses is not accepted', async () => {
+    const s = researchSetup(opened, {
+      pick: (r) =>
+        r.kind === 'work'
+          ? submitWork()
+          : r.kind === 'review'
+            ? review(5, [{ class: 'blocking', description: 'wrong' }, { class: 'nit', description: 'typo' }])
+            : async (t) => {
+                await t.call('respond_to_review', { issue_id: 'I1', action: 'fix', reason: 'fixed' }); // I2 unanswered
+                await t.call('submit_result', { summary: 'revised' });
+              },
+    });
+    const task = addTask(s.store);
+    const out = await runTaskWithReview(task, s.deps);
+    expect(out.status).toBe('failed');
+    expect(s.requests.map((r) => r.kind)).toEqual(['work', 'review', 'revise', 'revise']);
+    const reasons = s.store.decisions
+      .list({ workspaceId: 'ws_a' })
+      .map((d) => d.payload as { event?: string; reason?: string })
+      .filter((p) => p.event === 'worker_run_failed')
+      .map((p) => p.reason);
+    expect(reasons).toEqual([expect.stringMatching(/respond_to_review for issue\(s\) I2/), expect.stringMatching(/I2/)]);
+  });
+
+  it('revise retry that answers every issue is accepted', async () => {
+    let revises = 0;
+    let reviews = 0;
+    const s = researchSetup(opened, {
+      pick: (r) => {
+        if (r.kind === 'work') return submitWork();
+        if (r.kind === 'review') return review(++reviews === 1 ? 5 : 9, [{ class: 'blocking', description: 'wrong' }]);
+        return ++revises === 1 ? async (t) => void (await t.call('submit_result', { summary: 'no responses' })) : revise('fix')(r);
+      },
+    });
+    expect((await runTaskWithReview(addTask(s.store), s.deps)).status).toBe('verified');
+  });
+
+  it('reviewer submits 9 then crashes -> not verified that round', async () => {
+    const s = researchSetup(opened, {
+      config: (c) => (c.loop.maxRounds = 1),
+      pick: (r) =>
+        r.kind === 'work'
+          ? submitWork()
+          : async (t) => {
+              await t.call('submit_review', { score: 9, issues: [] });
+              throw new Error('reviewer CLI crashed');
+            },
+    });
+    const task = addTask(s.store);
+    expect((await runTaskWithReview(task, s.deps)).status).toBe('unverified');
+    const synthetic = s.store.decisions
+      .list({ kind: 'review' })
+      .find((d) => (d.payload as { event?: string }).event === 'synthetic_review');
+    expect(synthetic?.payload).toMatchObject({ score: 0, runStatus: 'failed' });
+  });
+
+  it('maxParallelWorkers=1 serializes synthesis runs', async () => {
+    const s = researchSetup(opened, { config: (c) => (c.limits.maxParallelWorkers = 1) });
+    let active = 0;
+    let peak = 0;
+    const run = () =>
+      s.supervisor.run({
+        ctx: { workspaceId: 'ws_a', role: 'synthesizer', model: { provider: 'claude', model: 'opus' }, promptVersion: 'p' },
+        prompt: '', systemPrompt: '', needsBrowser: false,
+        fake: async () => {
+          active++;
+          peak = Math.max(peak, active);
+          await tick(30);
+          active--;
+        },
+      });
+    const outs = await Promise.all([run(), run(), run()]);
+    expect(outs.every((o) => o.status === 'done')).toBe(true);
+    expect(peak).toBe(1);
   });
 });

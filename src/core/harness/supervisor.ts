@@ -10,13 +10,14 @@ import type { AgentRun, Role } from '../types.js';
 import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
 import { browserMcpServers } from './browser.js';
+import { processStartTime } from './procinfo.js';
 import { Semaphore } from './semaphore.js';
 import type { RunContext, TokenRegistry } from './tokens.js';
 import type { HandleTool } from './tools/handlers.js';
 import type { ToolName } from './tools/registry.js';
 
 /** Roles that count against `limits.maxParallelWorkers`. */
-const LIMITED_ROLES: ReadonlySet<Role> = new Set(['worker', 'reviewer', 'persona']);
+const LIMITED_ROLES: ReadonlySet<Role> = new Set(['worker', 'reviewer', 'persona', 'synthesizer']);
 
 export type Backoff = { baseMs: number; maxMs: number; maxAttempts: number };
 /** Global Constraints: base 30 s, max 15 min, max 6 attempts. */
@@ -388,7 +389,8 @@ export class Supervisor {
       const pid = child.pid;
       if (pid !== undefined) {
         // Persisted so crash recovery (Task 9) can kill an orphaned process group.
-        this.deps.store.agentRuns.update(ctx.agentRunId, { pid });
+        // Start time identifies this process later (crash recovery verifies it before SIGKILL).
+        this.deps.store.agentRuns.update(ctx.agentRunId, { pid, pidStartedAt: processStartTime(pid) });
       }
 
       // Kill the CLI if it ignores SIGTERM; descendants are reaped after it exits (reapGroup).

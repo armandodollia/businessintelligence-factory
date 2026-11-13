@@ -8,6 +8,7 @@ import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
 import type { Decision, Finding, Task, UserRequest } from '../../types.js';
 import type { RunContext } from '../tokens.js';
+import { findReplay } from './idempotency.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -300,6 +301,10 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     },
 
     async respond_to_review(ctx, input: ToolInput<'respond_to_review'>) {
+      // Idempotent per (run, issue): a replayed answer (rate-limit retry) is not logged twice.
+      if (findReplay(store, ctx, 'respond_to_review', 'run', (p) => p.issueId === input.issue_id)) {
+        return okData({ recorded: true, duplicate: true });
+      }
       const kind = input.action === 'pushback' ? 'pushback' : 'decision';
       const d = recordDecision(
         ctx,

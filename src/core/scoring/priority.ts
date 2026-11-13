@@ -1,5 +1,6 @@
 import type { BifConfig } from '../config/schema.js';
 import type { ExtraToolHandler, ToolResult } from '../harness/tools/handlers.js';
+import { findReplay, titleKey } from '../harness/tools/idempotency.js';
 import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
@@ -112,6 +113,20 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
       if (missing.length) return fail(`finding_ids reference unknown findings (not in this workspace): ${missing.join(', ')}`);
       const bad = checkRecommendationCriteria(input.criteria);
       if (bad) return fail(bad);
+      // Idempotent per (task, title): a replay (or a revision re-saving it) updates the existing
+      // recommendation instead of creating a duplicate.
+      const replay = findReplay(store, ctx, 'save_recommendation', 'task', (p) => {
+        const prior = store.recommendations.get(String(p.recommendationId));
+        return !!prior && titleKey(prior.title) === titleKey(input.title);
+      });
+      if (replay) {
+        const id = (replay.payload as { recommendationId: string }).recommendationId;
+        const prior = store.recommendations.get(id)!;
+        const next = { ...prior, summary: input.summary, criteria: input.criteria, findingIds: input.finding_ids };
+        const priority = computePriority(next, config.scoring);
+        store.recommendations.update(id, { summary: next.summary, criteria: next.criteria, findingIds: next.findingIds, priority });
+        return { ok: true, data: { recommendationId: id, priority, duplicate: true } };
+      }
       const rec: Recommendation = {
         id: newId('rec'),
         workspaceId: ctx.workspaceId,

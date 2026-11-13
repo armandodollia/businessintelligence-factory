@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { MIGRATIONS } from './migrations.js';
+import { redactSecrets } from './redact.js';
 import { createRepos, type Repos } from './repos.js';
 
 export type Store = Repos & {
@@ -53,8 +54,13 @@ export function openStore(dbPath: string): Store {
     throw e;
   }
   let depth = 0;
+  const repos = createRepos(db);
+  // Backstop for every writer (dispatcher, harness, other sections' handlers): identity passwords
+  // never reach the decision log. Callers should still redact before emitting bus events.
+  const insertDecision = repos.decisions.insert.bind(repos.decisions);
+  repos.decisions.insert = (d) => insertDecision({ ...d, payload: redactSecrets(repos, d.workspaceId, d.payload) });
   return {
-    ...createRepos(db),
+    ...repos,
     db,
     schemaVersion: () => userVersion(db),
     transaction<R>(fn: () => R): R {

@@ -2,6 +2,7 @@ import type { BifConfig } from '../config/schema.js';
 import type { ToolClient } from '../harness/adapter.js';
 import type { RunOptions, Supervisor } from '../harness/supervisor.js';
 import type { ExtraToolHandler, ToolResult } from '../harness/tools/handlers.js';
+import { findReplay, titleKey } from '../harness/tools/idempotency.js';
 import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import { listUploads } from '../internal/uploads.js';
 import { loadPrompt } from '../prompts/index.js';
@@ -212,6 +213,12 @@ export function interviewToolHandlers(): Partial<Record<ToolName, ExtraToolHandl
       if (!v.ok) return fail(v.error);
       const missing = artifacts.exists(ctx.workspaceId, input.evidence);
       if (missing.length) return fail(`evidence references unknown artifacts (not in this workspace): ${missing.join(', ')}`);
+      // Idempotent per (run, kind, title): a replayed call returns the symptom already saved.
+      const replay = findReplay(store, ctx, 'save_symptom', 'run', (p) => {
+        const prior = store.symptoms.get(String(p.symptomId));
+        return !!prior && prior.kind === input.kind && titleKey(prior.title) === titleKey(input.title);
+      });
+      if (replay) return { ok: true, data: { symptomId: (replay.payload as { symptomId: string }).symptomId, duplicate: true } };
       const symptom: Symptom = {
         id: newId('sym'),
         workspaceId: ctx.workspaceId,

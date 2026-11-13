@@ -217,6 +217,31 @@ describe('mapping', () => {
     expect(store.ratings.list({ targetId: proposal.decisionId! })).toHaveLength(1);
   });
 
+  it('propose_business_unit redacts identity passwords before logging', async () => {
+    const { store, handle } = setup();
+    const { company } = tree(store);
+    const run = ctx(company.id);
+    // Seed an identity directly (no network): its password must never reach a Decision.
+    store.identities.insert({
+      id: 'idn_1', workspaceId: company.id, site: 'acme.com', name: 'Alex Morgan', email: 'a@x.test',
+      password: 'hunter2-SECRET-pw', emailPassword: 'inbox-SECRET-pw', createdAt: '',
+    });
+    const r = await handle(run, 'propose_business_unit', {
+      name: 'Admin console', description: 'login hunter2-SECRET-pw', level: 'slice', audiences: ['internal'],
+      reasoning: 'Logged in with hunter2-SECRET-pw and checked inbox-SECRET-pw',
+    });
+    if (!r.ok) throw new Error(r.error);
+    const all = JSON.stringify([store.decisions.list({ workspaceId: company.id }), store.unitProposals.list()]);
+    expect(all).not.toContain('SECRET');
+    expect(all).toContain('[redacted]');
+    // Store-level backstop: any writer's Decision payload is redacted.
+    store.decisions.insert({
+      id: 'dec_raw', workspaceId: company.id, agentRunId: 'arun_x', role: 'worker', model: { provider: 'claude', model: 'sonnet' },
+      kind: 'decision', payload: { note: ['pw hunter2-SECRET-pw'] }, refs: [], promptVersion: 'p', createdAt: '',
+    });
+    expect(store.decisions.get('dec_raw')!.payload).toEqual({ note: ['pw [redacted]'] });
+  });
+
   it('propose_business_unit rejects evidence from another tree', async () => {
     const { store, artifacts, handle } = setup();
     const t = tree(store);
@@ -299,6 +324,24 @@ describe('roll-up', () => {
     expect(groups[0]!.key).toBe('hiring slow');
     expect(groups[0]!.sourceWorkspaceIds.sort()).toEqual([t.division.id, t.sibling.id, t.product.id].sort());
     expect(groups[0]!.symptoms.every((s) => s.kind === 'symptom')).toBe(true);
+    expect(groups[0]!.childWorkspaceIds.sort()).toEqual([t.division.id, t.sibling.id].sort());
+  });
+
+  it('crossCuttingSymptoms counts distinct top-level children, not descendants', () => {
+    const { store } = setup();
+    const t = tree(store);
+    // Payments and its own product share a symptom: one branch only -> not company-wide.
+    store.symptoms.insert(symptom(t.division.id, 'Churn rising'));
+    store.symptoms.insert(symptom(t.product.id, 'churn rising'));
+    expect(crossCuttingSymptoms(store, t.company.id)).toEqual([]);
+    // Seen from Payments, the product is its only child: still one branch.
+    expect(crossCuttingSymptoms(store, t.division.id)).toEqual([]);
+    // A grandchild in the other branch counts for that branch.
+    const lendingTeam = createWorkspace(store, { name: 'Loans team', sector: 'saas', parentWorkspaceId: t.sibling.id });
+    store.symptoms.insert(symptom(lendingTeam.id, 'Churn rising'));
+    const [g] = crossCuttingSymptoms(store, t.company.id);
+    expect(g!.childWorkspaceIds.sort()).toEqual([t.division.id, t.sibling.id].sort());
+    expect(g!.sourceWorkspaceIds.sort()).toEqual([t.division.id, t.product.id, lendingTeam.id].sort());
   });
 });
 

@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FakeScript } from '../../src/core/harness/adapter.js';
 import { resolveUserRequest } from '../../src/core/harness/tools/handlers.js';
 import type { RunContext } from '../../src/core/harness/tokens.js';
+import { processStartTime } from '../../src/core/harness/procinfo.js';
 import { recordHarnessDecision } from '../../src/core/research/deps.js';
 import {
+  killOrphanGroup,
   orchestratorPrompt,
   resumeInterrupted,
   runPipeline,
@@ -141,7 +143,48 @@ describe('orchestrator phases', () => {
     expect(s.store.agentRuns.list({ taskId: task!.id }).map((r) => r.status)).toEqual(['failed', 'failed']);
     const followUp = s.requests.filter((r) => r.kind === 'orchestrate')[1]!.prompt;
     expect(followUp).toContain(task!.id);
-    expect(followUp).toMatch(/FAILED: .*CLI crashed: exit 2/);
+    expect(followUp).toMatch(/FAILED: all attempts failed/);
+    expect(followUp).toMatch(/run history: work r1 attempt 1 failed \(run failed \(exit 1; CLI crashed: exit 2\)\) → retried; work r1 attempt 2 failed .* → gave up/);
+  });
+
+  it('retry history is reported also when the retry succeeded, and carries into the next phase', async () => {
+    let works = 0;
+    const s = setup({
+      pick: (r) => {
+        if (r.kind === 'orchestrate') {
+          const phase = r.prompt.match(/## Phase: (\w+)/)![1];
+          return phase === 'competitor_discovery' && r.round === 1
+            ? propose([spec('discover_competitors'), spec('news_scan')])
+            : nothing;
+        }
+        if (r.kind === 'work') {
+          // discover_competitors fails twice; news_scan fails once and then succeeds
+          works++;
+          if (r.task!.type === 'discover_competitors' || r.attempt === 1) {
+            return async () => {
+              throw new Error(`boom ${r.task!.type} ${r.attempt}`);
+            };
+          }
+          return submitWork({ summary: 'ok' }, `claim ${r.task!.id}`);
+        }
+        return review(9);
+      },
+    });
+    const rr = await startPhase('ws_a', 'competitor_discovery', s.deps);
+    const [failed, retried] = s.store.tasks.list({ runId: rr.id });
+    expect([failed!.status, retried!.status]).toEqual(['failed', 'verified']);
+    const followUp = s.requests.filter((r) => r.kind === 'orchestrate')[1]!.prompt;
+    expect(followUp).toMatch(new RegExp(`\\[${retried!.id}\\] news_scan → verified[\\s\\S]*run history: work r1 attempt 1 failed \\(.*boom news_scan 1.*\\) → retried; work r1 attempt 2 succeeded`));
+
+    // Next phase: the orchestrator hears about both tasks.
+    await startPhase('ws_a', 'deep_dives', s.deps);
+    const next = s.requests.filter((r) => r.kind === 'orchestrate').at(-1)!.prompt;
+    expect(next).toMatch(/## Phase: deep_dives/);
+    expect(next).toContain(`Problems in the previous phase (competitor_discovery, ${rr.id})`);
+    expect(next).toContain(`[${failed!.id}] discover_competitors → failed`);
+    expect(next).toContain(`[${retried!.id}] news_scan → verified`);
+    expect(next).toContain('boom discover_competitors 2');
+    expect(works).toBe(4);
   });
 
   it('orchestrator context has profile, symptoms, findings, personas, goal, types and models', () => {
@@ -232,7 +275,7 @@ describe('resumeInterrupted', () => {
       model: { provider: 'claude', model: 'sonnet' }, promptVersion: 'pv',
     };
     const token = s1.tokens.issue(ctx);
-    s1.store.agentRuns.update(ctx.agentRunId, { pid: child.pid! });
+    s1.store.agentRuns.update(ctx.agentRunId, { pid: child.pid!, pidStartedAt: processStartTime(child.pid!)! });
     void s1.handle(ctx, 'request_user_action', { kind: 'register', site: 'acme.com', instructions: 'Please register' });
     await tick();
     expect(s1.store.tasks.get(task.id)!.status).toBe('waiting_user');
@@ -264,6 +307,19 @@ describe('resumeInterrupted', () => {
     expect(s2.store.tasks.get(task.id)).toMatchObject({ status: 'verified', round: 1 });
     const work = s2.requests.find((r) => r.kind === 'work')!;
     expect(work.prompt).toContain('registered as Alex');
+  });
+
+  it('killOrphanGroup verifies the process start time before killing', async () => {
+    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    const exited = new Promise<NodeJS.Signals | null>((r) => child.on('exit', (_c, sig) => r(sig)));
+    const started = processStartTime(child.pid!)!;
+    expect(started).toBeTruthy();
+    expect(killOrphanGroup(child.pid!, 'Mon Jan  1 00:00:00 2001')).toBe(false); // pid reused / before boot
+    expect(killOrphanGroup(child.pid!, undefined)).toBe(false); // unverifiable
+    expect(killOrphanGroup(child.pid!, started.replace(/\d\d:\d\d:\d\d/, '00:00:00'))).toBe(false); // other process
+    expect(child.exitCode).toBeNull();
+    expect(killOrphanGroup(child.pid!, started)).toBe(true);
+    expect(await exited).toBe('SIGKILL');
   });
 
   it('re-queues running/reviewing tasks with the same round and continues the phase', async () => {
