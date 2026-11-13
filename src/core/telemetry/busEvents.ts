@@ -12,7 +12,12 @@ import { redactSecrets } from '../store/redact.js';
  */
 
 /** Bus event types written to `bus_events`. */
-export const PERSISTED_BUS_EVENT_TYPES = ['tool_call', 'run_status', 'task_status', 'user_request', 'user_request_resolved'] as const;
+export const PERSISTED_BUS_EVENT_TYPES = [
+  'tool_call', 'run_status', 'task_status', 'user_request', 'user_request_resolved',
+  // knowledge store KS-6 (design §13): a knowledge read (the retrieval row id ONLY — the payload lives in
+  // `retrieval_events`, never copied here) and a blocked knowledge read (also a `policy_events` row).
+  'retrieval', 'policy_blocked',
+] as const;
 export type PersistedBusEventType = (typeof PERSISTED_BUS_EVENT_TYPES)[number];
 
 export interface StoredBusEvent {
@@ -48,6 +53,23 @@ function slim(e: BusEvent): { payload: Record<string, unknown>; agentRunId?: str
       if (r.taskId !== undefined) out.taskId = r.taskId;
       return out;
     }
+    // --- knowledge store KS-6 ---
+    case 'retrieval': {
+      // Ids only: the retrieval's query, results and tokens stay in `retrieval_events` (no second copy).
+      const out: ReturnType<typeof slim> = {
+        payload: { type: e.type, workspaceId: e.workspaceId, retrievalEventId: e.retrievalEventId },
+      };
+      if (e.agentRunId !== undefined) out.agentRunId = e.agentRunId;
+      if (e.taskId !== undefined) out.taskId = e.taskId;
+      return out;
+    }
+    case 'policy_blocked': {
+      const out: ReturnType<typeof slim> = { payload: { ...e } };
+      if (e.agentRunId !== undefined) out.agentRunId = e.agentRunId;
+      if (e.taskId !== undefined) out.taskId = e.taskId;
+      return out;
+    }
+    // --- end KS-6 ---
     default:
       return undefined;
   }

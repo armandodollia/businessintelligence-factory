@@ -23,6 +23,8 @@ import { findingEntity, linkFindingRelations, peekFindingEntity, relinkFinding }
 // knowledge store KS-4: read tools
 import { knowledgeRead, type KnowledgeReadInput, type KnowledgeReadTool } from '../../knowledge/tools.js';
 import type { ReviewSlice } from '../../knowledge/readCommon.js';
+// knowledge store KS-6: use linkage (retrieval_uses) after every successful citing save
+import { recordToolUses } from '../../knowledge/uses.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -484,9 +486,19 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     const parsed = toolInputSchemas[name].safeParse(input ?? {});
     if (!parsed.success) return announce(fail(`invalid input for ${name}: ${formatZodError(parsed.error)}`));
 
+    // --- knowledge store KS-6: a successful save that cites ids marks the ids this run was shown as used.
+    const tracked = (r: ToolResult): ToolResult => {
+      try {
+        recordToolUses(store, ctx, name, parsed.data, r);
+      } catch (err) {
+        console.warn(`[bif] recording retrieval uses failed: ${(err as Error).message}`);
+      }
+      return r;
+    };
+    // --- end KS-6 ---
     try {
       const builtin = builtins[name];
-      if (builtin) return announce(await builtin(ctx, parsed.data as never, opts));
+      if (builtin) return announce(tracked(await builtin(ctx, parsed.data as never, opts)));
 
       const extra = deps.extraHandlers?.[name];
       if (!extra) return announce(fail(`tool '${name}' is not available yet in this build`));
@@ -521,7 +533,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         const d = recordDecision(ctx, kind, { tool: name, input: parsed.data, result: result.data }, ctx.taskId ? [ctx.taskId] : []);
         events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
       }
-      return announce(result);
+      return announce(tracked(result)); // KS-6
     } catch (err) {
       return announce(fail(`${name} failed: ${(err as Error).message}`));
     }
