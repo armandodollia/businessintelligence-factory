@@ -218,15 +218,18 @@ describe('profile uploads key', () => {
 });
 
 describe('orchestrator upload context', () => {
-  it('lists uploads via listUploads (id + title), including sha-deduped ones', () => {
+  // KS-5 (design-thread ruling on §12): ids with type, size and date — no titles (upload-derived text).
+  it('lists uploads by id with type, size and date (no title), including sha-deduped ones', () => {
     const t = setup();
     const doc = t.artifacts.save({ workspaceId: 'ws_a', kind: 'document', mime: 'text/plain', bytes: 'board deck' });
     uploadInternal('ws_a', { name: 'board-deck.txt', bytes: new TextEncoder().encode('board deck'), mime: 'text/plain' }, t);
     const up = uploadInternal('ws_a', { name: 'kpis.csv', bytes: new TextEncoder().encode('a,b'), mime: 'text/csv' }, t);
-    const ctx = workspaceContext(t.store, t.store.workspaces.get('ws_a')!).join('\n');
+    const ctx = workspaceContext(t.store, t.store.workspaces.get('ws_a')!, t.dir).join('\n');
     const section = ctx.slice(ctx.indexOf('## Internal uploads'));
-    expect(section).toContain(`[${doc.id}]`);
-    expect(section).toContain(`[${up.id}] kpis.csv`);
+    expect(section).toContain(`- ${doc.id} (text, 10 B, uploaded `);
+    expect(section).toContain(`- ${up.id} (spreadsheet, 3 B, uploaded ${up.capturedAt.slice(0, 10)})`);
+    expect(section).not.toContain('kpis.csv');
+    expect(section).not.toContain('board-deck');
     expect(section).not.toContain('a,b');
   });
 });

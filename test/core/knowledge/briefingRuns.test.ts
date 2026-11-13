@@ -79,6 +79,41 @@ describe('briefings are prompt reads, logged before the run starts', () => {
   });
 });
 
+// Design-thread ruling on §12 (after KS-5): prompts list uploads as metadata (id, type, size, date),
+// never their titles. Listing them is not a read; opening one is.
+describe('uploads in prompts are metadata only', () => {
+  async function orchestratorRun(open: boolean) {
+    const env = setup();
+    const up = uploadInternal('ws_a', { name: 'secret-board-plan.csv', bytes: new TextEncoder().encode('Renewals fell 12% in Q3'), mime: 'text/csv' }, env);
+    await ingestorFor(env).idle();
+    env.state.pick = (r): FakeScript | undefined =>
+      r.kind === 'orchestrate' && r.round === 1
+        ? async (tools) => {
+            if (open) await tools.call('read_artifact', { artifact_id: up.id, mode: 'text' });
+          }
+        : undefined;
+    await startPhase('ws_a', 'deep_dives', env.deps);
+    const run = env.store.agentRuns.list({ role: 'orchestrator' })[0]!;
+    return { env, up, run, prompt: env.requests.find((r) => r.kind === 'orchestrate')!.prompt };
+  }
+
+  it('an orchestrator run that opens nothing is not upload-exposed; the prompt has no title', async () => {
+    const { env, up, run, prompt } = await orchestratorRun(false);
+    expect(prompt).toContain(`- ${up.id} (spreadsheet, 23 B, uploaded ${up.capturedAt.slice(0, 10)})`);
+    expect(prompt).toContain('Use `expand` or `read_artifact` with an upload id');
+    expect(prompt).not.toContain('secret-board-plan');
+    expect(prompt).not.toContain('Renewals fell');
+    expect(rows(env, run.id).every((r) => !r.uploadDerived && !r.resultIds.some((x) => x.id === up.id))).toBe(true);
+    expect(runIsUploadExposed(env.store, run.id)).toBe(false);
+  });
+
+  it('opening the upload with read_artifact makes the run upload-exposed', async () => {
+    const { env, run } = await orchestratorRun(true);
+    expect(rows(env, run.id).some((r) => r.tool === 'read_artifact' && r.uploadDerived)).toBe(true);
+    expect(runIsUploadExposed(env.store, run.id)).toBe(true);
+  });
+});
+
 describe('propose_tasks recheck_fact_ids', () => {
   it('validated in the tree, stored on the proposal, shown to the worker with claims, and logged on its run', async () => {
     const env = setup();

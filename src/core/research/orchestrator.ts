@@ -5,7 +5,7 @@ import { isOurProcessGroup } from '../harness/procinfo.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
 import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
-import { listUploads } from '../internal/uploads.js';
+import { uploadPromptLines } from '../internal/uploads.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
@@ -189,20 +189,18 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
 // context
 
 /**
- * Context sections about the workspace itself: name, its own profile and its internal uploads (id +
- * title). Symptoms, findings and personas are part of the knowledge briefing since KS-5
+ * Context sections about the workspace itself: name, its own profile and its internal uploads (id,
+ * file type, size, upload date — no title: design-thread ruling on §12, KS-5). Symptoms, findings and personas are part of the knowledge briefing since KS-5
  * (`orchestratorBriefing`: node scope, redacted, budgeted and logged as a prompt read).
  */
-export function workspaceContext(store: Store, ws: Workspace): string[] {
+export function workspaceContext(store: Store, ws: Workspace, dataDir?: string): string[] {
   const profile = store.profiles.get(ws.id)?.data ?? {};
-  // Uploads as id + title only (profile.uploads, incl. sha-deduped ones); contents via read_artifact.
-  const uploads = listUploads(ws.id, { store });
+  // Uploads as metadata only (profile.uploads, incl. sha-deduped ones); contents via expand / read_artifact.
+  const uploads = uploadPromptLines(ws.id, { store, ...(dataDir ? { dataDir } : {}) });
   return [
     `# Workspace ${ws.id}\nName: ${ws.name}\nSector: ${ws.sector}`,
     `## Profile\n\`\`\`json\n${JSON.stringify(profile, null, 2)}\n\`\`\``,
-    `## Internal uploads (cite by id when relevant)\n${
-      uploads.map((u) => `- [${u.id}] ${u.title}`).join('\n') || '- (none)'
-    }`,
+    `## Internal uploads (cite by id when relevant)\n${uploads.join('\n')}`,
   ];
 }
 
@@ -324,7 +322,7 @@ export function orchestratorPromptWithReads(store: Store, config: BifConfig, rr:
   const reads = promptReadsOf(briefing);
   // --- end KS-5 ---
   const parts = [
-    ...workspaceContext(store, ws),
+    ...workspaceContext(store, ws, config.dataDir),
     ...treeContext(store, ws),
     ...(briefing.section ? [briefing.section] : []),
     `## Phase: ${rr.phase} (orchestrator round ${round} of ${MAX_ORCHESTRATOR_ROUNDS})\nGoal: ${phaseGoal(rr.phase, ws)}`,

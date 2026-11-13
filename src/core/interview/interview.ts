@@ -4,7 +4,7 @@ import type { RunOptions, Supervisor } from '../harness/supervisor.js';
 import type { ExtraToolHandler, ToolResult } from '../harness/tools/handlers.js';
 import { findReplay, titleKey } from '../harness/tools/idempotency.js';
 import type { ToolInput, ToolName } from '../harness/tools/registry.js';
-import { listUploads } from '../internal/uploads.js';
+import { uploadPromptLines } from '../internal/uploads.js';
 import { drillDown } from './hypotheses.js';
 import { loadPrompt } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
@@ -76,21 +76,21 @@ export function interviewCoverage(workspaceId: string, deps: { store: Store }): 
 // prompt
 
 /** The per-turn user prompt: scope, audiences, coverage, profile, symptoms, uploads, transcript. */
-export function buildInterviewPrompt(ws: Workspace, store: Store): string {
-  return buildInterviewPromptWithReads(ws, store).prompt;
+export function buildInterviewPrompt(ws: Workspace, store: Store, dataDir?: string): string {
+  return buildInterviewPromptWithReads(ws, store, dataDir).prompt;
 }
 
 /**
  * `buildInterviewPrompt` and its prompt read (KS-5): the drill-down shows stored hypotheses and fact
  * claims, so it is a read logged on the run before it starts (`RunOptions.beforeStart`).
  */
-export function buildInterviewPromptWithReads(ws: Workspace, store: Store): { prompt: string; reads: PromptRead[] } {
+export function buildInterviewPromptWithReads(ws: Workspace, store: Store, dataDir?: string): { prompt: string; reads: PromptRead[] } {
   const drill = drillDownSection(store, ws.id, store.symptoms.list({ workspaceId: ws.id }));
   const scope = scopeOf(ws);
   const profile = store.profiles.get(ws.id)?.data ?? {};
   const coverage = interviewCoverage(ws.id, { store });
   const symptoms = store.symptoms.list({ workspaceId: ws.id });
-  const uploads = listUploads(ws.id, { store });
+  const uploads = uploadPromptLines(ws.id, { store, ...(dataDir ? { dataDir } : {}) }); // KS-5: no titles
   const turns = store.interview.list({ workspaceId: ws.id });
   const lines: string[] = [
     `# Workspace: ${ws.name}${ws.sector ? ` (${ws.sector})` : ''}`,
@@ -115,8 +115,8 @@ export function buildInterviewPromptWithReads(ws: Workspace, store: Store): { pr
       : ['(none yet)']),
     '',
     ...drill.lines,
-    '## Internal uploads (ids + titles; contents not included)',
-    ...(uploads.length ? uploads.map((u) => `- ${u.id}: ${u.title}`) : ['(none)']),
+    '## Internal uploads (ids, type, size, date; contents not included)',
+    ...uploads,
     '',
     '## Transcript',
     ...turns.map((t) => `**${t.role === 'user' ? 'User' : 'Interviewer'}:** ${t.text}`),
@@ -198,7 +198,7 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
   const userTurn = insertTurn(store, workspaceId, 'user', text);
 
   const prompt = loadPrompt('interviewer', calibrationScope(store, config.dataDir, workspaceId));
-  const built = buildInterviewPromptWithReads(ws, store); // KS-5: the drill-down is a prompt read
+  const built = buildInterviewPromptWithReads(ws, store, config.dataDir); // KS-5: the drill-down is a prompt read
   let fakeReply: string | undefined;
   const opts: RunOptions = {
     ctx: { workspaceId, role: 'interviewer', model: config.roles.interviewer, promptVersion: prompt.version },

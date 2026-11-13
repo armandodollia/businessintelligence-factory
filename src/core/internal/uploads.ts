@@ -1,3 +1,5 @@
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BifConfig } from '../config/schema.js';
 import type { ArtifactStore } from '../evidence/artifacts.js';
 import type { Store } from '../store/db.js';
@@ -54,3 +56,54 @@ export function listUploads(workspaceId: string, deps: { store: Store }): Array<
     return a && a.workspaceId === workspaceId ? [{ id, title: a.title ?? id }] : [];
   });
 }
+
+// --- knowledge store KS-5 (design-thread ruling on §12): uploads in prompts are metadata only --------
+/**
+ * The uploads lines of an agent prompt: artifact id, file type, size and upload date — never the title
+ * (a file name is text derived from the upload). This metadata is not derived text, so listing it is
+ * not a logged read and does not make a run upload-exposed; opening a file (`expand` / `read_artifact`)
+ * is. Every prompt that lists uploads uses this (orchestrator, interviewer).
+ */
+export function uploadPromptLines(workspaceId: string, deps: { store: Store; dataDir?: string }): string[] {
+  const ids = new Set(uploadIds(deps.store, workspaceId));
+  for (const a of deps.store.artifacts.list({ workspaceId, kind: 'upload' })) ids.add(a.id);
+  const lines = [...ids].flatMap((id) => {
+    const a = deps.store.artifacts.get(id);
+    if (!a || a.workspaceId !== workspaceId) return [];
+    const size = fileSize(deps.dataDir, a.path);
+    return [`- ${a.id} (${fileType(a.mime)}, ${size === undefined ? 'size unknown' : formatSize(size)}, uploaded ${a.capturedAt.slice(0, 10)})`];
+  });
+  return lines.length ? [...lines, UPLOADS_HINT] : ['- (none)'];
+}
+
+/** The line after the uploads list. */
+export const UPLOADS_HINT = 'Use `expand` or `read_artifact` with an upload id to see a file\'s contents.';
+
+function fileSize(dataDir: string | undefined, path: string): number | undefined {
+  if (!dataDir) return undefined;
+  try {
+    return statSync(join(dataDir, path)).size;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A coarse file type from the mime type (not from the file name). */
+export function fileType(mime: string): string {
+  const m = mime.toLowerCase();
+  if (m === 'text/csv' || m.includes('spreadsheet') || m.includes('ms-excel')) return 'spreadsheet';
+  if (m === 'application/pdf') return 'PDF';
+  if (m.includes('presentation') || m.includes('powerpoint')) return 'presentation';
+  if (m.includes('wordprocessing') || m === 'application/msword') return 'document';
+  if (m === 'application/json') return 'JSON';
+  if (m.startsWith('image/')) return 'image';
+  if (m.startsWith('text/')) return 'text';
+  return 'file';
+}
+
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+// --- end KS-5 ---------------------------------------------------------------------------------------

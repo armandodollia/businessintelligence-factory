@@ -149,19 +149,20 @@ describe('interview', () => {
     expect(t.store.interview.list({ workspaceId: 'ws_a' }).map((x) => x.role)).toEqual(['user']);
   });
 
-  it('prompt includes scope, audiences, transcript, coverage and uploads (id+title)', () => {
+  it('prompt includes scope, audiences, transcript, coverage and uploads (metadata, no title: KS-5 ruling)', () => {
     const t = setup();
     const up = uploadInternal('ws_a', { name: 'kpis.csv', bytes: new TextEncoder().encode('a,b\n1,2'), mime: 'text/csv' }, t);
     t.store.interview.insert({ id: 'it_1', workspaceId: 'ws_a', role: 'user', text: 'We sell widgets', createdAt: 'x' });
     const ws = { ...t.ws, scope: { level: 'division' as const, name: 'Widgets EU', description: 'EU widget unit' }, audiences: ['external' as const, 'internal' as const] };
-    const p = buildInterviewPrompt(ws, t.store);
+    const p = buildInterviewPrompt(ws, t.store, t.dir);
     expect(p).toContain('division');
     expect(p).toContain('Widgets EU');
     expect(p).toContain('external, internal');
     expect(p).toContain('We sell widgets');
     for (const topic of INTERVIEW_TOPICS) expect(p).toContain(topic);
-    expect(p).toContain(up.id);
-    expect(p).toContain('kpis.csv');
+    expect(p).toContain(`- ${up.id} (spreadsheet, 7 B, uploaded ${up.capturedAt.slice(0, 10)})`);
+    expect(p).toContain('Use `expand` or `read_artifact`');
+    expect(p).not.toContain('kpis.csv'); // a file name is upload-derived text
     expect(p).not.toContain('a,b');
   });
 

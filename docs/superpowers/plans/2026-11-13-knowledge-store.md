@@ -1086,5 +1086,9 @@ Smaller decisions taken while building KS-5 (no migration added; none changes §
 - **Prompts:** "Knowledge store" sections in worker, orchestrator, synthesizer, hypotheses, reviewer, escalation
   and interviewer prompts. Versions change through the run prompt store (`recordRunPrompt`); `promptStoreGaps`
   is asserted empty after briefed runs.
-- **Not changed (pre-existing):** upload titles listed by id in the orchestrator and interviewer prompts are not
-  logged as reads (see the KS-5 report's question).
+- **Uploads in prompts (design-thread ruling on §12):** prompts list uploads as `art_… (<type>, <size>,
+  uploaded <date>)` — type from the mime, size from the stored file, never the title — followed by one line
+  pointing at `expand` / `read_artifact` (`uploadPromptLines`, `internal/uploads.ts`; orchestrator and
+  interviewer, the only prompts that list uploads). This metadata is not derived text: not a logged read, not
+  exposure. Tested: an orchestrator run that opens nothing is not upload-exposed; one that `read_artifact`s the
+  upload is. `listUploads` (id + title) stays for non-prompt callers.
