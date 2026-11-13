@@ -67,7 +67,7 @@ function respond(path: string): unknown {
     return [
       {
         id: 'cmp_1', workspaceId: 'ws_1', name: 'Globex', site: 'globex.com', threat: 4, directness: 5,
-        comparison: { pricing: 2, onboarding: 4, ux: 3, features: 5 }, evidence: [], createdAt: '', updatedAt: '',
+        comparison: { pricing: 2, onboarding: 4, ux: 3, features: 5 }, evidence: [], createdAt: '', updatedAt: '', status: 'verified',
         criteria: { threat: 4, directness: 5, pricing: 2, onboarding: 4, ux: 3, features: 5 },
       },
     ];

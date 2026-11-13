@@ -22,8 +22,37 @@ export function Strategy({ wsId }: { wsId: string }) {
       {recs.hiddenCount > 0 && (
         <p className="muted small">
           {recs.hiddenCount} recommendation{recs.hiddenCount === 1 ? '' : 's'} hidden (failed review or superseded by a later
-          revision).
+          revision).{' '}
+          {recs.hiddenFailed.length > 0 && (
+            <label>
+              <input
+                type="checkbox"
+                aria-label="show hidden recommendations"
+                checked={recs.showHidden}
+                onChange={(e) => recs.setShowHidden(e.currentTarget.checked)}
+              />{' '}
+              Show failed ({recs.hiddenFailed.length})
+            </label>
+          )}
         </p>
+      )}
+      {recs.showHidden && recs.hiddenFailed.length > 0 && (
+        <section className="hidden-recs">
+          <h3>Failed review (hidden)</h3>
+          {recs.hiddenFailed.map((r) => (
+            <div key={r.id} className="card">
+              <b>{r.title}</b> <span className={`status ${r.status}`}>{r.status}</span>
+              <p>{r.summary}</p>
+              {r.lastReview && <LastReviewNote review={r.lastReview} />}
+              <PanelToggle
+                rec={r}
+                used={recs.usedInPanel(r)}
+                saving={recs.saving}
+                onChange={(include) => void recs.setInclude(r.id, include)}
+              />
+            </div>
+          ))}
+        </section>
       )}
       <table className="strategy">
         <thead>

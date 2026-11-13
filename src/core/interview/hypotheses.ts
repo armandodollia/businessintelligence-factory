@@ -4,6 +4,7 @@ import type { ToolInput } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, Finding, SymptomHypothesis } from '../types.js';
+import { isOutputUsable } from '../research/outputs.js';
 import { sameTree } from '../workspace/tree.js';
 
 /**
@@ -31,9 +32,14 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     const prior = store.symptomHypotheses.get(String(p.hypothesisId));
     return !!prior && prior.symptomId === symptom.id && titleKey(prior.hypothesis) === key;
   });
-  if (replay) return { ok: true, data: { hypothesisId: (replay.payload as { hypothesisId: string }).hypothesisId, duplicate: true } };
-
   const task = ctx.taskId ? store.tasks.get(ctx.taskId) : undefined;
+  if (replay) {
+    const hypothesisId = (replay.payload as { hypothesisId: string }).hypothesisId;
+    // Re-submitted: current for this task's round (superseded tracking, migration 13).
+    if (task && store.symptomHypotheses.get(hypothesisId)) store.symptomHypotheses.update(hypothesisId, { taskRound: task.round, status: 'pending' });
+    return { ok: true, data: { hypothesisId, duplicate: true } };
+  }
+
   const hypothesis: SymptomHypothesis = {
     id: newId('hyp'),
     workspaceId: ctx.workspaceId,
@@ -42,8 +48,12 @@ export const saveHypothesisHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     confidence: input.confidence,
     evidence: [...new Set(input.evidence)],
     createdAt: new Date().toISOString(),
+    status: 'pending',
   };
-  if (task && task.workspaceId === ctx.workspaceId) hypothesis.taskId = task.id;
+  if (task && task.workspaceId === ctx.workspaceId) {
+    hypothesis.taskId = task.id;
+    hypothesis.taskRound = task.round;
+  }
   const decision: Decision = {
     id: newId('dec'),
     workspaceId: ctx.workspaceId,
@@ -71,12 +81,13 @@ export type DrillDownItem = {
 };
 
 /**
- * Drill-down context per symptom of a workspace: its hypotheses (highest confidence first), each
- * with the verified findings it cites. Symptoms without hypotheses are omitted.
+ * Drill-down context per symptom of a workspace: its usable hypotheses (verified, or included by the
+ * user; never superseded), highest confidence first, each with the verified findings it cites.
+ * Symptoms without usable hypotheses are omitted.
  */
 export function drillDown(store: Store, workspaceId: string): Map<string, DrillDownItem[]> {
   const out = new Map<string, DrillDownItem[]>();
-  for (const h of store.symptomHypotheses.list({ workspaceId })) {
+  for (const h of store.symptomHypotheses.list({ workspaceId }).filter(isOutputUsable)) {
     const verifiedFindings = h.evidence.flatMap((id) => {
       const f = store.findings.get(id);
       return f && f.status === 'verified' && sameTree(store, workspaceId, f.workspaceId) ? [f] : [];

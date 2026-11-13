@@ -1,4 +1,5 @@
 import { artifactIdsIn } from '../harness/tools/handlers.js';
+import { taskOutputEvidence } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
 import type { Decision, Rating } from '../types.js';
 
@@ -12,10 +13,12 @@ function primarySubject(d: Decision): string | undefined {
   return undefined;
 }
 
-/** Whether `id` is a finding, recommendation or persona superseded in a later review round. */
+/** Whether `id` is a task output superseded in a later review round. */
 function isSuperseded(store: Store, id: string | undefined): boolean {
   if (!id) return false;
-  const item = store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id);
+  const item =
+    store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id) ?? store.competitors.get(id) ??
+    store.symptomHypotheses.get(id);
   return item?.status === 'superseded';
 }
 
@@ -72,7 +75,7 @@ function taskEvidence(store: Store, id: string): string[] {
   if (!task) return [];
   const out = new Set<string>(artifactIdsIn(task.result));
   for (const a of artifactIdsIn(task.brief)) out.add(a);
-  for (const f of store.findings.list({ taskId: task.id })) for (const e of f.evidence) out.add(e);
+  for (const e of taskOutputEvidence(store, task)) out.add(e);
   return [...out];
 }
 
@@ -145,6 +148,9 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   for (const decision of decisions) {
     if (uploads && expandedRefs(store, decision).some((id) => uploads.has(id))) continue;
     if (isSuperseded(store, primarySubject(decision))) continue;
+    // save_hypothesis decisions name their symptom as primary subject; the hypothesis itself decides.
+    const hypothesisId = (decision.payload as { hypothesisId?: unknown } | null)?.hypothesisId;
+    if (typeof hypothesisId === 'string' && isSuperseded(store, hypothesisId)) continue;
     const self = (r: Rating) => r.targetType === 'decision' && r.targetId === decision.id;
     let joined: Rating[];
     if (decision.kind === 'persona_feedback') {

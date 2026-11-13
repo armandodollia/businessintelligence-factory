@@ -104,6 +104,59 @@ describe('Strategy review state', () => {
   });
 });
 
+describe('hidden failed recommendations and unused competitors', () => {
+  it('Strategy "show failed" switch lists failed (not superseded) recommendations with the include toggle', async () => {
+    routes['GET /api/workspaces/ws_1/recommendations'] = () => ({
+      body: [
+        rec('rc_ok'),
+        rec('rc_failed', { status: 'failed', lastReview: { score: 2, issues: [{ description: 'FAILED_OBJECTION' }], decisionId: 'd', at: '' } }),
+        rec('rc_sup', { status: 'superseded' }),
+      ],
+    });
+    routes['POST /api/recommendations/rc_failed/include'] = () => ({ body: rec('rc_failed') });
+    window.location.hash = '#/w/ws_1/strategy';
+    render(<App />);
+    expect(await screen.findByText('Title rc_ok')).toBeTruthy();
+    expect(screen.queryByText('Title rc_failed')).toBeNull();
+    await act(async () => {
+      (screen.getByLabelText('show hidden recommendations') as HTMLInputElement).click();
+    });
+    expect(screen.getByText('Title rc_failed')).toBeTruthy();
+    expect(screen.getByText(/FAILED_OBJECTION/)).toBeTruthy();
+    expect(screen.queryByText('Title rc_sup')).toBeNull();
+    await act(async () => {
+      (screen.getByLabelText('use rc_failed in persona panel') as HTMLInputElement).click();
+    });
+    expect(calls.find((c) => c.path === '/api/recommendations/rc_failed/include')?.body).toEqual({ include: true });
+  });
+
+  it('Competitors lists verified ones for rating and unverified ones under "not used" with the include toggle', async () => {
+    const cmp = (id: string, name: string, extra: Record<string, unknown>) => ({
+      id, workspaceId: 'ws_1', name, threat: 3, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 }, evidence: [],
+      createdAt: '', updatedAt: '', criteria: { threat: 3, directness: 3, pricing: 3, onboarding: 3, ux: 3, features: 3 }, ...extra,
+    });
+    routes['GET /api/workspaces/ws_1/competitors'] = () => ({
+      body: [
+        cmp('cmp_v', 'VerifiedCo', { status: 'verified' }),
+        cmp('cmp_u', 'UnverifiedCo', { status: 'unverified', lastReview: { score: 4, issues: [{ description: 'WEAK_EVIDENCE' }], decisionId: 'd', at: '' } }),
+        cmp('cmp_s', 'SupersededCo', { status: 'superseded' }),
+      ],
+    });
+    routes['POST /api/competitors/cmp_u/include'] = () => ({ body: {} });
+    window.location.hash = '#/w/ws_1/competitors';
+    render(<App />);
+    expect(await screen.findByText('VerifiedCo')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Agree' })).toHaveLength(6); // only the verified one is rated
+    expect(screen.getByText(/1 competitor not used/)).toBeTruthy();
+    expect(screen.getByText(/WEAK_EVIDENCE/)).toBeTruthy();
+    expect(screen.queryByText('SupersededCo')).toBeNull();
+    await act(async () => {
+      (screen.getByLabelText('use cmp_u') as HTMLInputElement).click();
+    });
+    expect(calls.find((c) => c.path === '/api/competitors/cmp_u/include')?.body).toEqual({ include: true });
+  });
+});
+
 describe('Personas review state', () => {
   it('shows status and objections and toggles the panel override', async () => {
     routes['GET /api/workspaces/ws_1/personas'] = () => ({

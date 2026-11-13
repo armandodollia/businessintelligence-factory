@@ -11,6 +11,7 @@ import type { Decision, Finding, Task, UserRequest } from '../../types.js';
 import type { RunContext } from '../tokens.js';
 import { browserConfigured } from '../browser.js';
 import { isAllowedRunFile } from '../paths.js';
+import { taskOutputEvidence } from '../../research/outputs.js';
 import { findReplay } from './idempotency.js';
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
@@ -511,7 +512,9 @@ export function artifactIdsIn(value: unknown): string[] {
 export function resultProvenance(store: Store, task: Task | undefined, result: unknown): string[] {
   const ids = new Set<string>(artifactIdsIn(result));
   if (task) {
-    for (const f of store.findings.list({ taskId: task.id })) if (f.workspaceId === task.workspaceId) for (const a of f.evidence) ids.add(a);
+    // Every output of the task (findings, recommendations → cited findings, personas, competitors,
+    // hypotheses) and its transitive evidence.
+    for (const a of taskOutputEvidence(store, task)) ids.add(a);
     for (const a of artifactIdsIn(task.brief)) ids.add(a);
   }
   return [...ids].filter((id) => store.artifacts.get(id) !== undefined);

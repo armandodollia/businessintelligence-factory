@@ -394,7 +394,7 @@ describe('competitors & hypotheses', () => {
     const t = setup();
     t.store.competitors.insert({
       id: 'cmp_1', workspaceId: t.ws.id, name: 'Globex', threat: 4, directness: 3, comparison: { pricing: 2, onboarding: 5, ux: 4, features: 3 },
-      evidence: [], createdAt: 'now', updatedAt: 'now',
+      evidence: [], createdAt: 'now', updatedAt: 'now', status: 'verified',
     });
     const r = await t.json('GET', `/api/workspaces/${t.ws.id}/competitors`);
     expect(r.status).toBe(200);

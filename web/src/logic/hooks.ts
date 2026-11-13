@@ -616,17 +616,43 @@ export function findingCriteriaKeys(criteria: Criteria): string[] {
   return FINDING_CRITERIA.filter((k) => criteria[k] !== undefined);
 }
 
-/** Rated competitors (spec §9), highest threat first, each with its ratable criteria in a fixed order. */
+/**
+ * Rated competitors (spec §9), highest threat first, each with its ratable criteria in a fixed order.
+ * `competitors`: usable ones (verified, or included by the user). `notUsed`: the others that are not
+ * superseded (pending, unverified, failed, or excluded), listed with their last review and the
+ * include toggle.
+ */
 export function useCompetitors(wsId: string | null | undefined) {
   const res = useResource(`competitors:${wsId ?? ''}`, wsId ? () => api.listCompetitors(wsId) : null);
+  const action = useAction();
   useBusEvents(wsId, (e) => {
     if (e.type === 'decision' && (e.decision.payload as { tool?: string } | null)?.tool === 'save_competitor') void res.reload();
   });
-  const competitors = useMemo(
+  const all = useMemo(
     () => [...(res.data ?? [])].sort((a, b) => b.threat - a.threat || a.name.localeCompare(b.name)),
     [res.data],
   );
-  return { competitors, criteriaKeys: COMPETITOR_CRITERIA as readonly string[], loading: res.loading, error: res.error, reload: res.reload };
+  const competitors = useMemo(() => all.filter(usedInPanel), [all]);
+  const notUsed = useMemo(() => all.filter((c) => c.status !== 'superseded' && !usedInPanel(c)), [all]);
+  /** Include override; `null` resets to the default (verified competitors only). */
+  const setInclude = useCallback(
+    async (id: string, include: boolean | null) => {
+      await action.run(() => api.setCompetitorInclude(id, include));
+      await res.reload();
+    },
+    [action.run, res.reload],
+  );
+  return {
+    competitors,
+    notUsed,
+    criteriaKeys: COMPETITOR_CRITERIA as readonly string[],
+    setInclude,
+    saving: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
 }
 
 export function usePersonas(wsId: string | null | undefined) {
@@ -670,9 +696,15 @@ export function useRecommendations(wsId: string | null | undefined) {
     },
     [action.run, res.reload],
   );
+  /** Failed recommendations (not superseded) the user has not included: behind the "show hidden" switch. */
+  const hiddenFailed = useMemo(() => all.filter((r) => r.status === 'failed' && !shownInStrategy(r)), [all]);
+  const [showHidden, setShowHidden] = useState(false);
   return {
     recommendations,
     hiddenCount: all.length - recommendations.length,
+    hiddenFailed,
+    showHidden,
+    setShowHidden,
     usedInPanel,
     needsReviewFlag,
     setInclude,

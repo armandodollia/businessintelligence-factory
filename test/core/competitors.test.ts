@@ -78,6 +78,10 @@ describe('save_competitor (final review C4)', () => {
     });
     const r = await t.handle(ctx({ agentRunId: run.id, taskId: task.id }), 'save_competitor', competitor([t.art]));
     const id = (r as { data: { competitorId: string } }).data.competitorId;
+    // Pending (task still in review) competitors are not queued; verified ones are.
+    expect(t.store.competitors.get(id)).toMatchObject({ status: 'pending', taskId: task.id, taskRound: 1 });
+    expect(reviewQueue('ws_a', t).some((i) => i.targetType === 'competitor')).toBe(false);
+    t.store.competitors.update(id, { status: 'verified' });
 
     const q = reviewQueue('ws_a', t).find((i) => i.targetType === 'competitor')!;
     expect(q).toMatchObject({ targetId: id, title: 'Globex', criteria: { threat: 4, directness: 5, pricing: 2, onboarding: 4, ux: 3, features: 5 } });
@@ -127,6 +131,10 @@ describe('save_hypothesis + interview drill-down (final review C6)', () => {
     expect((await t.handle(c, 'save_hypothesis', { symptom_id: 'sym_1', hypothesis: 'h', confidence: 10, evidence: ['art_nope'] })).ok).toBe(false);
     expect(t.store.symptomHypotheses.list()).toHaveLength(1);
 
+    // Pending (not yet reviewed) hypotheses are not shown to the interviewer; verified ones are.
+    expect(t.store.symptomHypotheses.get(hid)!.status).toBe('pending');
+    expect(buildInterviewPrompt(t.store.workspaces.get('ws_a')!, t.store)).not.toContain('Research hypotheses per symptom');
+    t.store.symptomHypotheses.update(hid, { status: 'verified' });
     const prompt = buildInterviewPrompt(t.store.workspaces.get('ws_a')!, t.store);
     expect(prompt).toContain('Research hypotheses per symptom');
     expect(prompt).toContain('enterprise renewals down');

@@ -57,7 +57,7 @@ describe('review status of task outputs', () => {
       }
       return async (tools) => {
         await saveFinding('Acme Pro costs $20 per seat')(tools);
-        await revise('fix', { summary: 'Pro is $20' })(r)(tools);
+        await revise('fix', { summary: 'Pro is $20' }, false)(r)(tools);
       };
     };
     const task = addTask(t.store, { workspaceId: 'ws_a' });
@@ -95,7 +95,7 @@ describe('review status of task outputs', () => {
       return async (tools) => {
         await saveFinding('Acme has a free tier')(tools);
         const keep = t.store.findings.list({ claim: 'Acme has 3 tiers' })[0]!.id;
-        await revise('fix', { summary: 'tiers', findings: [keep] })(r)(tools);
+        await revise('fix', { summary: 'tiers', findings: [keep] }, false)(r)(tools);
       };
     };
     const task = addTask(t.store, { workspaceId: 'ws_a' });

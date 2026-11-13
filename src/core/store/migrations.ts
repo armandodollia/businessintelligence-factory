@@ -373,4 +373,39 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX symptom_hypotheses_ws ON symptom_hypotheses (workspace_id);
   CREATE INDEX symptom_hypotheses_symptom ON symptom_hypotheses (symptom_id);
   `,
+  // 13: final targeted pass — competitors and symptom hypotheses join the review-status system
+  // (status, task_round, include_override; existing rows take their task's status, rows without a
+  // known task become `unverified`), and legacy competitor ratings (target id = competitor name /
+  // finding subject) are mapped to competitor ids by normalized name (titleKey: trim, lowercase,
+  // collapsed whitespace).
+  `
+  ALTER TABLE competitors ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE competitors ADD COLUMN task_round INTEGER;
+  ALTER TABLE competitors ADD COLUMN include_override INTEGER;
+  UPDATE competitors SET status = COALESCE(
+    (SELECT CASE t.status WHEN 'verified' THEN 'verified' WHEN 'unverified' THEN 'unverified' WHEN 'failed' THEN 'failed' ELSE 'pending' END
+     FROM tasks t WHERE t.id = competitors.task_id),
+    'unverified'
+  );
+
+  ALTER TABLE symptom_hypotheses ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE symptom_hypotheses ADD COLUMN task_round INTEGER;
+  ALTER TABLE symptom_hypotheses ADD COLUMN include_override INTEGER;
+  UPDATE symptom_hypotheses SET status = COALESCE(
+    (SELECT CASE t.status WHEN 'verified' THEN 'verified' WHEN 'unverified' THEN 'unverified' WHEN 'failed' THEN 'failed' ELSE 'pending' END
+     FROM tasks t WHERE t.id = symptom_hypotheses.task_id),
+    'unverified'
+  );
+
+  UPDATE ratings SET target_id = (
+    SELECT c.id FROM competitors c
+    WHERE c.workspace_id = ratings.workspace_id AND lower(trim(replace(replace(replace(replace(c.name, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' '))) = lower(trim(replace(replace(replace(replace(ratings.target_id, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' ')))
+    ORDER BY c.rowid LIMIT 1
+  )
+  WHERE target_type = 'competitor' AND target_id NOT LIKE 'cmp!_%' ESCAPE '!'
+    AND EXISTS (
+      SELECT 1 FROM competitors c
+      WHERE c.workspace_id = ratings.workspace_id AND lower(trim(replace(replace(replace(replace(c.name, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' '))) = lower(trim(replace(replace(replace(replace(ratings.target_id, char(9), ' '), char(10), ' '), '   ', ' '), '  ', ' ')))
+    );
+  `,
 ];

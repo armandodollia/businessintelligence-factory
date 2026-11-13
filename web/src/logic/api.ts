@@ -128,6 +128,8 @@ export const api = {
   /** Persona-panel / Strategy override; `null` resets to the default (verified only). */
   setRecommendationInclude: (id: string, include: boolean | null) =>
     post<Recommendation>(`/api/recommendations/${enc(id)}/include`, { include }),
+  setCompetitorInclude: (id: string, include: boolean | null) =>
+    post<CompetitorView>(`/api/competitors/${enc(id)}/include`, { include }),
   setPersonaInclude: (id: string, include: boolean | null) => post<PersonaNode>(`/api/personas/${enc(id)}/include`, { include }),
   listSymptoms: (id: string) => get<Symptom[]>(`${ws(id)}/symptoms`),
   listPersonas: (id: string) => get<PersonaView[]>(`${ws(id)}/personas`),

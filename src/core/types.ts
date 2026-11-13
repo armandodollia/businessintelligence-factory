@@ -352,6 +352,12 @@ export interface Competitor {
   taskId?: string;
   createdAt: string;
   updatedAt: string;
+  /** Review status of its last save (migration 13). Optional on insert only: the column defaults to `pending`. */
+  status?: OutputStatus;
+  /** Review round of its task in which it was last saved (migration 13). */
+  taskRound?: number;
+  /** User override (migration 13); same semantics as `Recommendation.includeOverride`. */
+  includeOverride?: boolean;
 }
 
 /** A research hypothesis about the cause of an interview symptom (spec §8 drill-down; migration 12). */
@@ -366,6 +372,12 @@ export interface SymptomHypothesis {
   evidence: string[];
   taskId?: string;
   createdAt: string;
+  /** Review status (migration 13). Optional on insert only: the column defaults to `pending`. */
+  status?: OutputStatus;
+  /** Review round of its task in which it was last saved (migration 13). */
+  taskRound?: number;
+  /** User override (migration 13); same semantics as `Recommendation.includeOverride`. */
+  includeOverride?: boolean;
 }
 
 export interface Schedule {

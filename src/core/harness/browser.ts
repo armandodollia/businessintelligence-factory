@@ -67,6 +67,13 @@ export function browserStartupWarnings(cfg: Pick<BifConfig, 'browser' | 'limits'
         `limits.maxBrowserRuns ${cfg.limits.maxBrowserRuns} is reduced to 1 (use mode 'shared' for parallel browsing)`,
     );
   }
+  // Old configs list their browser server under mcpServers; in shared mode that is never used.
+  if (cfg.browser.backend === 'mcp' && cfg.browser.mode === 'shared' && Object.keys(cfg.browser.mcpServers).length > 0) {
+    out.push(
+      "browser.mode is 'shared' but browser.mcpServers is set (old config?): mcpServers is ignored in shared mode; " +
+        "configure the server under browser.shared, or set browser.mode to 'per_run' to keep using mcpServers",
+    );
+  }
   return out;
 }
 

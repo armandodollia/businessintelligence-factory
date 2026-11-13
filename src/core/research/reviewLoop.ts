@@ -57,6 +57,8 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): Re
   const findings = outputs.findings.filter((f) => current.has(f.id));
   const recs = outputs.recommendations.filter((r) => current.has(r.id));
   const personas = outputs.personas.filter((p) => current.has(p.id));
+  const competitors = outputs.competitors.filter((c) => current.has(c.id));
+  const hypotheses = outputs.hypotheses.filter((h) => current.has(h.id));
   const ids = new Set<string>();
   for (const f of findings) for (const a of f.evidence) ids.add(a);
   const own = new Set(findings.map((f) => f.id));
@@ -69,8 +71,17 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): Re
       if (f && sameTree(store, task.workspaceId, f.workspaceId)) cited.push(f);
     }
   }
+  // Hypotheses cite findings (any node of the tree) and/or artifacts.
+  for (const h of hypotheses) {
+    for (const e of h.evidence) {
+      const f = store.findings.get(e);
+      if (!f) ids.add(e);
+      else if (sameTree(store, task.workspaceId, f.workspaceId) && !own.has(f.id) && !cited.some((c) => c.id === f.id)) cited.push(f);
+    }
+  }
   for (const f of cited) for (const a of f.evidence) ids.add(a);
   for (const p of personas) for (const field of Object.values(p.profile)) for (const a of field.evidence) ids.add(a);
+  for (const c of competitors) for (const a of c.evidence) ids.add(a);
   if (task.result !== undefined) for (const m of JSON.stringify(task.result).matchAll(ARTIFACT_ID)) ids.add(m[0]);
 
   const sections: string[] = [];
@@ -87,7 +98,7 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): Re
   }
   if (cited.length) {
     sections.push(
-      `### Findings cited by these recommendations\n${cited
+      `### Findings cited by these recommendations / hypotheses\n${cited
         .map((f) => `${findingLine(f)}${f.workspaceId !== task.workspaceId ? ` (source ${f.workspaceId})` : ''}`)
         .join('\n')}`,
     );
@@ -101,6 +112,27 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): Re
               .map(([k, v]) => `  - ${k}: ${trunc(v.value, 400)} (confidence ${v.confidence}; evidence: ${v.evidence.join(', ')})`)
               .join('\n')}`,
         )
+        .join('\n')}`,
+    );
+  }
+  if (competitors.length) {
+    sections.push(
+      `### Competitors saved by this task\n${competitors
+        .map(
+          (c) =>
+            `- [${c.id}] ${c.name}${c.site ? ` (${c.site})` : ''}: threat ${c.threat}, directness ${c.directness}, ` +
+            `comparison ${JSON.stringify(c.comparison)} (evidence: ${c.evidence.join(', ')})`,
+        )
+        .join('\n')}`,
+    );
+  }
+  if (hypotheses.length) {
+    sections.push(
+      `### Symptom hypotheses saved by this task\n${hypotheses
+        .map((h) => {
+          const symptom = store.symptoms.get(h.symptomId);
+          return `- [${h.id}] symptom ${h.symptomId}${symptom ? ` (${symptom.title})` : ''}: ${h.hypothesis} (confidence ${h.confidence}%; evidence: ${h.evidence.join(', ')})`;
+        })
         .join('\n')}`,
     );
   }
@@ -186,6 +218,8 @@ export function currentOutputsSection(deps: Pick<ResearchDeps, 'store'>, task: T
     ...outputs.findings.filter((f) => current.has(f.id)).map((f) => `- finding ${f.id}: ${trunc(f.claim, 200)}`),
     ...outputs.recommendations.filter((r) => current.has(r.id)).map((r) => `- recommendation ${r.id}: ${trunc(r.title, 200)}`),
     ...outputs.personas.filter((p) => current.has(p.id)).map((p) => `- persona ${p.id}: ${p.slug}`),
+    ...outputs.competitors.filter((c) => current.has(c.id)).map((c) => `- competitor ${c.id}: ${trunc(c.name, 200)}`),
+    ...outputs.hypotheses.filter((h) => current.has(h.id)).map((h) => `- hypothesis ${h.id}: ${trunc(h.hypothesis, 200)}`),
   ];
   if (!lines.length) return '';
   return (

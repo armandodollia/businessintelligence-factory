@@ -393,9 +393,18 @@ export function createApp(deps: AppDeps): Hono {
   });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
   /** Rated competitors (spec §9), each with its ratable `criteria` (threat, directness, comparison areas). */
-  app.get('/api/workspaces/:id/competitors', (c) =>
-    c.json(store.competitors.list({ workspaceId: workspace(c.req.param('id')).id }).map((x) => ({ ...x, criteria: competitorCriteria(x) }))),
-  );
+  app.get('/api/workspaces/:id/competitors', (c) => {
+    // All statuses with `lastReview`: the web app lists usable ones and offers the include toggle.
+    const id = workspace(c.req.param('id')).id;
+    const list = store.competitors.list({ workspaceId: id }).map((x) => ({ ...x, criteria: competitorCriteria(x) }));
+    return c.json(withLastReview(list, lastReviewsByTask(store, [id])));
+  });
+  app.post('/api/competitors/:id/include', async (c) => {
+    const id = c.req.param('id');
+    const { include } = await body(c, schemas.includeFinding);
+    if (!store.competitors.get(id)) throw new HttpError(404, `competitor '${id}' not found`);
+    return c.json(setOutputInclude(store, 'competitor', id, include));
+  });
   /** Research hypotheses per interview symptom (spec §8 drill-down). */
   app.get('/api/workspaces/:id/hypotheses', (c) => c.json(store.symptomHypotheses.list({ workspaceId: workspace(c.req.param('id')).id })));
   /** Personas with review `status` and `lastReview` of the task that last saved them. */

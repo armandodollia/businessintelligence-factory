@@ -1,4 +1,5 @@
 import { competitorCriteria } from '../market/competitors.js';
+import { isOutputUsable } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
 import type { Criteria, Rating } from '../types.js';
 import { criterionDef, type TargetType } from './criteria.js';
@@ -43,7 +44,8 @@ export function reviewQueue(workspaceId: string, deps: { store: Store }): Review
       push('persona_feedback', `${r.id}:${fb.personaId}`, `${r.title} — persona ${fb.personaId} (simulated)`, fb.scores);
     }
   }
-  for (const c of store.competitors.list({ workspaceId })) push('competitor', c.id, c.name, competitorCriteria(c));
+  // Competitors are queued only once usable (verified, or included by the user).
+  for (const c of store.competitors.list({ workspaceId }).filter(isOutputUsable)) push('competitor', c.id, c.name, competitorCriteria(c));
   for (const p of live(store.personas.list({ workspaceId }))) {
     push('persona', p.id, p.segment, Object.fromEntries(Object.entries(p.profile).map(([k, f]) => [k, f.confidence])));
   }

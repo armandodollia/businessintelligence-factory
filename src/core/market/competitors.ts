@@ -36,7 +36,11 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
     return { ok: false, error: `evidence references unknown artifacts (not in this workspace's business tree): ${missing.join(', ')}` };
   }
   const task = ctx.taskId ? store.tasks.get(ctx.taskId) : undefined;
-  const taskId = task && task.workspaceId === ctx.workspaceId ? task.id : undefined;
+  const owner = task && task.workspaceId === ctx.workspaceId ? task : undefined;
+  const taskId = owner?.id;
+  // Review tracking (migration 13): pending until the saving task's review loop ends; the round marks
+  // it as (re-)submitted in that round (superseded tracking).
+  const tracking: Pick<Competitor, 'status' | 'taskRound'> = owner ? { status: 'pending', taskRound: owner.round } : { status: 'pending' };
   const now = new Date().toISOString();
   const values = { threat: input.threat, directness: input.directness, comparison: input.comparison };
 
@@ -47,8 +51,12 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
       const same =
         JSON.stringify({ threat: prior.threat, directness: prior.directness, comparison: prior.comparison }) === JSON.stringify(values) &&
         (input.site ?? prior.site) === prior.site;
-      if (same && evidence.length === prior.evidence.length) return { competitor: prior, decision: undefined, duplicate: true };
-      const patch: Partial<Competitor> = { ...values, evidence, updatedAt: now };
+      if (same && evidence.length === prior.evidence.length) {
+        // Re-submitted unchanged: still current for this task's round.
+        const competitor = owner ? store.competitors.update(prior.id, { ...tracking, taskId: owner.id }) : prior;
+        return { competitor, decision: undefined, duplicate: true };
+      }
+      const patch: Partial<Competitor> = { ...values, evidence, updatedAt: now, ...tracking };
       if (input.site !== undefined) patch.site = input.site;
       if (taskId) patch.taskId = taskId;
       const competitor = store.competitors.update(prior.id, patch);
@@ -63,6 +71,7 @@ export const saveCompetitorHandler: ExtraToolHandler = async (ctx, raw, deps) =>
       evidence: [...new Set(input.evidence)],
       createdAt: now,
       updatedAt: now,
+      ...tracking,
     };
     if (input.site !== undefined) competitor.site = input.site;
     if (taskId) competitor.taskId = taskId;

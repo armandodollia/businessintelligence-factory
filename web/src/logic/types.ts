@@ -133,8 +133,8 @@ export interface CalibrationReport {
   byRoleTask?: Array<CalibrationRow & { role: string; taskType?: string }>;
 }
 
-/** `GET .../competitors`: a rated competitor (spec §9) with its ratable criteria. */
-export type CompetitorView = Competitor & { criteria: Criteria };
+/** `GET .../competitors`: a rated competitor (spec §9) with its ratable criteria and its task's last review. */
+export type CompetitorView = Competitor & { criteria: Criteria; lastReview?: LastReview };
 
 /**
  * Ratable finding criteria (mirrors core `CRITERIA.finding`). Competitor keys (threat, pricing,

@@ -80,15 +80,22 @@ export const review =
     await t.call('submit_review', { score, issues, summary: `score ${score}` });
   };
 
-/** Revision script: answers every issue in the prompt with `action`, then resubmits. */
+/**
+ * Revision script: answers every issue in the prompt with `action`, then resubmits. With
+ * `keepOutputs` (default) the resubmitted deliverable cites the current outputs listed in the prompt
+ * (`keep: [ids]`) so they stay current; `false` withdraws every output not re-saved in the revision.
+ */
 export const revise =
-  (action: 'fix' | 'pushback' = 'fix', deliverable: Record<string, unknown> = { summary: 'revised' }) =>
+  (action: 'fix' | 'pushback' = 'fix', deliverable: Record<string, unknown> = { summary: 'revised' }, keepOutputs = true) =>
   (req: AgentRequest): FakeScript =>
   async (t) => {
     for (const m of req.prompt.matchAll(/^- \[(\w+)\]/gm)) {
       await t.call('respond_to_review', { issue_id: m[1], action, reason: `${action} because reasons` });
     }
-    await t.call('submit_result', deliverable);
+    const keep = keepOutputs
+      ? [...req.prompt.matchAll(/^- (?:finding|recommendation|persona|competitor|hypothesis) (\w+):/gm)].map((m) => m[1])
+      : [];
+    await t.call('submit_result', keep.length ? { ...deliverable, keep } : deliverable);
   };
 
 export const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));

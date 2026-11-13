@@ -353,7 +353,8 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', name: 'text', site: 'text', threat: 'int', directness: 'int', comparison: 'json',
-      evidence: 'json', taskId: 'text', createdAt: 'text', updatedAt: 'text',
+      evidence: 'json', taskId: 'text', createdAt: 'text', updatedAt: 'text', status: 'text', taskRound: 'int',
+      includeOverride: 'bool',
     },
   } satisfies TableSpec<Competitor>,
   symptomHypotheses: {
@@ -361,7 +362,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', symptomId: 'text', hypothesis: 'text', confidence: 'real', evidence: 'json',
-      taskId: 'text', createdAt: 'text',
+      taskId: 'text', createdAt: 'text', status: 'text', taskRound: 'int', includeOverride: 'bool',
     },
   } satisfies TableSpec<SymptomHypothesis>,
 } as const;

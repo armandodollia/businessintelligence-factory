@@ -68,6 +68,22 @@ describe('output status API', () => {
     expect((await t.json('POST', '/api/recommendations/rec_u/include', { include: 'yes' })).status).toBe(400);
   });
 
+  it('competitors carry status + lastReview; include override sets / resets', async () => {
+    const t = setup();
+    t.store.competitors.insert({
+      id: 'cmp_u', workspaceId: t.ws.id, name: 'Globex', threat: 4, directness: 3, comparison: { pricing: 2, onboarding: 5, ux: 4, features: 3 },
+      evidence: [], createdAt: 'now', updatedAt: 'now', taskId: 'tsk_cmp', status: 'unverified',
+    });
+    addReview(t.store, t.ws.id, 'tsk_cmp', 5, 'NOT_A_COMPETITOR');
+    const list = await t.json('GET', `/api/workspaces/${t.ws.id}/competitors`);
+    expect(list.body[0]).toMatchObject({ id: 'cmp_u', status: 'unverified', lastReview: { score: 5 } });
+    expect(await t.json('POST', '/api/competitors/cmp_u/include', { include: true })).toMatchObject({ status: 200, body: { includeOverride: true } });
+    const q = await t.json('GET', `/api/workspaces/${t.ws.id}/review-queue`);
+    expect(q.body.some((i: { targetId: string }) => i.targetId === 'cmp_u')).toBe(true);
+    expect((await t.json('POST', '/api/competitors/cmp_u/include', { include: null })).body.includeOverride).toBeUndefined();
+    expect((await t.json('POST', '/api/competitors/cmp_nope/include', { include: true })).status).toBe(404);
+  });
+
   it('findings ?scope=tree returns same-tree findings tagged with their source node', async () => {
     const t = setup();
     const child = createWorkspace(t.store, { name: 'Payments', sector: 'saas', parentWorkspaceId: t.ws.id });

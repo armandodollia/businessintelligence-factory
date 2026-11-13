@@ -139,16 +139,18 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   it 0–10 and lists issues (`blocking | substantive | nit | scope_expansion`). Score ≥ `passThreshold`
   (default 8) → *verified*. Otherwise the worker fixes or pushes back (pushback on nits and scope
   expansion is expected and logged) and resubmits, up to `maxRounds` (default 3); then it stays
-  *unverified* and is flagged with that status. The task's findings, recommendations and personas
-  take its final status (*verified*, *unverified* or *failed*); outputs from an earlier round that the
-  final revision neither re-saved nor cited by id are *superseded* and never used (e.g. a "$10"
-  finding corrected to "$20"). The reviewer sees the content of the submitted outputs and their
-  evidence ids. Only verified findings feed recommendation synthesis (from any node of the same
+  *unverified* and is flagged with that status. The task's findings, recommendations, personas,
+  competitors and symptom hypotheses take its final status (*verified*, *unverified* or *failed*);
+  outputs from an earlier round that the final submitted revision neither re-saved nor cited by id
+  are *superseded* and never used (e.g. a "$10" finding corrected to "$20", or a claim dropped
+  without replacement). The reviewer sees the content of the submitted outputs and their evidence
+  ids. Only verified findings feed recommendation synthesis (from any node of the same
   business tree); on the Findings page you can include an unverified finding (or exclude a verified
   one) with the "Use in recommendations" toggle. Likewise only verified recommendations and personas
   go to the persona panel ("Use in persona panel" toggle on the Strategy and Personas pages);
   Strategy flags unverified recommendations with the last reviewer's objections and hides failed
-  ones unless you include them.
+  ones unless you include them ("Show failed" lists them). The Competitors page, the review queue and
+  the interviewer's drill-down use only verified (or included) competitors and hypotheses.
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.
