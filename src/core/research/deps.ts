@@ -22,6 +22,8 @@ export type AgentRequest = {
   attempt: number;
   prompt: string;
   systemPrompt: string;
+  /** Learning loop WP-B: research run a task-less run belongs to (orchestrator), for usage/budgets. */
+  researchRunId?: string;
 };
 
 /** Returns an in-process script for a run (tests / dry runs); `undefined` → spawn the real CLI. */
@@ -68,6 +70,12 @@ export async function runAgent(
   };
   if (fake) opts.fake = fake;
   if (deps.signal) opts.signal = deps.signal;
+  // Learning loop WP-B: round / task type on the AgentRun, research run for usage and budgets.
+  const meta: NonNullable<typeof opts.meta> = { round: req.round };
+  if (req.task) meta.taskType = req.task.type;
+  const researchRunId = req.task?.runId ?? req.researchRunId;
+  if (researchRunId) meta.researchRunId = researchRunId;
+  opts.meta = meta;
   return deps.supervisor.run(opts);
 }
 

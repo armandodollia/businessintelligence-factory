@@ -325,7 +325,7 @@ async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: num
   const res = await runAgent(deps, {
     kind: 'orchestrate', role: 'orchestrator', workspaceId: rr.workspaceId, round, attempt: 1,
     prompt: orchestratorPrompt(store, config, rr, round), systemPrompt: system,
-    model, needsBrowser: false, promptVersion: version,
+    model, needsBrowser: false, promptVersion: version, researchRunId: rr.id,
   });
   throwIfAborted(deps.signal);
   const proposed = store.tasks.list({ runId: rr.id }).length - before;
@@ -429,7 +429,7 @@ async function executePhase(deps: ResearchDeps, rr: ResearchRun): Promise<Resear
   } catch (err) {
     if (isAbort(err) || deps.signal?.aborted) throw err;
     console.error(`[bif] research run ${rr.id} (${rr.phase}) failed: ${(err as Error).message}`);
-    return store.researchRuns.update(rr.id, { status: 'failed', endedAt: new Date().toISOString() });
+    return store.researchRuns.update(rr.id, { status: 'failed', endedAt: new Date().toISOString(), failureReason: (err as Error).message });
   }
 }
 
@@ -607,7 +607,7 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
         // Its research run is over (or unknown): nothing will run it again.
         // Its outputs take the failed status too (same rule as the review loop), and live views reload.
         const failed = store.transaction(() => {
-          const task = store.tasks.update(t.id, { status: 'failed' });
+          const task = store.tasks.update(t.id, { status: 'failed', failureReason: 'interrupted: its research run ended while the task was running' });
           applyTaskStatus(store, task, 'failed');
           return task;
         });

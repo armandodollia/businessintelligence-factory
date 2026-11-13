@@ -395,7 +395,10 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
         const issues = step === 'revise' ? (latest.reviewIssues ?? []) : [];
         store.tasks.update(id, { status: 'running', round, step });
         const res = await workerStep(deps, id, step, round, issues);
-        if (!res.ok) return finish(deps, id, 'failed', round);
+        if (!res.ok) {
+          store.tasks.update(id, { failureReason: res.reason }); // learning loop WP-B
+          return finish(deps, id, 'failed', round);
+        }
         step = 'review';
         store.tasks.update(id, { step, submittedRound: round });
         continue;
@@ -413,6 +416,7 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
     if (err instanceof AbortError || (err as Error).name === 'AbortError') throw err;
     // Non-agent error (e.g. needs a browser but maxBrowserRuns is 0): the task cannot run.
     console.error(`[bif] task ${id} failed: ${(err as Error).message}`);
+    store.tasks.update(id, { failureReason: (err as Error).message }); // learning loop WP-B
     return finish(deps, id, 'failed', round);
   }
 }

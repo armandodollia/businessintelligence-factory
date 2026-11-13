@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import type { ToolInput } from '../harness/tools/registry.js';
-import { loadPrompt, promptVersion, renderTemplate, withCalibration } from '../prompts/index.js';
+import { loadPrompt, renderTemplate, withCalibration } from '../prompts/index.js';
+import { recordPromptVersion } from '../prompts/store.js';
 import { isOutputUsable } from '../research/outputs.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type ResearchDeps } from '../research/deps.js';
 import { calibrationScope } from '../scoring/calibration.js';
@@ -159,7 +160,8 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
 
   const one = async (rec: Recommendation, persona: Persona, systemPrompt: string): Promise<void> => {
     const prompt = panelPrompt(template.text, rec, scope);
-    const version = promptVersion(`${systemPrompt}\n${template.text}`);
+    // promptVersion(system + template), with its exact text kept in the prompt store (learning loop WP-B).
+    const version = recordPromptVersion(deps.store, 'persona', `${systemPrompt}\n${template.text}`);
     let reason = 'no submit_persona_feedback call';
     for (let attempt = 1; attempt <= PANEL_ATTEMPTS; attempt++) {
       throwIfAborted(deps.signal);
