@@ -275,3 +275,14 @@ export type RecommendationView = Recommendation & { lastReview?: LastReview };
 
 /** Persona with the last review of the task that last saved it (`GET .../personas`). */
 export type PersonaView = PersonaNode & { lastReview?: LastReview };
+
+// --- learning loop WP-A: feedback log and symptom hypotheses -------------------------------
+export type { FeedbackEvent, FeedbackKind, FeedbackTargetType } from '../../../src/core/feedback/events.js';
+export type { SymptomHypothesis } from '../../../src/core/types.js';
+
+/** `POST /api/hypotheses/:id/correct`: the user's correction (text and/or confidence 0–100) and why. */
+export interface HypothesisCorrection {
+  hypothesis?: string;
+  confidence?: number;
+  reason?: string;
+}

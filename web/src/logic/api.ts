@@ -37,6 +37,7 @@ import type {
   UserRequest,
   WorkspaceNode,
 } from './types.js';
+import type { FeedbackEvent, HypothesisCorrection, SymptomHypothesis } from './types.js';
 
 export class ApiError extends Error {
   constructor(
@@ -177,4 +178,18 @@ export const api = {
   // config
   getConfig: () => get<BifConfig>('/api/config'),
   putConfig: (config: BifConfig) => request<BifConfig>('PUT', '/api/config', config),
+};
+
+// ---------------------------------------------------------------------------
+// learning loop WP-A: feedback log, symptom hypotheses (include override + user correction)
+
+export const feedbackApi = {
+  /** Feedback events (who / when / what / why) of a workspace, oldest first. */
+  listFeedback: (id: string) => get<FeedbackEvent[]>(`${ws(id)}/feedback`),
+  listHypotheses: (id: string) => get<SymptomHypothesis[]>(`${ws(id)}/hypotheses`),
+  /** `null` resets to the default (verified hypotheses only). */
+  setHypothesisInclude: (id: string, include: boolean | null) =>
+    post<SymptomHypothesis>(`/api/hypotheses/${enc(id)}/include`, { include }),
+  correctHypothesis: (id: string, body: HypothesisCorrection) =>
+    post<SymptomHypothesis>(`/api/hypotheses/${enc(id)}/correct`, body),
 };

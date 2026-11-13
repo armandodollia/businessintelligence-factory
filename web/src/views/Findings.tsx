@@ -3,6 +3,7 @@ import { findingCriteriaKeys, useFindings } from '../logic/hooks.js';
 import type { Symptom } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
+import { Hypotheses } from './Hypotheses.js';
 import { LastReviewNote } from './LastReviewNote.js';
 
 export function Findings({ wsId }: { wsId: string }) {
@@ -18,6 +19,8 @@ export function Findings({ wsId }: { wsId: string }) {
         <SymptomList wsId={wsId} title="What's going badly" items={f.symptoms} />
         <SymptomList wsId={wsId} title="What's going well" items={f.strengths} />
       </div>
+
+      <Hypotheses wsId={wsId} />
 
       <h3>Findings ({f.findings.length})</h3>
       {f.findings.map((x) => (
