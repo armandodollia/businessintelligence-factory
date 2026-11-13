@@ -176,6 +176,9 @@ describe('rating provenance', () => {
     // System decisions have no agent run.
     t.store.decisions.insert(decision({ id: 'dec_sys', agentRunId: 'user', promptVersion: 'n/a' }));
     expect(targetProvenance(t.store, 'ws_a', 'decision', 'dec_sys')).toEqual({ decisionId: 'dec_sys' });
+    // A user decision at a real prompt version (prompt patch approval) still has no agent run.
+    t.store.decisions.insert(decision({ id: 'dec_patch', agentRunId: 'ana', promptVersion: 'abcd1234', payload: { actor: 'user', actorId: 'ana' } }));
+    expect(targetProvenance(t.store, 'ws_a', 'decision', 'dec_patch')).toEqual({ decisionId: 'dec_patch', promptVersion: 'abcd1234' });
     // Other workspaces' decisions are not resolved.
     expect(targetProvenance(t.store, 'ws_b', 'decision', 'dec_log')).toEqual({});
   });

@@ -56,7 +56,8 @@ function fromRun(store: Store, runId: string | undefined): JudgmentProvenance {
 function fromDecision(store: Store, d: Decision): JudgmentProvenance {
   const out: JudgmentProvenance = { decisionId: d.id };
   const run = store.agentRuns.get(d.agentRunId);
-  if (run || d.promptVersion !== 'n/a') out.agentRunId = d.agentRunId;
+  const system = typeof (d.payload as { actor?: unknown } | null)?.actor === 'string'; // recordSystemDecision
+  if (run || (d.promptVersion !== 'n/a' && !system)) out.agentRunId = d.agentRunId;
   const version = d.promptVersion !== 'n/a' ? d.promptVersion : run?.promptVersion;
   if (version) out.promptVersion = version;
   return out;
