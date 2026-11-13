@@ -6,6 +6,7 @@ import { listBusEvents, persistBusEvent, pruneBusEvents } from '../../src/core/t
 import { createOtlpExporter, toOtlpLogRecord } from '../../src/core/telemetry/otlp.js';
 import { attachEventRecorders, type EventRecorders } from '../../src/core/telemetry/recorders.js';
 import { researchSetup, review, submitWork, addTask, tick } from './helpers/research.js';
+import { learningRepos } from '../../src/core/learning/store.js';
 import { runTaskWithReview } from '../../src/core/research/reviewLoop.js';
 import { MIGRATIONS } from '../../src/core/store/migrations.js';
 
@@ -56,6 +57,31 @@ describe('bus event persistence', () => {
     const next = listBusEvents(s.store, { workspaceId: 'ws_a', afterSeq: first[1]!.seq, limit: 2 });
     expect(next[0]!.seq).toBeGreaterThan(first[1]!.seq);
     expect(listBusEvents(s.store, { workspaceId: 'ws_other' })).toEqual([]);
+  });
+
+  it('integration: stores references only — usage, review issues, outcomes and decisions stay in their own tables', async () => {
+    const s = researchSetup(opened, {
+      config: (c) => (c.loop.maxRounds = 1),
+      pick: (r) => (r.kind === 'work' ? submitWork() : review(4, [{ class: 'substantive', description: 'REVIEW ISSUE TEXT no source' }])),
+    });
+    recorders.push(attachEventRecorders({ store: s.store, events: s.events, config: s.config }));
+    const task = addTask(s.store);
+    await runTaskWithReview(task, s.deps);
+    // WP-B usage arrives as a run_event (stored in agent_usage), never as a bus_events row.
+    s.events.emit({ type: 'run_event', workspaceId: 'ws_a', agentRunId: 'arun_u', event: { t: 'usage', inputTokens: 123456, outputTokens: 1 } as never });
+    expect(learningRepos(s.store).reviewIssues.list({ taskId: task.id }).map((r) => r.text)).toContain('REVIEW ISSUE TEXT no source');
+    expect(learningRepos(s.store).decisionOutcomes.list({ taskId: task.id }).length).toBeGreaterThan(0);
+    const all = listBusEvents(s.store, { workspaceId: 'ws_a', limit: 1000 });
+    expect([...new Set(all.map((e) => e.type))].sort()).toEqual(['run_status', 'task_status', 'tool_call']);
+    const dump = JSON.stringify(all);
+    expect(dump).not.toContain('REVIEW ISSUE TEXT');
+    expect(dump).not.toContain('123456');
+    const allowed: Record<string, string[]> = {
+      run_status: ['type', 'workspaceId', 'agentRunId', 'taskId', 'status', 'exitCode', 'reason'],
+      task_status: ['type', 'workspaceId', 'taskId', 'status'],
+      tool_call: ['type', 'workspaceId', 'agentRunId', 'tool', 'ok', 'error'],
+    };
+    for (const e of all) for (const k of Object.keys(e.payload)) expect(allowed[e.type]).toContain(k);
   });
 
   it('keeps user requests as ids only and redacts identity secrets', () => {
