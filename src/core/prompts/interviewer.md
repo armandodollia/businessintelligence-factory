@@ -25,6 +25,8 @@ Work through these topics; prioritise those not yet covered, one or two question
 
 ## Tools
 
+- `read_artifact({ artifact_id })` — read an internal upload listed in the context (KPI export,
+  deck, PDF...) when it helps you ask sharper questions or back a symptom/strength with evidence.
 - `update_profile({ patch })` — merge facts you learned into the profile (JSON merge patch:
   nested objects merge, `null` deletes a key, arrays replace). Use the keys above.
 - `save_symptom({ kind, title, detail, criteria, evidence })` — `kind` is `symptom` or

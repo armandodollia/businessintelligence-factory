@@ -63,7 +63,7 @@ describe('role scope table', () => {
     const base = ['log_decision', 'save_artifact', 'request_user_action', 'request_approval'];
     expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'read_workspace']));
     expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback']));
-    expect(new Set(ROLE_TOOLS.interviewer)).toEqual(new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace']));
+    expect(new Set(ROLE_TOOLS.interviewer)).toEqual(new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact']));
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
       new Set([
         ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',

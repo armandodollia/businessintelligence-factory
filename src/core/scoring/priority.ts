@@ -4,6 +4,7 @@ import { findReplay, titleKey } from '../harness/tools/idempotency.js';
 import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
+import type { RunContext } from '../harness/tokens.js';
 import type { Criteria, Decision, Recommendation } from '../types.js';
 import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, pctFraction, toNumber } from './criteria.js';
 
@@ -161,6 +162,30 @@ export function checkRecommendationCriteria(c: Criteria): string | undefined {
 
 const fail = (error: string): ToolResult => ({ ok: false, error });
 
+/** JSON with sorted object keys (order-insensitive equality of criteria). */
+function stableJson(v: unknown): string {
+  return JSON.stringify(v, (_k, x: unknown) =>
+    x && typeof x === 'object' && !Array.isArray(x)
+      ? Object.fromEntries(Object.entries(x as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : x,
+  );
+}
+
+function scoreDecision(ctx: RunContext, payload: Record<string, unknown>, refs: string[]): Decision {
+  return {
+    id: newId('dec'),
+    workspaceId: ctx.workspaceId,
+    agentRunId: ctx.agentRunId,
+    role: ctx.role,
+    model: ctx.model,
+    kind: 'score',
+    payload,
+    refs: [...new Set(refs)],
+    promptVersion: ctx.promptVersion,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 /** `save_recommendation` handler (synthesizer): validates findings + criteria, stores with computed priority. */
 export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler>> {
   return {
@@ -182,8 +207,31 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
         const prior = store.recommendations.get(id)!;
         const next = { ...prior, summary: input.summary, criteria: input.criteria, findingIds: input.finding_ids };
         const priority = computePriority(next, config.scoring);
-        store.recommendations.update(id, { summary: next.summary, criteria: next.criteria, findingIds: next.findingIds, priority });
-        return { ok: true, data: { recommendationId: id, priority, duplicate: true } };
+        const changed =
+          prior.summary !== next.summary ||
+          stableJson(prior.criteria) !== stableJson(next.criteria) ||
+          stableJson([...prior.findingIds].sort()) !== stableJson([...next.findingIds].sort());
+        if (!changed) {
+          // Identical replay: nothing new was judged — no second Decision.
+          store.recommendations.update(id, { priority });
+          return { ok: true, data: { recommendationId: id, priority, duplicate: true } };
+        }
+        // A revision is a new judgment: record a new score Decision (ratings made after it join it).
+        const previous = store.decisions
+          .list({ workspaceId: ctx.workspaceId, kind: 'score' })
+          .filter((d) => (d.payload as { tool?: string; recommendationId?: string } | null)?.recommendationId === id)
+          .at(-1);
+        const payload: Record<string, unknown> = {
+          tool: 'save_recommendation', recommendationId: id, criteria: input.criteria, priority, revisionOf: previous?.id ?? replay.id,
+        };
+        if (input.priority !== undefined) payload.agentPriority = input.priority;
+        const decision = scoreDecision(ctx, payload, [id, ...input.finding_ids]);
+        store.transaction(() => {
+          store.recommendations.update(id, { summary: next.summary, criteria: next.criteria, findingIds: next.findingIds, priority });
+          store.decisions.insert(decision);
+        });
+        events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision });
+        return { ok: true, data: { recommendationId: id, priority, duplicate: true, revised: true } };
       }
       const rec: Recommendation = {
         id: newId('rec'),
@@ -199,18 +247,7 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
       rec.priority = computePriority(rec, config.scoring);
       const payload: Record<string, unknown> = { tool: 'save_recommendation', recommendationId: rec.id, criteria: input.criteria, priority: rec.priority };
       if (input.priority !== undefined) payload.agentPriority = input.priority;
-      const decision: Decision = {
-        id: newId('dec'),
-        workspaceId: ctx.workspaceId,
-        agentRunId: ctx.agentRunId,
-        role: ctx.role,
-        model: ctx.model,
-        kind: 'score',
-        payload,
-        refs: [...new Set([rec.id, ...input.finding_ids])],
-        promptVersion: ctx.promptVersion,
-        createdAt: new Date().toISOString(),
-      };
+      const decision = scoreDecision(ctx, payload, [rec.id, ...input.finding_ids]);
       store.transaction(() => {
         store.recommendations.insert(rec);
         store.decisions.insert(decision);

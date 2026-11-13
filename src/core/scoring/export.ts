@@ -4,16 +4,11 @@ import type { Decision, Rating } from '../types.js';
 /** Payload keys naming a decision's primary subject, in precedence order. */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId'] as const;
 
-/**
- * Ids whose (non-persona_feedback) ratings join a decision: its primary subject id when the payload
- * names one (e.g. a `save_finding` score decision joins only that finding's ratings, not ratings of
- * the evidence or task it also references); otherwise its refs. Ratings of the decision itself
- * (targetType `decision`) always join.
- */
-function joinTargets(d: Decision): Set<string> {
+/** The primary subject id a (non-persona_feedback) decision judges, if its payload names one. */
+function primarySubject(d: Decision): string | undefined {
   const p = (d.payload ?? {}) as Record<string, unknown>;
-  for (const k of PRIMARY_KEYS) if (typeof p[k] === 'string') return new Set([p[k] as string]);
-  return new Set(d.refs);
+  for (const k of PRIMARY_KEYS) if (typeof p[k] === 'string') return p[k] as string;
+  return undefined;
 }
 
 /**
@@ -42,36 +37,74 @@ function uploadIds(store: Store): Set<string> {
   return ids;
 }
 
+/** Evidence artifacts an item cites: finding / symptom evidence, persona field evidence, and a
+ * recommendation's findings' evidence. Empty for anything else. */
+function evidenceOf(store: Store, id: string): string[] {
+  const f = store.findings.get(id);
+  if (f) return f.evidence;
+  const s = store.symptoms.get(id);
+  if (s) return s.evidence;
+  const p = store.personas.get(id);
+  if (p) return Object.values(p.profile ?? {}).flatMap((x) => x.evidence ?? []);
+  const r = store.recommendations.get(id);
+  if (r) return r.findingIds.flatMap((fid) => store.findings.get(fid)?.evidence ?? []);
+  return [];
+}
+
 /**
- * A decision's refs expanded one hop: each referenced finding / symptom / persona contributes the
- * evidence artifacts it cites (so a decision about a finding backed by an upload is upload-linked).
+ * A decision's refs expanded by the evidence the referenced items cite (finding / symptom / persona
+ * evidence; recommendation → its findings → their evidence), so a decision about an item backed by
+ * an internal upload counts as upload-linked.
  */
 function expandedRefs(store: Store, d: Decision): string[] {
   const out = new Set(d.refs);
-  for (const id of d.refs) {
-    const evidence =
-      store.findings.get(id)?.evidence ??
-      store.symptoms.get(id)?.evidence ??
-      Object.values(store.personas.get(id)?.profile ?? {}).flatMap((f) => f.evidence ?? []);
-    for (const e of evidence) out.add(e);
-  }
+  const subject = primarySubject(d);
+  for (const id of subject ? [...d.refs, subject] : d.refs) for (const e of evidenceOf(store, id)) out.add(e);
   return [...out];
 }
 
 /**
+ * For each primary subject, its judgments (decisions naming it) in log order; a rating of the
+ * subject joins the judgment that was current when the rating was made — the latest one created at
+ * or before the rating (the first one when the rating predates them all). So after a revision
+ * (e.g. a recommendation re-scored), later ratings join the new judgment, earlier ones the old.
+ */
+function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | undefined {
+  const list = judgments.get(r.targetId);
+  if (!list?.length) return undefined;
+  let pick = list[0]!;
+  for (const d of list) if (d.createdAt <= r.createdAt) pick = d;
+  return pick;
+}
+
+/**
  * Training export: one JSON line per decision in the workspace (`{decision, ratings}`), joined with
- * the user's ratings. A persona_feedback decision joins only the persona_feedback ratings of exactly
- * its `<recId>:<personaId>`; other decisions join ratings of their primary subject (see
- * `joinTargets`) and never persona_feedback ratings; every decision joins ratings of itself.
- * Decisions referencing an internal upload — directly or through a referenced finding / symptom /
- * persona's evidence (one hop) — are excluded unless `includeUploads`.
+ * the user's ratings:
+ * - every decision joins ratings of itself (targetType `decision`);
+ * - a persona_feedback decision joins only the persona_feedback ratings of exactly its
+ *   `<recId>:<personaId>`;
+ * - a decision with a primary subject (`findingId` / `symptomId` / `recommendationId` /
+ *   `personaId` in its payload) joins that subject's ratings made while it was the latest judgment
+ *   of the subject (`judgmentFor`);
+ * - any other decision joins ratings of its refs.
+ * Decisions referencing an internal upload — directly or via the evidence of a referenced item
+ * (`expandedRefs`) — are excluded unless `includeUploads`.
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   const { store } = deps;
   const ratings = store.ratings.list({ workspaceId });
+  const decisions = store.decisions.list({ workspaceId });
   const uploads = includeUploads ? undefined : uploadIds(store);
+
+  const judgments = new Map<string, Decision[]>();
+  for (const d of decisions) {
+    if (d.kind === 'persona_feedback') continue;
+    const s = primarySubject(d);
+    if (s) judgments.set(s, [...(judgments.get(s) ?? []), d]);
+  }
+
   const lines: string[] = [];
-  for (const decision of store.decisions.list({ workspaceId })) {
+  for (const decision of decisions) {
     if (uploads && expandedRefs(store, decision).some((id) => uploads.has(id))) continue;
     const self = (r: Rating) => r.targetType === 'decision' && r.targetId === decision.id;
     let joined: Rating[];
@@ -79,10 +112,14 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
       const target = feedbackTargetId(decision);
       joined = ratings.filter((r) => self(r) || (r.targetType === 'persona_feedback' && r.targetId === target));
     } else {
-      const targets = joinTargets(decision);
-      joined = ratings.filter(
-        (r) => self(r) || (r.targetType !== 'persona_feedback' && r.targetType !== 'decision' && targets.has(r.targetId)),
-      );
+      const subject = primarySubject(decision);
+      const refs = new Set(decision.refs);
+      joined = ratings.filter((r) => {
+        if (self(r)) return true;
+        if (r.targetType === 'persona_feedback' || r.targetType === 'decision') return false;
+        if (subject) return r.targetId === subject && judgmentFor(judgments, r)?.id === decision.id;
+        return refs.has(r.targetId);
+      });
     }
     lines.push(JSON.stringify({ decision, ratings: joined }));
   }

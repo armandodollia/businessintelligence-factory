@@ -85,7 +85,18 @@ describe('replayed tool calls are idempotent', () => {
     expect(b).toMatchObject({ recommendationId: a.recommendationId, duplicate: true });
     expect(store.recommendations.list()).toHaveLength(1);
     expect(store.recommendations.get(a.recommendationId)).toMatchObject({ summary: 'v2', criteria: { upside: 5 } });
-    expect(store.decisions.list({ kind: 'score' })).toHaveLength(1);
+    // The revision (upside 4 → 5, new summary) is a new judgment: a second score Decision.
+    const scores = store.decisions.list({ kind: 'score' });
+    expect(scores).toHaveLength(2);
+    expect(scores.map((d) => (d.payload as { criteria: { upside: number } }).criteria.upside)).toEqual([4, 5]);
+    expect(b).toMatchObject({ revised: true });
+    // An identical replay is deduped: no third decision.
+    const c3 = data<{ duplicate: boolean; revised?: boolean }>(
+      await handle(c2, 'save_recommendation', { title: 'Cut prices', summary: 'v2', finding_ids: ['fnd_1'], criteria: { upside: 5 } }),
+    );
+    expect(c3).toMatchObject({ duplicate: true });
+    expect(c3.revised).toBeUndefined();
+    expect(store.decisions.list({ kind: 'score' })).toHaveLength(2);
   });
 
   it('propose_business_unit: one proposal per (task, name)', async () => {
