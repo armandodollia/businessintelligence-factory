@@ -1322,7 +1322,7 @@ target serves. Design §7.3 and §9 ("Paging") state the binding rules; the choi
   pages it appears only when the last hit leaves room, so `crossNode` checks a range of budgets.
 - **Retrieval rows** are deduplicated per page (`uniqueRefs`), search included.
 - **Tests.** Acceptance: `pagingSweep[A-D].test.ts` (shapes in `sweepHelpers.ts` `SWEEP_SPECS`, four
-  shards so they run in parallel): 28 request shapes, about 140 budgets each from 1 to 2 400 plus restarts
+  shards so they run in parallel): 28 request shapes, about 105 budgets each from 1 to 2 400 plus restarts
   from three later cursors at four budgets; about 21 000 pages and 1 500 pointers followed per run
   (same_call ~970, read_workspace_line ~290, get_card_line ~130, expand_id ~120). The four findings at
   dadcd82 and the floors: `pagingFindings.test.ts`. The paging tests that encoded the old algorithm
