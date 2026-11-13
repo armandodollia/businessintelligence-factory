@@ -1,5 +1,5 @@
 import { shortDate } from '../logic/format.js';
-import { useFindings } from '../logic/hooks.js';
+import { findingCriteriaKeys, useFindings } from '../logic/hooks.js';
 import type { Symptom } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
@@ -50,7 +50,7 @@ export function Findings({ wsId }: { wsId: string }) {
             </button>
           )}
           {x.status !== 'verified' && x.lastReview && <LastReviewNote review={x.lastReview} />}
-          <CriteriaRatings workspaceId={wsId} targetType="finding" targetId={x.id} criteria={x.criteria} />
+          <CriteriaRatings workspaceId={wsId} targetType="finding" targetId={x.id} criteria={x.criteria} only={findingCriteriaKeys(x.criteria)} />
           <EvidenceList ids={x.evidence} />
         </div>
       ))}

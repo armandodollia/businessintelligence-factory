@@ -10,7 +10,7 @@ import { TokenRegistry } from '../../src/core/harness/tokens.js';
 import { createToolHandlers } from '../../src/core/harness/tools/handlers.js';
 import { uploadInternal } from '../../src/core/internal/uploads.js';
 import { loadPrompt } from '../../src/core/prompts/index.js';
-import { applyPromptPatch, calibrationReport, proposePromptPatch, proposeWeights } from '../../src/core/scoring/calibration.js';
+import { applyPromptPatch, calibrationReport, calibrationScope, proposePromptPatch, proposeWeights } from '../../src/core/scoring/calibration.js';
 import { CRITERIA, PERSONA_FIELDS, RECOMMENDATION_KEYS } from '../../src/core/scoring/criteria.js';
 import { exportTrainingData } from '../../src/core/scoring/export.js';
 import { checkRecommendationCriteria, computePriority, costScore, scoreRecommendations, scoringToolHandlers } from '../../src/core/scoring/priority.js';
@@ -19,15 +19,8 @@ import { openStore, type Store } from '../../src/core/store/db.js';
 import type { Decision, Finding, PersonaFeedback, Recommendation } from '../../src/core/types.js';
 
 const opened: Store[] = [];
-let prevCalDir: string | undefined;
-beforeEach(() => {
-  prevCalDir = process.env.BIF_CALIBRATION_DIR;
-  process.env.BIF_CALIBRATION_DIR = mkdtempSync(join(tmpdir(), 'bif-cal-'));
-});
 afterEach(() => {
   for (const s of opened.splice(0)) s.close();
-  if (prevCalDir === undefined) delete process.env.BIF_CALIBRATION_DIR;
-  else process.env.BIF_CALIBRATION_DIR = prevCalDir;
 });
 
 function setup() {
@@ -207,6 +200,38 @@ describe('calibration', () => {
     const rep = calibrationReport('ws_a', t);
     // meanDelta is normalized per scale: (2 − 4)/4 = −0.5 and an agree counts 0 → −0.25.
     expect(rep.byCriterion).toEqual([{ targetType: 'recommendation', criterion: 'upside', n: 2, agreeRate: 0.5, meanDelta: -0.25 }]);
+    expect(rep.byRoleTask).toEqual([
+      { role: 'synthesizer', targetType: 'recommendation', criterion: 'upside', n: 2, agreeRate: 0.5, meanDelta: -0.25 },
+    ]);
+  });
+
+  it('calibrationReport also groups by role and task type (spec §10)', () => {
+    const t = setup();
+    const task = (id: string, type: 'news_scan' | 'discover_competitors') =>
+      t.store.tasks.insert({
+        id, workspaceId: 'ws_a', runId: 'rr', phase: 'deep_dives', type, brief: 'b', model: { provider: 'claude', model: 'sonnet' },
+        needsBrowser: false, acceptanceCriteria: ['x'], status: 'verified', round: 1, createdAt: 'now',
+      });
+    task('tsk_news', 'news_scan');
+    task('tsk_comp', 'discover_competitors');
+    const finding = (id: string, taskId: string) =>
+      t.store.findings.insert({
+        id, workspaceId: 'ws_a', runId: 'rr', taskId, subject: 'Acme', claim: id, criteria: { relevance: 4 }, evidence: [], status: 'verified', createdAt: 'now',
+      });
+    finding('fnd_1', 'tsk_news');
+    finding('fnd_2', 'tsk_comp');
+    finding('fnd_3', 'tsk_comp');
+    t.store.symptoms.insert({ id: 'sym_1', workspaceId: 'ws_a', kind: 'symptom', title: 's', detail: 'd', criteria: { severity: 5, trend: '↓', causeConfidence: 50 }, evidence: [] });
+    for (const id of ['fnd_1', 'fnd_2']) rateCriterion({ workspaceId: 'ws_a', targetType: 'finding', targetId: id, criterion: 'relevance', verdict: 'agree' }, t);
+    rateCriterion({ workspaceId: 'ws_a', targetType: 'finding', targetId: 'fnd_3', criterion: 'relevance', verdict: 'disagree', userValue: 2 }, t);
+    rateCriterion({ workspaceId: 'ws_a', targetType: 'symptom', targetId: 'sym_1', criterion: 'severity', verdict: 'disagree', userValue: 1 }, t);
+    const rep = calibrationReport('ws_a', t);
+    expect(rep.byCriterion.find((r) => r.criterion === 'relevance')).toMatchObject({ n: 3 });
+    expect(rep.byRoleTask).toEqual([
+      { role: 'interviewer', targetType: 'symptom', criterion: 'severity', n: 1, agreeRate: 0, meanDelta: -1 },
+      { role: 'worker', taskType: 'discover_competitors', targetType: 'finding', criterion: 'relevance', n: 2, agreeRate: 0.5, meanDelta: -0.25 },
+      { role: 'worker', taskType: 'news_scan', targetType: 'finding', criterion: 'relevance', n: 1, agreeRate: 1, meanDelta: 0 },
+    ]);
   });
 
   it('proposeWeights returns current when n<5', () => {
@@ -246,17 +271,54 @@ describe('calibration', () => {
     expect(patch.patchText).toContain('renewals down');
     expect(proposePromptPatch('ws_a', 'worker', t).examples).toHaveLength(0);
 
-    const before = loadPrompt('interviewer').version;
-    const { path } = applyPromptPatch(patch);
+    const scope = calibrationScope(t.store, t.dir, 'ws_a');
+    const before = loadPrompt('interviewer', scope).version;
+    const { path } = applyPromptPatch(patch, scope);
+    expect(path).toBe(join(t.dir, 'ws_a', 'calibration', 'interviewer.md'));
     expect(existsSync(path)).toBe(true);
     expect(readFileSync(path, 'utf8')).toContain('only one account churned');
-    const after = loadPrompt('interviewer');
+    const after = loadPrompt('interviewer', scope);
     expect(after.version).not.toBe(before);
     expect(after.text).toContain('only one account churned');
   });
 });
 
 describe('export', () => {
+  it('upload-derived submit_result (and its review / pushbacks) are excluded by default (final review C3)', async () => {
+    const t = setup();
+    const up = uploadInternal('ws_a', { name: 'kpi.csv', bytes: new TextEncoder().encode('renewals -12%'), mime: 'text/csv' }, t);
+    const web = t.artifacts.save({ workspaceId: 'ws_a', kind: 'text', mime: 'text/plain', bytes: 'public news' });
+    const task = (id: string, brief: string) =>
+      t.store.tasks.insert({
+        id, workspaceId: 'ws_a', runId: 'rr', phase: 'synthesis', type: 'symptom_hypotheses', brief, model: { provider: 'claude', model: 'sonnet' },
+        needsBrowser: false, acceptanceCriteria: ['x'], status: 'running', round: 1, createdAt: NOW,
+      });
+    task('tsk_up', `Explain renewals using the KPI export ${up.id}`);
+    task('tsk_pub', 'Scan the news');
+    // The public task's finding rests on public evidence only.
+    t.store.findings.insert({ id: 'fnd_pub', workspaceId: 'ws_a', runId: 'rr', taskId: 'tsk_pub', subject: 'Acme', claim: 'c', criteria: {}, evidence: [web.id], status: 'verified', createdAt: NOW });
+    const handle = createToolHandlers({ ...t, events: new EventBus() });
+    const ctx = (taskId: string, agentRunId: string) => ({
+      agentRunId, workspaceId: 'ws_a', taskId, role: 'worker' as const, model: { provider: 'claude' as const, model: 'sonnet' }, promptVersion: 'pv',
+    });
+    // The deliverable text paraphrases the upload without citing its id.
+    expect((await handle(ctx('tsk_up', 'arun_up'), 'submit_result', { summary: 'Renewals fell 12% QoQ (internal KPI)' })).ok).toBe(true);
+    expect((await handle(ctx('tsk_pub', 'arun_pub'), 'submit_result', { summary: 'News is quiet', findings: ['fnd_pub'] })).ok).toBe(true);
+    const upResult = t.store.decisions.list({ agentRunId: 'arun_up' })[0]!;
+    // Provenance recorded on the decision itself.
+    expect(upResult.payload).toMatchObject({ tool: 'submit_result', provenance: [up.id] });
+    expect(upResult.refs).toEqual(['tsk_up', up.id]);
+    expect(t.store.decisions.list({ agentRunId: 'arun_pub' })[0]!.payload).toMatchObject({ provenance: [web.id] });
+    // Legacy decisions without recorded provenance: export still traverses the task's outputs.
+    t.store.decisions.insert(decision({ id: 'dec_review_up', kind: 'review', agentRunId: 'arun_rev', payload: { tool: 'submit_review', score: 8, issues: [] }, refs: ['tsk_up'] }));
+    t.store.decisions.insert(decision({ id: 'dec_legacy_up', agentRunId: 'arun_legacy', payload: { tool: 'submit_result', result: { s: 'x' } }, refs: ['tsk_up'] }));
+
+    const ids = exportTrainingData('ws_a', t).trim().split('\n').map((l) => JSON.parse(l).decision.id as string);
+    expect(ids).toEqual([t.store.decisions.list({ agentRunId: 'arun_pub' })[0]!.id]);
+    const all = exportTrainingData('ws_a', t, true).trim().split('\n');
+    expect(all).toHaveLength(4);
+  });
+
   it('export excludes upload-linked decisions by default', () => {
     const t = setup();
     const up = uploadInternal('ws_a', { name: 'kpi.csv', bytes: new TextEncoder().encode('x'), mime: 'text/csv' }, t);

@@ -1,8 +1,9 @@
+import { artifactIdsIn } from '../harness/tools/handlers.js';
 import type { Store } from '../store/db.js';
 import type { Decision, Rating } from '../types.js';
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
-const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId'] as const;
+const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
 
 /** The primary subject id a (non-persona_feedback) decision judges, if its payload names one. */
 function primarySubject(d: Decision): string | undefined {
@@ -48,18 +49,47 @@ function evidenceOf(store: Store, id: string): string[] {
   if (p) return Object.values(p.profile ?? {}).flatMap((x) => x.evidence ?? []);
   const r = store.recommendations.get(id);
   if (r) return r.findingIds.flatMap((fid) => store.findings.get(fid)?.evidence ?? []);
+  const c = store.competitors.get(id);
+  if (c) return c.evidence;
+  const h = store.symptomHypotheses.get(id);
+  if (h) return h.evidence.flatMap((e) => store.findings.get(e)?.evidence ?? [e]);
   return [];
 }
 
 /**
- * A decision's refs expanded by the evidence the referenced items cite (finding / symptom / persona
- * evidence; recommendation → its findings → their evidence), so a decision about an item backed by
- * an internal upload counts as upload-linked.
+ * Everything a task's outputs rest on: its findings' evidence, artifact ids cited in its
+ * deliverable (`result`) or brief. Empty for a non-task id.
+ */
+function taskEvidence(store: Store, id: string): string[] {
+  const task = store.tasks.get(id);
+  if (!task) return [];
+  const out = new Set<string>(artifactIdsIn(task.result));
+  for (const a of artifactIdsIn(task.brief)) out.add(a);
+  for (const f of store.findings.list({ taskId: task.id })) for (const e of f.evidence) out.add(e);
+  return [...out];
+}
+
+const ITEM_ID = /\b(?:art|fnd|sym|rec|per|tsk|cmp|hyp)_[0-9A-Z]{26}\b/g;
+
+/**
+ * A decision's provenance: its refs and every item id in its payload (artifact / finding /
+ * task ids an agent wrote, recorded `provenance`), expanded by the evidence the referenced items
+ * cite (finding / symptom / persona evidence; recommendation → its findings → their evidence) and
+ * by task outputs (a referenced task, and the task of the decision's own run: its findings,
+ * deliverable and brief). So a decision whose result was derived from an internal upload counts as
+ * upload-linked even when the upload id appears only in the task's outputs.
  */
 function expandedRefs(store: Store, d: Decision): string[] {
   const out = new Set(d.refs);
   const subject = primarySubject(d);
-  for (const id of subject ? [...d.refs, subject] : d.refs) for (const e of evidenceOf(store, id)) out.add(e);
+  if (subject) out.add(subject);
+  for (const m of JSON.stringify(d.payload ?? null).matchAll(ITEM_ID)) out.add(m[0]);
+  const runTask = store.agentRuns.get(d.agentRunId)?.taskId;
+  if (runTask) out.add(runTask);
+  for (const id of [...out]) {
+    for (const e of evidenceOf(store, id)) out.add(e);
+    for (const e of taskEvidence(store, id)) out.add(e);
+  }
   return [...out];
 }
 

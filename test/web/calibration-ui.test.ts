@@ -2,7 +2,9 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Decision } from '../../src/core/types.js';
+import { changedArtifactLabel } from '../../web/src/logic/format.js';
 import {
+  findingCriteriaKeys,
   parseWeight,
   toChangeEntry,
   useChanges,
@@ -178,6 +180,16 @@ describe('what changed', () => {
     ).toBe(true);
     expect(toChangeEntry(decision('d3', { tool: 'set_scoring_weights' }))).toBeNull();
     expect(toChangeEntry(decision('d4', null))).toBeNull();
+  });
+
+  it('changed screenshots are labelled with their competitor (older diffs without subject still render)', () => {
+    expect(changedArtifactLabel({ subject: 'Globex', flow: 'signup', step: 1 })).toBe('Globex · signup step 1');
+    expect(changedArtifactLabel({ flow: 'checkout', step: 2 })).toBe('checkout step 2');
+  });
+
+  it('findingCriteriaKeys keeps finding criteria only (competitor keys are rated on competitors)', () => {
+    expect(findingCriteriaKeys({ threat: 5, relevance: 4, pricing: 2, novelty: 3 })).toEqual(['relevance', 'novelty']);
+    expect(findingCriteriaKeys({})).toEqual([]);
   });
 
   it('lists changes newest first and appends live what_changed events', async () => {

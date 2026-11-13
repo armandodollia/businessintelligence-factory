@@ -257,9 +257,40 @@ describe('diffRuns', () => {
     addFinding(t.store, t.ws.id, b.id, 'Acme', 'Signup takes 2 steps', [s1.id, s2b.id]);
 
     const d = diffRuns(a.id, b.id, { store: t.store });
-    expect(d.changedArtifacts).toEqual([{ flow: 'signup', step: 2, prev: s2.id, next: s2b.id }]);
+    expect(d.changedArtifacts).toEqual([{ subject: 'Acme', flow: 'signup', step: 2, prev: s2.id, next: s2b.id }]);
     expect(d.newFindings).toEqual([]);
     expect(d.removedSubjects).toEqual([]);
+  });
+
+  it('two competitors\' signup#1 are matched per subject, not across competitors (final review C5)', () => {
+    const t = setup();
+    const a = addRun(t.store, t.ws.id);
+    const b = addRun(t.store, t.ws.id);
+    const acme1 = shot(t, 'signup', 1, 'acme signup v1');
+    const globex1 = shot(t, 'signup', 1, 'globex signup v1');
+    addFinding(t.store, t.ws.id, a.id, 'Acme', 'Acme signup', [acme1.id]);
+    addFinding(t.store, t.ws.id, a.id, 'Globex', 'Globex signup', [globex1.id]);
+    // Next run: Globex listed first (would previously steal the shared `signup#1` key); only Acme changed.
+    const acme1b = shot(t, 'signup', 1, 'acme signup v2');
+    addFinding(t.store, t.ws.id, b.id, 'globex ', 'Globex signup', [globex1.id]);
+    addFinding(t.store, t.ws.id, b.id, 'ACME', 'Acme signup', [acme1b.id]);
+    const d = diffRuns(a.id, b.id, { store: t.store });
+    expect(d.changedArtifacts).toEqual([{ subject: 'ACME', flow: 'signup', step: 1, prev: acme1.id, next: acme1b.id }]);
+  });
+
+  it('falls back to the screenshot source host when the subject is empty', () => {
+    const t = setup();
+    const a = addRun(t.store, t.ws.id);
+    const b = addRun(t.store, t.ws.id);
+    const save = (host: string, content: string) =>
+      t.artifacts.save({ workspaceId: t.ws.id, kind: 'screenshot', mime: 'image/png', flow: 'signup', step: 1, sourceUrl: `https://www.${host}/signup`, bytes: content });
+    const x1 = save('x.com', 'x v1');
+    const y1 = save('y.com', 'y v1');
+    addFinding(t.store, t.ws.id, a.id, '', 'signup flows', [x1.id, y1.id]);
+    const y1b = save('y.com', 'y v2');
+    addFinding(t.store, t.ws.id, b.id, '', 'signup flows', [x1.id, y1b.id]);
+    const d = diffRuns(a.id, b.id, { store: t.store });
+    expect(d.changedArtifacts).toEqual([{ subject: 'y.com', flow: 'signup', step: 1, prev: y1.id, next: y1b.id }]);
   });
 
   it('new claims (e.g. changed pricing) are new findings; vanished subjects are removed', () => {

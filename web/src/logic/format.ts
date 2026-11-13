@@ -89,6 +89,11 @@ export function eventRunId(e: BusEvent): string | undefined {
   return 'agentRunId' in e ? e.agentRunId : undefined;
 }
 
+/** "Globex · signup step 1" (subject omitted on diffs recorded before subjects were tracked). */
+export function changedArtifactLabel(a: { subject?: string; flow: string; step: number }): string {
+  return `${a.subject ? `${a.subject} · ` : ''}${a.flow} step ${a.step}`;
+}
+
 /** Ratable decision criteria (mirrors core `CRITERIA.decision`). */
 export const DECISION_CRITERIA = ['confidence', 'score'] as const;
 

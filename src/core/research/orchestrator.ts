@@ -8,6 +8,7 @@ import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
 import { listUploads } from '../internal/uploads.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
+import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Pipeline, ResearchRun, Task, TaskType, Workspace } from '../types.js';
@@ -306,7 +307,7 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
 
 async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: number): Promise<void> {
   const { store, config } = deps;
-  const system = loadPrompt('orchestrator').text;
+  const system = loadPrompt('orchestrator', calibrationScope(store, config.dataDir, rr.workspaceId)).text;
   const version = promptVersion(system);
   const model = config.roles.orchestrator;
   const before = store.tasks.list({ runId: rr.id }).length;

@@ -343,4 +343,34 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX pipelines_ws ON pipelines (workspace_id);
   ALTER TABLE research_runs ADD COLUMN pipeline_id TEXT;
   `,
+  // 12: final review C — rated competitors (spec §9) and persisted symptom hypotheses (spec §8 drill-down).
+  `
+  CREATE TABLE competitors (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    site TEXT,
+    threat INTEGER NOT NULL,
+    directness INTEGER NOT NULL,
+    comparison TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    task_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX competitors_ws ON competitors (workspace_id);
+
+  CREATE TABLE symptom_hypotheses (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    symptom_id TEXT NOT NULL,
+    hypothesis TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence TEXT NOT NULL,
+    task_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX symptom_hypotheses_ws ON symptom_hypotheses (workspace_id);
+  CREATE INDEX symptom_hypotheses_symptom ON symptom_hypotheses (symptom_id);
+  `,
 ];

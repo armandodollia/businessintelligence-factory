@@ -10,6 +10,7 @@ import type {
   PromptPatch,
   ScoringWeights,
   CalibrationReport,
+  CompetitorView,
   CreateWorkspaceInput,
   Decision,
   Finding,
@@ -130,6 +131,7 @@ export const api = {
   setPersonaInclude: (id: string, include: boolean | null) => post<PersonaNode>(`/api/personas/${enc(id)}/include`, { include }),
   listSymptoms: (id: string) => get<Symptom[]>(`${ws(id)}/symptoms`),
   listPersonas: (id: string) => get<PersonaView[]>(`${ws(id)}/personas`),
+  listCompetitors: (id: string) => get<CompetitorView[]>(`${ws(id)}/competitors`),
   listRecommendations: (id: string) => get<RecommendationView[]>(`${ws(id)}/recommendations`),
   listDecisions: (id: string, kind?: Decision['kind']) =>
     get<Decision[]>(`${ws(id)}/decisions${kind ? `?kind=${enc(kind)}` : ''}`),

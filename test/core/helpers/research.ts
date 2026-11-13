@@ -28,6 +28,7 @@ export function researchSetup(opened: Store[], opts: SetupOptions = {}) {
   const store = openStore(join(dir, 'bif.db'));
   opened.push(store);
   const config = structuredClone(defaultConfig);
+  config.dataDir = dir;
   config.limits.idleTimeoutMs = 5000;
   opts.config?.(config);
   const events = new EventBus();

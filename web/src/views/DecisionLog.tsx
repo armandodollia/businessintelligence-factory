@@ -99,6 +99,34 @@ export function DecisionLog({ wsId }: { wsId: string }) {
           </tbody>
         </table>
       )}
+      {cal.report?.byRoleTask && cal.report.byRoleTask.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Role</th>
+              <th>Task type</th>
+              <th>Target</th>
+              <th>Criterion</th>
+              <th>n</th>
+              <th>Agree rate</th>
+              <th>Mean delta</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cal.report.byRoleTask.map((c) => (
+              <tr key={`${c.role}:${c.taskType ?? ''}:${c.targetType}:${c.criterion}`}>
+                <td>{c.role}</td>
+                <td>{c.taskType ?? '—'}</td>
+                <td>{c.targetType}</td>
+                <td>{c.criterion}</td>
+                <td>{c.n}</td>
+                <td>{Math.round(c.agreeRate * 100)}%</td>
+                <td>{formatValue(c.meanDelta)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <PromptPatchPanel wsId={wsId} />
     </div>

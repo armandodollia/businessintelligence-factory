@@ -189,11 +189,16 @@ describe('export r2', () => {
 });
 
 describe('competitor ratings', () => {
-  it('require at least one finding with that subject', () => {
+  it('resolve to the competitors table, not to finding subjects', () => {
     const t = setup();
-    expect(() => rateCriterion({ workspaceId: 'ws_a', targetType: 'competitor', targetId: 'Globex', criterion: 'threat', verdict: 'agree' }, t)).toThrow(/not found/);
     t.store.findings.insert(finding('fnd_g', [], 'Globex'));
-    expect(rateCriterion({ workspaceId: 'ws_a', targetType: 'competitor', targetId: 'Globex', criterion: 'threat', verdict: 'agree' }, t).agentValue).toBeNull();
+    expect(() => rateCriterion({ workspaceId: 'ws_a', targetType: 'competitor', targetId: 'Globex', criterion: 'threat', verdict: 'agree' }, t)).toThrow(/not found/);
+    t.store.competitors.insert({
+      id: 'cmp_g', workspaceId: 'ws_a', name: 'Globex', threat: 4, directness: 3, comparison: { pricing: 2, onboarding: 5, ux: 4, features: 3 },
+      evidence: [], createdAt: NOW, updatedAt: NOW,
+    });
+    expect(rateCriterion({ workspaceId: 'ws_a', targetType: 'competitor', targetId: 'cmp_g', criterion: 'threat', verdict: 'agree' }, t).agentValue).toBe(4);
+    expect(rateCriterion({ workspaceId: 'ws_a', targetType: 'competitor', targetId: 'cmp_g', criterion: 'onboarding', verdict: 'disagree', userValue: 2 }, t).agentValue).toBe(5);
   });
 });
 

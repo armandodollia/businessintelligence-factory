@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, artifactUrl, exportUrl } from './api.js';
 import { subscribe } from './sse.js';
 import {
+  COMPETITOR_CRITERIA,
+  FINDING_CRITERIA,
   PATCH_ROLES,
   WEIGHT_KEYS,
   type AppliedPromptPatch,
@@ -22,6 +24,7 @@ import type {
   BifConfig,
   BusEvent,
   CreateWorkspaceInput,
+  Criteria,
   Decision,
   EvidenceGroups,
   EvidenceItem,
@@ -603,6 +606,28 @@ export function useEvidence(artifactIds: string[]) {
 
 // ---------------------------------------------------------------------------
 // personas, recommendations, decisions
+
+/**
+ * Ratable criteria keys of a finding: only the finding criteria (`FINDING_CRITERIA`), in that
+ * order. Competitor keys an agent may have put on a finding (threat, pricing, ...) are not offered:
+ * they are rated on the competitor itself (Competitors page).
+ */
+export function findingCriteriaKeys(criteria: Criteria): string[] {
+  return FINDING_CRITERIA.filter((k) => criteria[k] !== undefined);
+}
+
+/** Rated competitors (spec §9), highest threat first, each with its ratable criteria in a fixed order. */
+export function useCompetitors(wsId: string | null | undefined) {
+  const res = useResource(`competitors:${wsId ?? ''}`, wsId ? () => api.listCompetitors(wsId) : null);
+  useBusEvents(wsId, (e) => {
+    if (e.type === 'decision' && (e.decision.payload as { tool?: string } | null)?.tool === 'save_competitor') void res.reload();
+  });
+  const competitors = useMemo(
+    () => [...(res.data ?? [])].sort((a, b) => b.threat - a.threat || a.name.localeCompare(b.name)),
+    [res.data],
+  );
+  return { competitors, criteriaKeys: COMPETITOR_CRITERIA as readonly string[], loading: res.loading, error: res.error, reload: res.reload };
+}
 
 export function usePersonas(wsId: string | null | undefined) {
   const res = useResource(`personas:${wsId ?? ''}`, wsId ? () => api.listPersonas(wsId) : null);

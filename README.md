@@ -146,10 +146,12 @@ Under `dataDir` (default `./data`, gitignored):
 | `data/<workspaceId>/artifacts/` | screenshots, page snapshots, documents and uploads (content-addressed by sha256) |
 | `data/<workspaceId>/personas/<persona>.md` | compiled persona prompt (latest version; `<persona>.v<N>.md` keeps each version) |
 | `data/<workspaceId>/runs/<agentRunId>/` | per-run working directory (`cwd/`) and event log (`events.jsonl`) |
+| `data/<rootWorkspaceId>/calibration/<role>.md` | approved prompt calibration patches of one business tree |
 | `data/browser-profile/` | the research browser profile (`browser.profileDir`) |
 
-Approved prompt patches are written to `src/core/prompts/calibration/<role>.md`
-(override with `BIF_CALIBRATION_DIR`).
+Approved prompt patches are per business: they are merged (appended, deduplicated) into
+`data/<rootWorkspaceId>/calibration/<role>.md` of the workspace's tree root and only reach prompts
+of that business tree — another company's prompts never see them. Nothing is written under `src/`.
 
 ## Smoke test
 

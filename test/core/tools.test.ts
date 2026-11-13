@@ -67,7 +67,7 @@ describe('role scope table', () => {
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
       new Set([
         ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
-        'read_workspace', 'propose_business_unit',
+        'read_workspace', 'propose_business_unit', 'save_competitor', 'save_hypothesis',
       ]),
     );
     expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace']));

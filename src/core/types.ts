@@ -323,6 +323,51 @@ export interface Symptom {
   evidence: string[];
 }
 
+/** Per-area comparison of a competitor vs. the business in scope, each 1–5 (5 = competitor much better). */
+export interface CompetitorComparison {
+  pricing: number;
+  onboarding: number;
+  ux: number;
+  features: number;
+}
+
+/**
+ * A rated competitor (spec §9; migration 12), saved by `save_competitor`. One row per workspace +
+ * normalized name; a later save updates it. Ratable criteria: threat, directness and the four
+ * comparison areas (rating target id = competitor id).
+ */
+export interface Competitor {
+  id: string;
+  workspaceId: string;
+  name: string;
+  site?: string;
+  /** 1–5. */
+  threat: number;
+  /** 1–5. */
+  directness: number;
+  comparison: CompetitorComparison;
+  /** Artifact ids. */
+  evidence: string[];
+  /** Task whose run saved (or last updated) it. */
+  taskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A research hypothesis about the cause of an interview symptom (spec §8 drill-down; migration 12). */
+export interface SymptomHypothesis {
+  id: string;
+  workspaceId: string;
+  symptomId: string;
+  hypothesis: string;
+  /** 0–100 (percent). */
+  confidence: number;
+  /** Finding and/or artifact ids. */
+  evidence: string[];
+  taskId?: string;
+  createdAt: string;
+}
+
 export interface Schedule {
   id: string;
   workspaceId: string;

@@ -1,52 +1,62 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 /** Directory holding the role/task prompt templates (`<name>.md`). */
 export const PROMPTS_DIR = import.meta.dirname;
 
 /**
- * Directory of user-approved calibration appendices (`<name>.md`, written by `applyPromptPatch`).
- * Overridable with `BIF_CALIBRATION_DIR` (tests, alternative data roots).
+ * Where a business tree's approved calibration appendices live:
+ * `<dataDir>/<rootWorkspaceId>/calibration/<role>.md`. Calibration is per business (tree root),
+ * never global — one company's corrections must not reach another company's prompts — and
+ * nothing is ever written under `src/`.
  */
-export function calibrationDir(): string {
-  return process.env.BIF_CALIBRATION_DIR ?? join(PROMPTS_DIR, 'calibration');
+export type CalibrationScope = { dataDir: string; rootWorkspaceId: string };
+
+const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
+
+/** `<dataDir>/<rootWorkspaceId>/calibration` (absolute). */
+export function calibrationDir(scope: CalibrationScope): string {
+  if (!SAFE_NAME.test(scope.rootWorkspaceId)) throw new Error(`invalid workspace id '${scope.rootWorkspaceId}'`);
+  return join(resolve(scope.dataDir), scope.rootWorkspaceId, 'calibration');
 }
 
 /**
- * Loads prompt `<name>.md`, appending the calibration appendix `calibration/<name>.md` when one
- * exists. `version` = first 8 hex chars of sha256 of the full text (appendix included), so an
- * approved calibration patch changes the prompt version recorded on each run.
+ * Loads prompt `<name>.md`, appending the business tree's calibration appendix
+ * (`<dataDir>/<root>/calibration/<name>.md`) when a `scope` is given and one exists. `version` =
+ * first 8 hex chars of sha256 of the full text (appendix included), so an approved calibration
+ * patch changes the prompt version recorded on each run.
  */
-export function loadPrompt(name: string): { text: string; version: string } {
-  const text = withCalibration(promptTemplate(name), name);
+export function loadPrompt(name: string, scope?: CalibrationScope): { text: string; version: string } {
+  const text = withCalibration(promptTemplate(name), name, scope);
   return { text, version: promptVersion(text) };
 }
 
 /** Raw `<name>.md` template, without any calibration appendix. */
 export function promptTemplate(name: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error(`invalid prompt name '${name}'`);
+  if (!SAFE_NAME.test(name)) throw new Error(`invalid prompt name '${name}'`);
   return readFileSync(join(PROMPTS_DIR, `${name}.md`), 'utf8');
 }
 
 /**
- * The approved calibration appendix for `name` (`calibration/<name>.md`, usually a role name),
- * trimmed; `''` when there is none.
+ * The approved calibration appendix for `name` (usually a role name) in the business tree of
+ * `scope`, trimmed; `''` when there is none or no scope is given.
  */
-export function calibrationAppendix(name: string): string {
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error(`invalid calibration name '${name}'`);
-  const file = join(calibrationDir(), `${name}.md`);
+export function calibrationAppendix(name: string, scope?: CalibrationScope): string {
+  if (!SAFE_NAME.test(name)) throw new Error(`invalid calibration name '${name}'`);
+  if (!scope) return '';
+  const file = join(calibrationDir(scope), `${name}.md`);
   return existsSync(file) ? readFileSync(file, 'utf8').trim() : '';
 }
 
 /**
- * Appends `calibrationAppendix(name)` to an assembled system prompt (unchanged when there is no
- * appendix). Use for prompts not loaded via `loadPrompt(name)` — e.g. persona agent.md (`persona`),
- * synthesizer runs that share `worker.md` (`synthesizer`) — so the recorded prompt version changes
- * when a calibration patch is applied.
+ * Appends `calibrationAppendix(name, scope)` to an assembled system prompt (unchanged when there
+ * is no appendix). Use for prompts not loaded via `loadPrompt(name)` — e.g. persona agent.md
+ * (`persona`), synthesizer runs that share `worker.md` (`synthesizer`) — so the recorded prompt
+ * version changes when a calibration patch is applied.
  */
-export function withCalibration(text: string, name: string): string {
-  const extra = calibrationAppendix(name);
+export function withCalibration(text: string, name: string, scope?: CalibrationScope): string {
+  const extra = calibrationAppendix(name, scope);
   return extra ? `${text.trimEnd()}\n\n${extra}\n` : text;
 }
 

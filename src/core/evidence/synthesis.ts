@@ -55,10 +55,14 @@ export function synthesisFindingsSection(store: Store, workspaceId: string): str
       `- [${f.id}] ${f.subject}: ${f.claim.length > 200 ? `${f.claim.slice(0, 200)}…` : f.claim}` +
       `${f.workspaceId !== workspaceId ? ` (source ${f.workspaceId})` : ''}`,
   );
-  return [
+  const symptoms = store.symptoms.list({ workspaceId, kind: 'symptom' });
+  const parts = [
     '## Findings usable for synthesis (verified, or included by the user; any node of this business tree)',
     lines.join('\n') || '- (none)',
     `${all.length - usable.length} other finding(s) are unverified, pending, superseded or excluded by the user and must NOT be used ` +
       'or cited in recommendations (save_recommendation rejects them).',
-  ].join('\n');
+  ];
+  // Symptom ids for symptom_hypotheses workers (save_hypothesis takes symptom_id).
+  if (symptoms.length) parts.push('', '## Interview symptoms', ...symptoms.map((s) => `- [${s.id}] ${s.title}`));
+  return parts.join('\n');
 }
