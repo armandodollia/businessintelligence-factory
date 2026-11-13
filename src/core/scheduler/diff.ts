@@ -68,8 +68,10 @@ function screenshots(store: Store, findings: Finding[]): Map<string, Shot> {
  */
 export function diffRuns(prevRunId: string, nextRunId: string, deps: { store: Store }): RunDiff {
   const { store } = deps;
-  const prev = store.findings.list({ runId: prevRunId });
-  const next = store.findings.list({ runId: nextRunId });
+  // Superseded findings (replaced in a later review round of their task) are not results of the run.
+  const live = (f: Finding) => f.status !== 'superseded';
+  const prev = store.findings.list({ runId: prevRunId }).filter(live);
+  const next = store.findings.list({ runId: nextRunId }).filter(live);
 
   const prevKeys = new Set(prev.map(findingKey));
   const newFindings = next.filter((f) => !prevKeys.has(findingKey(f))).map((f) => f.id);

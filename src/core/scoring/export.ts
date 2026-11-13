@@ -12,6 +12,13 @@ function primarySubject(d: Decision): string | undefined {
   return undefined;
 }
 
+/** Whether `id` is a finding, recommendation or persona superseded in a later review round. */
+function isSuperseded(store: Store, id: string | undefined): boolean {
+  if (!id) return false;
+  const item = store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id);
+  return item?.status === 'superseded';
+}
+
 /**
  * Rating target id (`<recId>:<personaId>`) of a persona_feedback decision, from the persona stamped
  * on it by the panel (`payload.personaId`). Undefined for unstamped (legacy) decisions, which then
@@ -118,7 +125,8 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  *   of the subject (`judgmentFor`);
  * - any other decision joins ratings of its refs.
  * Decisions referencing an internal upload — directly or via the evidence of a referenced item
- * (`expandedRefs`) — are excluded unless `includeUploads`.
+ * (`expandedRefs`) — are excluded unless `includeUploads`. Decisions whose primary subject was
+ * superseded (replaced in a later review round) are excluded.
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   const { store } = deps;
@@ -136,6 +144,7 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   const lines: string[] = [];
   for (const decision of decisions) {
     if (uploads && expandedRefs(store, decision).some((id) => uploads.has(id))) continue;
+    if (isSuperseded(store, primarySubject(decision))) continue;
     const self = (r: Rating) => r.targetType === 'decision' && r.targetId === decision.id;
     let joined: Rating[];
     if (decision.kind === 'persona_feedback') {

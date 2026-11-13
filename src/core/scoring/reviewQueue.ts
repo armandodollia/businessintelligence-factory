@@ -19,6 +19,7 @@ export type ReviewQueueItem = {
  * `<recommendationId>:<personaId>`, simulated), competitors (threat, directness, comparison areas)
  * and persona profiles (field confidence). Only keys
  * known to `CRITERIA` for the target type are listed, so every queued criterion is ratable.
+ * Superseded findings, recommendations and personas (replaced in a later review round) are skipped.
  */
 export function reviewQueue(workspaceId: string, deps: { store: Store }): ReviewQueueItem[] {
   const { store } = deps;
@@ -34,15 +35,16 @@ export function reviewQueue(workspaceId: string, deps: { store: Store }): Review
   };
 
   for (const s of store.symptoms.list({ workspaceId })) push('symptom', s.id, s.title, s.criteria);
-  for (const f of store.findings.list({ workspaceId })) push('finding', f.id, f.claim, f.criteria);
-  for (const r of store.recommendations.list({ workspaceId })) {
+  const live = <T extends { status?: string | undefined }>(xs: T[]) => xs.filter((x) => x.status !== 'superseded');
+  for (const f of live(store.findings.list({ workspaceId }))) push('finding', f.id, f.claim, f.criteria);
+  for (const r of live(store.recommendations.list({ workspaceId }))) {
     push('recommendation', r.id, r.title, { ...r.criteria, priority: r.priority });
     for (const fb of r.personaFeedback) {
       push('persona_feedback', `${r.id}:${fb.personaId}`, `${r.title} — persona ${fb.personaId} (simulated)`, fb.scores);
     }
   }
   for (const c of store.competitors.list({ workspaceId })) push('competitor', c.id, c.name, competitorCriteria(c));
-  for (const p of store.personas.list({ workspaceId })) {
+  for (const p of live(store.personas.list({ workspaceId }))) {
     push('persona', p.id, p.segment, Object.fromEntries(Object.entries(p.profile).map(([k, f]) => [k, f.confidence])));
   }
   return out;
