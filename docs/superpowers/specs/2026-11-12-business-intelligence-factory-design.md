@@ -351,6 +351,7 @@ Details in `2026-11-13-knowledge-store-design.md`. This section describes how th
   `minEffectTasks` (5), `maxRulesPerRole` (≤ 15), `retro` (`enabled`, `cron` = `0 6 * * 1`, `model` =
   `roles.orchestrator`, `windowDays` 7, `maxProposals` 5)
 - **audit** (optional, WP-F): auditor `model` (must differ from the original reviewer to be used) and default `n` per audit (5)
+- **experiments** (optional, ruling R4): `allowBrowser` (default false). Experiments on a task that uses the browser are refused unless it is true; then each start must send `confirmBrowser: true`, because the task's real-world actions repeat per arm and per repeat
 - **knowledge** (optional, every field defaulted): response budgets per kind (search / card /
   expand / briefing) with per-role overrides and per-provider scale, `hardMaxTokens`, freshness
   TTLs, extraction and chunking limits, caption rule, duplicate-handshake settings, prune minimum

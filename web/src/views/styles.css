@@ -42,6 +42,7 @@ button.link { border: none; background: none; color: var(--accent); padding: 0; 
 .small { font-size: 12px; }
 .nowrap { white-space: nowrap; }
 .error { color: var(--error); margin: 0.3em 0; }
+.warning { border-left: 3px solid var(--error); padding: 0.2em 0.6em; margin: 0.4em 0; } /* ruling R4: browser experiments */
 .tag { display: inline-block; font-size: 11px; padding: 0 0.4em; border: 1px solid var(--line); border-radius: 3px; background: var(--soft); margin-right: 0.3em; }
 .tag.strong { font-weight: 600; text-transform: uppercase; }
 .row { display: flex; gap: 0.5em; align-items: center; margin: 0.4em 0; }

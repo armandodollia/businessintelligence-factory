@@ -364,5 +364,5 @@ export type AuditsView = {
   schedules: import('../../../src/core/learning/wpfTypes.js').AuditSchedule[];
 };
 export type ExperimentArmInput = { model?: import('../../../src/core/config/schema.js').ModelRef; promptVersion?: string; promptText?: string };
-export type NewExperiment = { taskId: string; name?: string; repeats?: number; arms: [ExperimentArmInput, ExperimentArmInput] };
+export type NewExperiment = { taskId: string; name?: string; repeats?: number; arms: [ExperimentArmInput, ExperimentArmInput]; confirmBrowser?: boolean };
 // --- end WP-F ---------------------------------------------------------------------------------

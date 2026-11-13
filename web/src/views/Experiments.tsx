@@ -138,7 +138,8 @@ function ExperimentsSection({ wsId }: { wsId: string }) {
       <h3>Experiments</h3>
       <p className="muted">
         Runs a finished task again under arm A and arm B (worker model and/or prompt version) through the normal review loop, with
-        lessons off. Experiment results are kept apart: they add nothing to findings or metrics.
+        lessons off. Experiment results are kept apart: they add nothing to findings or metrics. Tasks that use the browser are off
+        unless allowed in Settings, because their real-world actions repeat per arm and per repeat.
       </p>
       {x.error && <div className="error">{x.error}</div>}
       <div className="card">
@@ -161,6 +162,19 @@ function ExperimentsSection({ wsId }: { wsId: string }) {
           Repeats{' '}
           <input type="number" min={1} max={5} value={f.repeats} onChange={(e) => x.setForm({ ...f, repeats: e.target.value })} style={{ width: '4em' }} />
         </label>
+        {x.browserWarning && (
+          <div className="warning">
+            <p>{x.browserWarning}</p>
+            {x.allowBrowser ? (
+              <label>
+                <input type="checkbox" checked={f.confirmBrowser === true} onChange={(e) => x.setForm({ ...f, confirmBrowser: e.target.checked })} /> I
+                understand: these actions will be repeated
+              </label>
+            ) : (
+              <p className="muted">Experiments on browser tasks are off (set experiments.allowBrowser in Settings).</p>
+            )}
+          </div>
+        )}
         {armFields('a', 'A')}
         {armFields('b', 'B')}
         <button disabled={x.busy} onClick={() => void x.start()}>

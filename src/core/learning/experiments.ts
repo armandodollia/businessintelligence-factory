@@ -38,7 +38,7 @@ export const MAX_REPEATS = 5;
 
 export class ExperimentError extends Error {
   constructor(
-    readonly code: 'not_found' | 'invalid',
+    readonly code: 'not_found' | 'invalid' | 'forbidden',
     message: string,
   ) {
     super(message);
@@ -77,6 +77,11 @@ export type ExperimentInput = {
   name?: string;
   /** The configured user (`config.user.id`). */
   actor?: string;
+  /**
+   * Ruling R4: the caller confirms that a browser task's real-world actions repeat per arm and per
+   * repeat. Required for a task that uses the browser (which needs `experiments.allowBrowser` too).
+   */
+  confirmBrowser?: boolean;
 };
 
 const FINISHED = new Set<Task['status']>(['verified', 'unverified', 'failed']);
@@ -92,6 +97,18 @@ export function startExperiment(deps: ResearchDeps, input: ExperimentInput): { e
   if (!FINISHED.has(source.status)) throw new ExperimentError('invalid', `task '${source.id}' has not finished (status ${source.status})`);
   if (isExperimentTask(store, source.id)) throw new ExperimentError('invalid', `task '${source.id}' is itself an experiment arm task`);
   if (!store.workspaces.get(source.workspaceId)) throw new ExperimentError('not_found', `workspace '${source.workspaceId}' not found`);
+  // Ruling R4: no browser experiments by default; when allowed, the start must confirm the repeats.
+  if (source.needsBrowser) {
+    if (config.experiments?.allowBrowser !== true) {
+      throw new ExperimentError('forbidden', `task '${source.id}' uses the browser: experiments on browser tasks are off (set experiments.allowBrowser)`);
+    }
+    if (input.confirmBrowser !== true) {
+      throw new ExperimentError(
+        'invalid',
+        `task '${source.id}' uses the browser: its real-world actions repeat once per arm and per repeat; confirm with confirmBrowser: true`,
+      );
+    }
+  }
   const repeats = input.repeats ?? 1;
   if (!Number.isInteger(repeats) || repeats < 1 || repeats > MAX_REPEATS) throw new ExperimentError('invalid', `repeats must be 1–${MAX_REPEATS}`);
   if (input.arms.length !== 2) throw new ExperimentError('invalid', 'an experiment has exactly two arms (A and B)');

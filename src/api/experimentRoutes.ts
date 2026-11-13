@@ -46,6 +46,8 @@ const schemas = {
       z.strictObject({ model: modelRefSchema.optional(), promptVersion: z.string().min(1).optional(), promptText: z.string().optional() }),
       z.strictObject({ model: modelRefSchema.optional(), promptVersion: z.string().min(1).optional(), promptText: z.string().optional() }),
     ]),
+    /** Ruling R4: explicit confirm that a browser task's real-world actions repeat per arm and repeat. */
+    confirmBrowser: z.boolean().optional(),
   }),
 };
 
@@ -65,7 +67,9 @@ async function body<T extends z.ZodType>(c: Context, schema: T): Promise<{ ok: t
 }
 
 function fail(c: Context, e: unknown): Response {
-  if (e instanceof AuditError || e instanceof ExperimentError) return c.json({ error: e.message }, e.code === 'not_found' ? 404 : 400);
+  if (e instanceof AuditError || e instanceof ExperimentError) {
+    return c.json({ error: e.message }, e.code === 'not_found' ? 404 : e.code === 'forbidden' ? 403 : 400);
+  }
   throw e;
 }
 
@@ -148,6 +152,7 @@ export function mountWpfRoutes(app: Hono, deps: WpfRouteDeps, workspace: (id: st
       const started = startExperiment(research, {
         taskId: task.id, arms: [arm(b.data.arms[0]), arm(b.data.arms[1])], actor: actorOf(config),
         ...(b.data.repeats !== undefined ? { repeats: b.data.repeats } : {}), ...(b.data.name ? { name: b.data.name } : {}),
+        ...(b.data.confirmBrowser !== undefined ? { confirmBrowser: b.data.confirmBrowser } : {}),
       });
       started.done.catch((e: unknown) => console.error(`[bif] experiment ${started.experiment.id} failed: ${(e as Error).message}`));
       return c.json(started.experiment, 202);

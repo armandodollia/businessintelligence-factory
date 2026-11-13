@@ -49,12 +49,35 @@ export function parseModel(v: string): { provider: 'claude' | 'codex' | 'opencod
 }
 
 export type ArmForm = { model: string; promptVersion: string };
-export type ExperimentForm = { taskId: string; name: string; repeats: string; a: ArmForm; b: ArmForm };
+export type ExperimentForm = { taskId: string; name: string; repeats: string; a: ArmForm; b: ArmForm; confirmBrowser?: boolean };
 export const EMPTY_EXPERIMENT_FORM: ExperimentForm = { taskId: '', name: '', repeats: '1', a: { model: '', promptVersion: '' }, b: { model: '', promptVersion: '' } };
 
-/** The request body for a form, or an error to show. An empty arm field keeps the task's model / current prompt. */
-export function buildExperimentBody(f: ExperimentForm): { body: NewExperiment } | { error: string } {
+/**
+ * Ruling R4: what starting an experiment on a browser task means, stated before the user confirms
+ * (null for a task without the browser).
+ */
+export function browserExperimentWarning(task: Pick<Task, 'needsBrowser'> | undefined, repeats: string): string | null {
+  if (!task?.needsBrowser) return null;
+  const n = Number(repeats || '1');
+  const runs = Number.isInteger(n) && n >= 1 ? 2 * n : 2;
+  return (
+    'This task uses the browser. The real-world actions it takes (sign-ups, form submissions, messages, purchases) ' +
+    `repeat once for each arm and each repeat: ${runs} runs.`
+  );
+}
+
+/**
+ * The request body for a form, or an error to show. An empty arm field keeps the task's model / current
+ * prompt. Ruling R4: a browser task needs `experiments.allowBrowser` and the form's confirm box.
+ */
+export function buildExperimentBody(
+  f: ExperimentForm,
+  task?: Pick<Task, 'needsBrowser'>,
+  allowBrowser = false,
+): { body: NewExperiment } | { error: string } {
   if (!f.taskId) return { error: 'pick a finished task' };
+  if (task?.needsBrowser && !allowBrowser) return { error: 'this task uses the browser; experiments on browser tasks are off (experiments.allowBrowser)' };
+  if (task?.needsBrowser && !f.confirmBrowser) return { error: 'this task uses the browser: confirm that its real-world actions repeat per arm and per repeat' };
   const repeats = Number(f.repeats || '1');
   if (!Number.isInteger(repeats) || repeats < 1 || repeats > 5) return { error: 'repeats must be 1–5' };
   const arm = (a: ArmForm, name: string) => {
@@ -67,7 +90,12 @@ export function buildExperimentBody(f: ExperimentForm): { body: NewExperiment } 
   if (typeof a === 'string') return { error: a };
   if (typeof b === 'string') return { error: b };
   if (JSON.stringify(a) === JSON.stringify(b)) return { error: 'arms A and B are the same: change the model or prompt version of one' };
-  return { body: { taskId: f.taskId, arms: [a, b], ...(repeats !== 1 ? { repeats } : {}), ...(f.name.trim() ? { name: f.name.trim() } : {}) } };
+  return {
+    body: {
+      taskId: f.taskId, arms: [a, b], ...(repeats !== 1 ? { repeats } : {}), ...(f.name.trim() ? { name: f.name.trim() } : {}),
+      ...(task?.needsBrowser ? { confirmBrowser: true } : {}),
+    },
+  };
 }
 
 /** Comparison table rows: metric label, then one formatted cell per arm. */
@@ -158,8 +186,10 @@ export function useExperiments(wsId: string) {
     return (tasks.data ?? []).filter((t) => FINISHED.has(t.status) && !armRuns.has(t.runId));
   }, [tasks.data, experiments]);
 
+  const selectedTask = sourceTasks.find((t) => t.id === form.taskId);
+  const allowBrowser = config.data?.experiments?.allowBrowser === true; // ruling R4
   const start = useCallback(async () => {
-    const built = buildExperimentBody(form);
+    const built = buildExperimentBody(form, selectedTask, allowBrowser);
     if ('error' in built) {
       setActionError(built.error);
       return;
@@ -176,7 +206,7 @@ export function useExperiments(wsId: string) {
     } finally {
       setBusy(false);
     }
-  }, [form, wsId, list.reload, tasks.reload]);
+  }, [form, selectedTask, allowBrowser, wsId, list.reload, tasks.reload]);
 
   return {
     experiments,
@@ -184,6 +214,9 @@ export function useExperiments(wsId: string) {
     error: list.error ?? tasks.error,
     sourceTasks,
     models: modelOptions(config.data),
+    /** Ruling R4: the browser warning for the chosen task (null without the browser), and whether it is allowed. */
+    browserWarning: browserExperimentWarning(selectedTask, form.repeats),
+    allowBrowser,
     form,
     setForm,
     start,

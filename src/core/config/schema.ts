@@ -287,6 +287,17 @@ export const KNOWLEDGE_DEFAULTS = {
 } as const;
 // --- end knowledge store KS-0 config ---------------------------------------------------------
 
+// --- learning loop wave 2, ruling R4: experiments ------------------------------------------------
+/** `config.experiments` (optional). */
+export const experimentsConfigSchema = z.strictObject({
+  /**
+   * Allow experiments on tasks that use the browser (default false). Real-world actions such a task
+   * takes repeat once per arm and per repeat; when allowed, each start must also confirm it.
+   */
+  allowBrowser: z.boolean().optional(),
+});
+// --- end ruling R4 ---------------------------------------------------------------------------------
+
 // --- learning loop WP-F: reviewer audits --------------------------------------------------------
 /** `config.audit` (optional): who audits verified tasks, and how many per audit by default. */
 export const auditConfigSchema = z.strictObject({
@@ -377,6 +388,8 @@ export const bifConfigSchema = z
     lessons: lessonsConfigSchema.optional(),
     /** Learning loop WP-F: reviewer audit model and default size. */
     audit: auditConfigSchema.optional(),
+    /** Ruling R4: experiments on browser tasks (off by default). */
+    experiments: experimentsConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.

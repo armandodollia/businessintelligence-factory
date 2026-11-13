@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EMPTY_EXPERIMENT_FORM,
   auditLabel,
+  browserExperimentWarning,
   buildExperimentBody,
   comparisonRows,
   modelOptions,
@@ -75,6 +76,15 @@ describe('experiments logic', () => {
     expect(buildExperimentBody({ ...EMPTY_EXPERIMENT_FORM, taskId: 't', name: ' x ', repeats: '2', b: { model: 'claude/haiku', promptVersion: ' abcd1234 ' } })).toEqual({
       body: { taskId: 't', name: 'x', repeats: 2, arms: [{}, { model: { provider: 'claude', model: 'haiku' }, promptVersion: 'abcd1234' }] },
     });
+    // R4: a browser task is refused unless allowed, and then needs the confirm box.
+    const browserForm = { ...EMPTY_EXPERIMENT_FORM, taskId: 't', repeats: '3', b: { model: 'claude/haiku', promptVersion: '' } };
+    expect(buildExperimentBody(browserForm, { needsBrowser: true }, false)).toMatchObject({ error: expect.stringMatching(/experiments\.allowBrowser/) });
+    expect(buildExperimentBody(browserForm, { needsBrowser: true }, true)).toMatchObject({ error: expect.stringMatching(/confirm/) });
+    expect(buildExperimentBody({ ...browserForm, confirmBrowser: true }, { needsBrowser: true }, true)).toEqual({
+      body: { taskId: 't', repeats: 3, arms: [{}, { model: { provider: 'claude', model: 'haiku' } }], confirmBrowser: true },
+    });
+    expect(browserExperimentWarning({ needsBrowser: false }, '3')).toBeNull();
+    expect(browserExperimentWarning({ needsBrowser: true }, '3')).toMatch(/real-world actions .* repeat .* each arm and each repeat: 6 runs/i);
     const rows = comparisonRows([arm('A', 'sonnet', 1, 0.5), arm('B', 'haiku', 0, 0.1)] as never);
     expect(rows.find((r) => r.label === 'Review pass rate')!.cells).toEqual(['100%', '0%']);
     expect(rows.find((r) => r.label === 'Cost')!.cells).toEqual(['$0.5000', '$0.1000']);
@@ -139,6 +149,20 @@ describe('audits & experiments page', () => {
     });
     expect(await screen.findByText('Review pass rate')).toBeTruthy();
     expect(screen.getAllByText('$0.1000')).toHaveLength(2); // cost and cost per task of arm B
+  });
+
+  it('R4: picking a browser task states that real-world actions repeat, and asks for a confirm', async () => {
+    routes['GET /api/workspaces/ws_1'] = () => ({ id: 'ws_1', name: 'Acme', sector: 'saas' });
+    routes['GET /api/workspaces/ws_1/audits'] = () => ({ rootWorkspaceId: 'ws_1', summary: { total: 0, agree: 0, miss: 0, invalid: 0, skipped: 0, running: 0, missRate: null }, audits: [], schedules: [] });
+    routes['GET /api/workspaces/ws_1/experiments'] = () => [];
+    routes['GET /api/workspaces/ws_1/tasks'] = () => [{ id: 'tsk_web', status: 'verified', runId: 'rr_1', type: 'signup_flow', needsBrowser: true }];
+    routes['GET /api/config'] = () => ({ experiments: { allowBrowser: true }, providers: { claude: { enabled: true, command: 'c', models: ['sonnet'] }, codex: { enabled: false, command: 'x', models: [] }, opencode: { enabled: false, command: 'o', models: [] } } });
+    window.location.hash = '#/w/ws_1/experiments';
+    render(<App />);
+    const option = await screen.findByRole('option', { name: /signup_flow/ });
+    fireEvent.change(option.closest('select')!, { target: { value: 'tsk_web' } });
+    expect(await screen.findByText(/real-world actions .* repeat .* each arm and each repeat: 2 runs/i)).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: /I understand/ })).toBeTruthy();
   });
 
   it('the view never calls fetch itself', () => {
