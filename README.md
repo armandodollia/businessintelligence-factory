@@ -20,7 +20,8 @@ the agent CLIs call into, and a small React web app. Design spec:
    - `providers`: which CLIs are enabled, their command and the models agents may use.
    - `roles`: provider/model per role (orchestrator, interviewer, reviewer, synthesizer, persona,
      and workers per task type). Every role model must be listed under an enabled provider.
-   - `loop`: review loop `maxRounds` / `passThreshold`, globally and per task type.
+   - `loop`: review loop `maxRounds` / `passThreshold`, globally and per task type; `maxReasserts`
+     (default 1) caps how often a reviewer may reassert an issue the worker pushed back on.
    - `limits`, `browser`, `identity`, `actionPolicy`, `scoring`, `server.port`, `dataDir`.
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
@@ -151,6 +152,19 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   Strategy flags unverified recommendations with the last reviewer's objections and hides failed
   ones unless you include them ("Show failed" lists them). The Competitors page, the review queue and
   the interviewer's drill-down use only verified (or included) competitors and hypotheses.
+- **Review history and disputes.** Every review round's issues are kept (`review_issues`), with
+  stable issue ids across rounds when the reviewer repeats an issue, and each issue's fate: `open`,
+  `fixed`, `pushed_back`, `upheld` (reasserted after a pushback) or `withdrawn` (dropped after a
+  pushback). The next reviewer sees the issues the worker pushed back on, with the worker's reason,
+  and must accept or reassert each; after `loop.maxReasserts` reasserts the worker is told to fix it.
+- **Decision outcomes.** Agent decisions get labels after the fact (`decision_outcomes`): `confirmed`
+  (task verified), `over-scoped` / `missed-evidence` / `weak-review` (task unverified),
+  `run-failed`, `missed-evidence` (output superseded by a later round), `stale` (a scheduled re-run
+  changed or no longer found a finding), `user-rejected` (you excluded an output or rejected a unit
+  proposal; excluding a verified output also marks the passing review `weak-review`),
+  `reviewer-false-positive` (an issue dropped after a pushback) and `worker-miss` (an upheld issue
+  the worker then fixed). The Decision log shows the counts per role, task type and prompt version
+  (this workspace or the whole business tree).
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.
@@ -165,7 +179,8 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   changing a rating adds a new row and the latest one is what the UI shows as your current rating
   (re-submitting an unchanged rating sends nothing). Priority is a weighted combination
   of recommendation criteria; the Strategy page edits the weights and offers weights refit from your
-  priority overrides (never auto-applied). The Decision log page proposes prompt patches per role from
+  priority overrides (never auto-applied). Worker pushbacks are ratable too (criterion `pushback`, 0–1:
+  how justified it was). The Decision log page proposes prompt patches per role from
   your disagreements; you edit and approve them before they are written. Weight changes and patches
   are logged as decisions. The decision log plus ratings export as JSONL.
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is

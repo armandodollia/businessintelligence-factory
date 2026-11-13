@@ -158,7 +158,9 @@ loop:
   worker receives issues → for each: fix or pushback(reason) → resubmit
   round += 1
 ```
-- **Minimal reviewer context:** only the task brief, acceptance criteria, the worker's current deliverable, and the referenced evidence artifacts. Not the worker's transcript, reasoning, other tasks, or prior review rounds.
+- **Minimal reviewer context:** only the task brief, acceptance criteria, the worker's current deliverable, and the referenced evidence artifacts. Not the worker's transcript, reasoning, other tasks, or prior review rounds — except the issues the worker pushed back on (issue + the worker's reason), see disputes below.
+- **Review-issue history (learning loop WP-C):** every round's issues are appended to `review_issues` (`tasks.review_issues` keeps the latest round for the revise step). Issue ids are stable across rounds: a repeated issue keeps its id (the reviewer reuses the id of a disputed issue it was shown, or the text nearly matches). Status: `open | fixed | pushed_back | upheld | withdrawn`.
+- **Disputes (learning loop WP-C):** the next round's reviewer sees each pushed-back issue with the worker's reason and must accept it (drop it → `withdrawn`, a reviewer-false-positive outcome) or reassert it (repeat it → `upheld`). An issue is put to the reviewer at most `loop.maxReasserts` times (default 1); after that the revise prompt tells the worker to fix it. Fixing an upheld issue records a worker-miss outcome.
 - **Issue classification:** reviewer labels each issue `blocking | substantive | nit | scope_expansion`. Workers are instructed to push back (with reason) on `nit` and `scope_expansion`; pushback is logged as a decision. Reviewers are instructed not to fail work for nits or for not doing out-of-scope work.
 - Reviewer model is configurable; default to a different provider than the worker where available (builder's call — reduces shared blind spots).
 - **Unverified** results are kept, flagged in the UI with the last reviewer's objections, and excluded from recommendation synthesis unless the user overrides.
@@ -213,7 +215,7 @@ Criteria agents assign (each with reasoning + evidence links):
 | Persona profile | per-field confidence; segment size & value |
 | Persona feedback | appeal, adoption likelihood, willingness to pay, friction (simulated; weight 0 by default) |
 
-**Rating:** every criterion value on every item is individually ratable: agree, or disagree with the user's own value + optional reason. Both values are stored. Priority weights are user-adjustable and are themselves logged. Ratings are possible inline on each item and via a batch **review queue**. The reviewer agent's scores, the worker's pushbacks and the user's ratings are all signals in the decision log.
+**Rating:** every criterion value on every item is individually ratable: agree, or disagree with the user's own value + optional reason. Both values are stored. Priority weights are user-adjustable and are themselves logged. Ratings are possible inline on each item and via a batch **review queue**. The reviewer agent's scores, the worker's pushbacks and the user's ratings are all signals in the decision log. Worker pushbacks are ratable decisions (criterion `pushback`, 0–1 fraction; the agent's value is 1, "needs no change").
 
 ## 10. Learning loop (v1)
 
@@ -221,6 +223,7 @@ Criteria agents assign (each with reasoning + evidence links):
 - A "calibration" job (manual trigger) summarizes rating disagreements per role/criterion/task type and proposes prompt changes (few-shot examples from corrected items, rubric clarifications). The user approves changes; prompts are versioned, and every run records the prompt version it used so improvements can be measured.
 - Priority weights can be refit from the user's ratings (simple regression), proposed to the user, not auto-applied.
 - Export: decision log + ratings as JSONL for later model training.
+- **Decision outcomes (learning loop WP-C):** `decision_outcomes` labels agent decisions after the fact, all through one writer (`recordOutcome`, `src/core/learning/outcomes.ts`): task end (`confirmed`; unverified → `over-scoped` / `missed-evidence` / `weak-review`; `run-failed`), superseded outputs (`missed-evidence`), scheduled "what changed" (`stale`: claim no longer found for a re-researched subject, or a cited screenshot changed), user include overrides / unit-proposal rejects (`user-rejected`, plus `weak-review` on the passing review when a verified output is excluded; `confirmed` when an unverified output is included) and review disputes (`reviewer-false-positive`, `worker-miss`). Each row copies the judged decision's role, prompt version and task type; the outcomes report (`GET /api/workspaces/:id/outcomes`, Decision log table) counts labels per role / task type / prompt version, per workspace or per business tree.
 
 ## 11. Scheduler
 
@@ -233,7 +236,7 @@ Criteria agents assign (each with reasoning + evidence links):
 - **providers**: installed CLIs and how to call them
 - **models**: allowed models per provider
 - **roles**: default model for orchestrator, interviewer, each worker task type, reviewer, synthesizer
-- **loop**: `max_rounds` (3), `pass_threshold` (8), per-task-type overrides
+- **loop**: `max_rounds` (3), `pass_threshold` (8), per-task-type overrides, `maxReasserts` (1; review disputes)
 - **limits**: max parallel workers, max concurrent browser runs, max tasks per run (no cost/usage caps; rate-limit back-off only)
 - **browser** backend (MCP plugin with dedicated profile | T3 Code browser), identity/disposable-email provider
 - **action policy** (§6.6)
