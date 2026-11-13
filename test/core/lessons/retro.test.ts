@@ -5,7 +5,7 @@ import { ROLE_TOOLS } from '../../../src/core/harness/tools/registry.js';
 import { estimateTokens } from '../../../src/core/knowledge/budget.js';
 import { recordRetrieval, runIsUploadExposed } from '../../../src/core/knowledge/retrievalLog.js';
 import { lessonRepos } from '../../../src/core/learning/lessons/store.js';
-import { retroBudget, retroDigest, retroJobs, runRetro } from '../../../src/core/learning/lessons/retro.js';
+import { retroBudget, retroDigest, retroJobSource, runRetro } from '../../../src/core/learning/lessons/retro.js';
 import { calibrationAppendix } from '../../../src/core/prompts/index.js';
 import { promptStoreGaps } from '../../../src/core/prompts/store.js';
 import { workerSystemPrompt } from '../../../src/core/research/systemPrompts.js';
@@ -184,12 +184,12 @@ describe('weekly retro', () => {
   });
 });
 
-describe('retro scheduling (existing scheduler, system jobs)', () => {
+describe('retro scheduling (existing scheduler, built-in job source)', () => {
   it('runs each tree once per cron occurrence and never twice for one occurrence', async () => {
     const t = lessonsSetup(opened, (c) => (c.lessons = { retro: { cron: '* * * * *' } }));
     const h = harness(t, () => undefined);
     let clock = Date.now();
-    const sched = startScheduler({ ...h.deps, intervalMs: 3_600_000, systemJobs: () => retroJobs(h.deps) }, () => clock);
+    const sched = startScheduler({ ...h.deps, intervalMs: 3_600_000 }, () => clock);
     try {
       await sched.idle();
       expect(lessonRepos(t.store).retros.list()).toHaveLength(0); // first occurrence is after the start
@@ -209,6 +209,6 @@ describe('retro scheduling (existing scheduler, system jobs)', () => {
       sched.stop();
     }
     t.config.lessons = { retro: { enabled: false } };
-    expect(retroJobs(h.deps)).toEqual([]);
+    expect(retroJobSource(h.deps).list()).toEqual([]);
   });
 });

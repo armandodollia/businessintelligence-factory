@@ -1,6 +1,6 @@
 /**
- * Weekly retro (learning loop WP-E). Per business tree, through the existing scheduler (`retroJobs` →
- * `SchedulerDeps.systemJobs`): runs the lessons engine, then digests the period (task results, costs,
+ * Weekly retro (learning loop WP-E). Per business tree, through the existing scheduler (`retroJobSource`,
+ * one of the scheduler's built-in `ScheduledJobSource`s): runs the lessons engine, then digests the period (task results, costs,
  * outcomes, review issues, failures, policy denials, feedback and ratings, knowledge signals, lesson
  * rules and pending proposals) and lets the `retro` agent propose prompt and calibration edits as
  * PENDING proposals with evidence ids (`submit_retro`). The user accepts or rejects each one.
@@ -22,7 +22,8 @@ import { servedLine } from '../../knowledge/texts.js';
 import { loadPrompt, promptVersion, type CalibrationScope } from '../../prompts/index.js';
 import { runAgent, type ResearchDeps } from '../../research/deps.js';
 import { calibrationScope } from '../../scoring/calibration.js';
-import { nextDue, type SystemJob } from '../../scheduler/scheduler.js';
+import { CronExpressionParser } from 'cron-parser';
+import type { ScheduledJob, ScheduledJobSource } from '../../scheduler/scheduler.js';
 import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
 import type { Decision, Role } from '../../types.js';
@@ -357,28 +358,38 @@ export function retroToolHandlers(): Partial<Record<ToolName, ExtraToolHandler>>
 // scheduling
 
 /**
- * The weekly retro of every business tree as scheduler system jobs (`SchedulerDeps.systemJobs`): one
- * job per root workspace on `lessons.retro.cron`; its last run is the tree's latest retro. Empty when
- * lessons or the retro are disabled.
+ * The weekly retro of every business tree as a scheduler job source (`builtInJobSources`): one job per
+ * root workspace (job id = the root id) on `lessons.retro.cron`. Its last run is the later of the tree's
+ * latest retro and the last start in this process (a retro row is written when the run starts, possibly
+ * stamped before the scheduler's clock). Empty when lessons or the retro are disabled.
  */
-export function retroJobs(deps: ResearchDeps): SystemJob[] {
-  const settings = lessonsSettings(deps.config);
-  if (!settings.enabled || !settings.retro.enabled) return [];
-  const repo = lessonRepos(deps.store).retros;
-  return deps.store.workspaces
-    .list()
-    .filter((w) => !w.parentWorkspaceId)
-    .map((w) => {
-      const last = repo.list({ rootWorkspaceId: w.id }).at(-1);
-      const job: SystemJob = {
-        id: `retro:${w.id}`,
-        cron: settings.retro.cron,
-        run: () => runRetro(deps, w.id, { triggeredBy: 'schedule' }),
-      };
-      if (last) job.lastRunAt = last.createdAt;
-      return job;
-    });
+export function retroJobSource(deps: ResearchDeps): ScheduledJobSource {
+  const starts = new Map<string, string>();
+  return {
+    name: 'retro',
+    list: () => {
+      const settings = lessonsSettings(deps.config);
+      if (!settings.enabled || !settings.retro.enabled) return [];
+      const repo = lessonRepos(deps.store).retros;
+      return deps.store.workspaces
+        .list()
+        .filter((w) => !w.parentWorkspaceId)
+        .map((w) => {
+          const times = [repo.list({ rootWorkspaceId: w.id }).at(-1)?.createdAt, starts.get(w.id)].filter((x): x is string => !!x);
+          const job: ScheduledJob = { id: w.id, cron: settings.retro.cron };
+          if (times.length) job.lastRunAt = times.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b));
+          return job;
+        });
+    },
+    started: (id, at) => void starts.set(id, at),
+    run: async (id) => {
+      if (!deps.store.workspaces.get(id)) return;
+      await runRetro(deps, id, { triggeredBy: 'schedule' });
+    },
+  };
 }
+
+const nextDue = (cron: string, after: Date): Date => CronExpressionParser.parse(cron, { currentDate: after }).next().toDate();
 
 /** Next scheduled retro of a tree (for the lessons page), or null when the cron is invalid / disabled. */
 export function nextRetroAt(config: BifConfig, after: Date = new Date()): string | null {

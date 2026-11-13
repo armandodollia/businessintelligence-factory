@@ -31,7 +31,7 @@ import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.j
 // Knowledge store KS-1: extraction queue (one per artifact store).
 import { ingestorFor } from '../core/knowledge/ingest.js';
 import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
-import { retroJobs, retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
+import { retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
 import { recoverExperiments } from '../core/learning/experiments.js'; // learning loop WP-F
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
@@ -193,8 +193,8 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
   // Learning loop WP-F: experiments the last process left running are interrupted (resume failed their arm tasks).
   const interrupted = recoverExperiments(runtime.store);
   if (interrupted.length) console.log(`[bif] ${interrupted.length} experiments were interrupted by the restart`);
-  // Pipeline schedules, (WP-F) audit schedules and (WP-E) the weekly retro of every business tree.
-  const scheduler = startScheduler({ ...runtime.research, systemJobs: () => retroJobs(runtime.research) });
+  // Pipeline schedules plus the built-in job sources: (WP-F) audit schedules, (WP-E) weekly retros.
+  const scheduler = startScheduler(runtime.research);
   // KS-1: artifacts whose text is still `pending` (saved before a restart, or by older code paths)
   // are extracted in the background.
   const ingestor = ingestorFor({ store: runtime.store, artifacts: runtime.artifacts, config: runtime.config });

@@ -3,7 +3,7 @@ import type { ResearchDeps } from '../research/deps.js';
 import { currentResearchRun, runPipeline } from '../research/orchestrator.js';
 import type { Schedule } from '../types.js';
 import { isPipelineLocked } from '../research/lock.js';
-import { auditJobSource } from '../learning/reviewerAudit.js'; // learning loop WP-F
+import { builtInJobSources } from './jobSources.js'; // learning loop: reviewer audits (WP-F), weekly retro (WP-E)
 
 /** How often schedules are checked (spec: every 60 s). */
 export const SCHEDULER_INTERVAL_MS = 60_000;
@@ -11,23 +11,15 @@ export const SCHEDULER_INTERVAL_MS = 60_000;
 export type SchedulerDeps = ResearchDeps & {
   /** Check interval; default 60 s. */
   intervalMs?: number;
-  /** Learning loop WP-E: built-in recurring jobs (the weekly retro per business tree), listed on every tick. */
-  systemJobs?: () => SystemJob[];
-  /** Learning loop WP-F: more non-pipeline job sources (reviewer audits are always included). */
+  /** Learning loop: more non-pipeline job sources (the built-in ones, `builtInJobSources`, are always included). */
   jobs?: ScheduledJobSource[];
 };
 
-// --- learning loop WP-E: system jobs ---------------------------------------------------------------
+// --- learning loop (WP-E + WP-F): non-pipeline scheduled jobs ------------------------------------
 /**
- * A built-in recurring job checked on every scheduler tick next to the user's schedules: due when its
- * next `cron` occurrence after `lastRunAt` (else the scheduler start) has passed; a missed occurrence
- * runs once. One run per job id at a time.
+ * A cron job that is not a research pipeline (a reviewer-audit schedule, the weekly retro of a business
+ * tree). Due by the same rule as schedules. This is the scheduler's ONE hook for such jobs.
  */
-export type SystemJob = { id: string; cron: string; lastRunAt?: string; run(): Promise<unknown> };
-// --- end WP-E ------------------------------------------------------------------------------------
-
-// --- learning loop WP-F: non-pipeline scheduled jobs ----------------------------------------------
-/** A cron job that is not a research pipeline (e.g. a reviewer audit). Due by the same rule as schedules. */
 export type ScheduledJob = { id: string; cron: string; lastRunAt?: string; activatedAt?: string };
 
 /**
@@ -40,7 +32,7 @@ export type ScheduledJobSource = {
   started(id: string, at: string): void;
   run(id: string): Promise<void>;
 };
-// --- end WP-F ------------------------------------------------------------------------------------
+// --- end learning loop ---------------------------------------------------------------------------
 
 export type SchedulerHandle = {
   stop(): void;
@@ -95,9 +87,8 @@ async function runSchedule(schedule: Schedule, deps: ResearchDeps): Promise<void
 export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now): SchedulerHandle {
   const startedAt = now();
   const busy = new Set<string>();
-  const sources: ScheduledJobSource[] = [auditJobSource(deps), ...(deps.jobs ?? [])]; // learning loop WP-F
+  const sources: ScheduledJobSource[] = [...builtInJobSources(deps), ...(deps.jobs ?? [])]; // learning loop
   const jobs = new Set<Promise<void>>();
-  const systemStarts = new Map<string, number>(); // learning loop WP-E: last start of each system job
   let stopped = false;
   let ticking: Promise<void> = Promise.resolve();
 
@@ -132,30 +123,7 @@ export function startScheduler(deps: SchedulerDeps, now: () => number = Date.now
         });
       jobs.add(job);
     }
-    // --- learning loop WP-E: system jobs (weekly retro) ---
-    for (const sj of deps.systemJobs?.() ?? []) {
-      if (busy.has(sj.id)) continue;
-      try {
-        const base = Math.max(scheduleBaseline({ lastRunAt: sj.lastRunAt }, startedAt), systemStarts.get(sj.id) ?? 0);
-        if (nextDue(sj.cron, new Date(base)).getTime() > t) continue;
-      } catch (e) {
-        console.warn(`[bif] system job ${sj.id}: ${(e as Error).message}`);
-        continue;
-      }
-      busy.add(sj.id);
-      systemStarts.set(sj.id, t);
-      const job: Promise<void> = sj
-        .run()
-        .then(() => undefined)
-        .catch((e) => console.error(`[bif] system job ${sj.id} failed: ${(e as Error).message}`))
-        .finally(() => {
-          busy.delete(sj.id);
-          jobs.delete(job);
-        });
-      jobs.add(job);
-    }
-    // --- end WP-E ---
-    // Learning loop WP-F: non-pipeline jobs (reviewer audits, ...), each never overlapping itself.
+    // Learning loop: non-pipeline jobs (reviewer audits, weekly retros), each never overlapping itself.
     for (const source of sources) {
       for (const j of source.list()) {
         const key = `${source.name}:${j.id}`;
