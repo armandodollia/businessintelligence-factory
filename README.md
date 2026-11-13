@@ -358,6 +358,25 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `GET /api/workspaces/:id/metrics/prompt-versions[?role=]`,
   `GET /api/workspaces/:id/calibration/versions[?role=]`,
   `POST /api/workspaces/:id/calibration/versions/:versionId/revert`.
+- **Reviewer audits and experiments (learning loop WP-F).** *Audits:* a different model (another
+  enabled provider than the original reviewer when there is one; `audit.model` in config overrides)
+  re-reviews the N most recently verified tasks of one business tree that were not audited yet, with
+  exactly the reviewer's input for the final round (same prompt, prompt reads logged before the run
+  starts, reads limited to the task's review slice). An audit never changes the task. When the
+  auditor fails work the reviewer passed (a *miss*), the passing review gets a `weak-review` decision
+  outcome (source `reviewer_audit`) and the miss is a lesson signal for its tree. An auditor without a
+  valid review is `invalid`, not a miss. Start one from the **Audits & experiments** page or
+  `POST /api/workspaces/:id/audits {n?, taskIds?}`; schedule them with a cron
+  (`POST /api/workspaces/:id/audit-schedules {cron, n}`, run by the normal scheduler).
+  *Experiments:* re-run a finished task as arm A and arm B (worker model and / or a stored worker
+  prompt version; 1–5 repeats) through the normal review loop, with lessons off
+  (`POST /api/workspaces/:id/experiments`). The page compares review pass rate, first-round pass
+  rate, rounds, review scores, your ratings and cost per arm (`GET /api/experiments/:id`). Arm tasks
+  sit in their own research run; their outputs are retired when they end (nothing reaches findings,
+  knowledge or synthesis), they write no outcomes and never ask you questions. Experiment and audit
+  runs and their decisions are tagged (`experiment_id`, `arm`, `audit_id`), stay out of the
+  prompt-version metrics and outcome reports, count against budgets like any run, follow the same
+  upload-exposure and export rules, and their export lines carry the tags.
 - **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is
   diffed against the previous run of the same phase and schedule, shown on the Research page. The
   diff lists the facts the run replaced (old → new), retracted and confirmed (from its applied fact
