@@ -1,0 +1,37 @@
+{
+  "name": "business-intelligence-factory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local multi-agent business intelligence factory",
+  "type": "module",
+  "engines": {
+    "node": ">=25"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "dev": "tsx watch src/api/main.ts",
+    "typecheck": "tsc --noEmit",
+    "web": "vite web"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.8",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "hono": "4.13.18",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "25.9.9",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "6.3.0",
+    "jsdom": "31.0.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
+    "vitest": "4.1.12"
+  }
+}

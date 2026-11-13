@@ -1,0 +1,60 @@
+{
+  "providers": {
+    "claude": { "enabled": true, "command": "claude", "models": ["opus", "sonnet", "haiku"] },
+    "codex": { "enabled": true, "command": "codex", "models": ["gpt-6.1-sol"] },
+    "opencode": { "enabled": false, "command": "opencode", "models": [] }
+  },
+  "roles": {
+    "orchestrator": { "provider": "claude", "model": "opus" },
+    "interviewer": { "provider": "claude", "model": "opus" },
+    "reviewer": { "provider": "codex", "model": "gpt-6.1-sol" },
+    "synthesizer": { "provider": "claude", "model": "opus" },
+    "persona": { "provider": "claude", "model": "sonnet" },
+    "workers": {
+      "default": { "provider": "claude", "model": "sonnet" },
+      "flow_walkthrough": { "provider": "claude", "model": "opus" }
+    }
+  },
+  "loop": {
+    "maxRounds": 3,
+    "passThreshold": 8,
+    "perTaskType": {
+      "synthesize_recommendations": { "maxRounds": 4, "passThreshold": 9 }
+    }
+  },
+  "limits": {
+    "maxParallelWorkers": 3,
+    "maxBrowserRuns": 2,
+    "maxTasksPerRun": 30,
+    "idleTimeoutMs": 600000
+  },
+  "browser": {
+    "backend": "mcp",
+    "mcpServers": {
+      "playwright": {
+        "command": "npx",
+        "args": ["@playwright/mcp@latest", "--user-data-dir", "data/browser-profile"]
+      }
+    },
+    "profileDir": "data/browser-profile"
+  },
+  "identity": { "emailProvider": "mailtm" },
+  "actionPolicy": {
+    "allowed": [
+      "browse",
+      "sign up with a disposable identity",
+      "accept standard terms of service for those signups",
+      "start free trials that need no payment card",
+      "walk checkout up to (not including) payment"
+    ],
+    "approvalRequired": [
+      "enter payment details (the user enters them personally; agents never see or store card data)",
+      "request a demo",
+      "contact sales, support, or anything that reaches a real person"
+    ],
+    "never": ["complete a purchase"]
+  },
+  "scoring": { "personaWeight": 0, "weights": {} },
+  "server": { "port": 4317 },
+  "dataDir": "data"
+}
