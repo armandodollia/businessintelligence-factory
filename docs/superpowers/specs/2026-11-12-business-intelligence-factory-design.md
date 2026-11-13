@@ -188,6 +188,13 @@ Every finding references ≥1 stored artifact. Flow walkthroughs store an ordere
 4. **Persona panel:** every recommendation is put to each persona independently. Each returns appeal, likelihood to adopt, willingness to pay, perceived friction (1–5), top concerns, reasoning, and what would change its mind. Results attach to the recommendation with a panel summary highlighting segment disagreement.
 5. **Labeling rule (builder's call, user did not object):** persona feedback is shown as **simulated**, in its own column beside evidence-backed scores, and does **not** affect priority by default; the user can give it a weight.
 
+## 8c. Scope (whole company or a slice)
+
+- A workspace has a **scope**: `company | division | slice` (e.g. a product line, region, team, or internal platform), with name + description, optionally linked to a parent company workspace whose profile and evidence it inherits read-only.
+- A scope declares its **audiences**: `external` (customers), `internal` (employees/internal users), or both. All interview questions, research tasks and recommendations are framed to the scope.
+- Personas carry `audience: external | internal`. Internal personas are researched from job postings/role descriptions, employee-review sites, industry surveys of the role, the interview, and internal uploads (weighted highest).
+- For internal scopes, "competitors" means **alternatives**: vendor tools, outsourcing, and how peer companies run the same function. Competitor discovery and deep dives cover those.
+
 ## 9. Scoring and rating
 
 Criteria agents assign (each with reasoning + evidence links):

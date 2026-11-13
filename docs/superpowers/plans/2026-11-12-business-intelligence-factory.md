@@ -209,6 +209,17 @@
 - `get_identity({site})` → returns existing identity for workspace+site or creates one: generic name from a fixed list, inbox from provider; stored in a new `identities` table (add migration) with password; credentials never logged in Decisions (redacted).
 - [ ] Tests: `policy prompt lists approval-required actions verbatim`; `get_identity reuses identity per site`; `identity password redacted in decision payloads`; `mailtm provider createInbox parses API response` (mock fetch). Fail → implement → pass → commit.
 
+### Task 10b: Scope and audiences
+
+**Files:** Modify `src/core/types.ts`, `src/core/store/migrations.ts` (append migration), `src/core/research/phases.ts`, `src/core/research/orchestrator.ts`. Test `test/core/scope.test.ts`.
+
+**Interfaces:**
+- `Workspace` gains `scope: { level: 'company'|'division'|'slice'; name: string; description: string }`, `audiences: Array<'external'|'internal'>` (default `['external']`), `parentWorkspaceId?: string`.
+- `Persona` gains `audience: 'external'|'internal'`.
+- Orchestrator context includes scope + audiences + (if parent) parent profile and parent findings as read-only references; findings/artifacts of the parent may be cited as evidence by the child (`ArtifactStore.exists` treats parent artifacts as present for the child).
+- `PHASE_GOALS` text is templated with scope; when audiences include `internal`, `competitor_discovery` goal = "alternatives: vendor tools, outsourcing, peer-company practices for this function" and `audience_segments` covers internal roles.
+- [ ] Tests: `old rows get default scope company and audiences external`; `child workspace can cite parent artifact as evidence`; `internal audience changes competitor_discovery goal text`; `persona audience persisted`. Fail → implement → pass → commit.
+
 **Section C verify gate.**
 
 ---
@@ -231,7 +242,7 @@
 
 **Interfaces:**
 - `PERSONA_FIELDS = ['demographics','socioeconomic','personality_values','goals','needs','pain_points','jobs_to_be_done','buying_behavior','channels_media','alternatives_switching','tech_attitude','voice','segment_size_value']`.
-- `save_persona` handler: requires every field in `PERSONA_FIELDS` with `{value, confidence 0–1, evidence: artifactId[]}` (evidence ≥1 except `personality_values` and `voice` may cite the same artifacts); upserts by slug, bumps `version`, writes agent.md via `compileAgentMd(persona): string` to `data/<ws>/personas/<slug>.md`.
+- `save_persona` handler: requires `audience` and every field in `PERSONA_FIELDS` with `{value, confidence 0–1, evidence: artifactId[]}` (evidence ≥1 except `personality_values` and `voice` may cite the same artifacts); upserts by slug, bumps `version`, writes agent.md via `compileAgentMd(persona): string` to `data/<ws>/personas/<slug>.md`.
 - `compileAgentMd` output starts with YAML frontmatter `name`, `description`, `version`, `simulated: true`, then sections per field, then fixed instructions: stay in character, be candid not agreeable, say when something is irrelevant to you.
 - `runPersonaPanel(workspaceId, deps)`: for each recommendation × persona, run role `persona` with system prompt = agent.md contents; must call `submit_persona_feedback`; stored in `Recommendation.personaFeedback` with `simulated: true` and a `Decision(kind:'persona_feedback')`.
 - [ ] Tests: `save_persona rejects missing field`; `agentMd has frontmatter simulated: true and all field headings`; `panel stores one feedback per persona per recommendation`; `version bumps on update and file rewritten`. Fail → implement → pass → commit.
@@ -260,7 +271,7 @@
 
 **Files:** Create `src/api/main.ts` (boot: load config, open store, build deps, mount MCP, `resumeInterrupted`, start scheduler), `src/api/routes.ts`, `src/api/sse.ts`. Test `test/api/routes.test.ts` (Hono `app.request`).
 
-Routes (JSON): `GET/POST /api/workspaces`; `GET /api/workspaces/:id/profile`; `GET/POST /api/workspaces/:id/interview` (POST `{text}`); `POST /api/workspaces/:id/uploads` (multipart); `POST /api/workspaces/:id/research` `{phases?}`; `GET /api/workspaces/:id/runs`, `/tasks?runId=`, `/findings`, `/symptoms`, `/personas`, `/recommendations`, `/decisions?kind=`, `/requests?status=pending`; `POST /api/requests/:id` `{status, response?}`; `GET /api/artifacts/:id` (bytes with mime); `POST /api/ratings`; `GET /api/workspaces/:id/review-queue` (items with criteria not yet rated); `GET /api/workspaces/:id/calibration`; `GET /api/workspaces/:id/export`; `GET/POST/PATCH /api/workspaces/:id/schedules`; `GET/PUT /api/config`; `GET /api/events?workspaceId=` (SSE of `BusEvent`).
+Routes (JSON): `GET/POST /api/workspaces` (POST accepts `scope`, `audiences`, `parentWorkspaceId`); `GET /api/workspaces/:id/profile`; `GET/POST /api/workspaces/:id/interview` (POST `{text}`); `POST /api/workspaces/:id/uploads` (multipart); `POST /api/workspaces/:id/research` `{phases?}`; `GET /api/workspaces/:id/runs`, `/tasks?runId=`, `/findings`, `/symptoms`, `/personas`, `/recommendations`, `/decisions?kind=`, `/requests?status=pending`; `POST /api/requests/:id` `{status, response?}`; `GET /api/artifacts/:id` (bytes with mime); `POST /api/ratings`; `GET /api/workspaces/:id/review-queue` (items with criteria not yet rated); `GET /api/workspaces/:id/calibration`; `GET /api/workspaces/:id/export`; `GET/POST/PATCH /api/workspaces/:id/schedules`; `GET/PUT /api/config`; `GET /api/events?workspaceId=` (SSE of `BusEvent`).
 
 - [ ] Tests: create workspace → list contains it; `POST /api/ratings` with unknown criterion → 400; resolving a request unblocks a pending `request_approval` (fake); artifact bytes served with mime; SSE emits `run_event`. Fail → implement → pass → commit.
 
