@@ -32,6 +32,8 @@ import { policyDenialsSection } from '../policy/policyEvents.js'; // WP-D
 
 /** At most this many orchestrator runs per phase (initial plan + one follow-up round). */
 export const MAX_ORCHESTRATOR_ROUNDS = 2;
+import { isExperimentTask } from '../learning/runTags.js'; // learning loop WP-F
+import { retireExperimentOutputs } from './outputs.js'; // learning loop WP-F
 
 /** Tasks currently executing in this process (so the drain loop never runs a task twice). */
 const active = new Set<string>();
@@ -708,13 +710,15 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
       } else {
         // Its research run is over (or unknown): nothing will run it again.
         // Its outputs take the failed status too (same rule as the review loop), and live views reload.
+        const experiment = isExperimentTask(store, t.id); // learning loop WP-F: an interrupted experiment arm
         const failed = store.transaction(() => {
           const task = store.tasks.update(t.id, { status: 'failed', failureReason: 'interrupted: its research run ended while the task was running' });
-          applyTaskStatus(store, task, 'failed');
+          if (experiment) retireExperimentOutputs(store, task); // WP-F
+          else applyTaskStatus(store, task, 'failed');
           return task;
         });
         deps.events.emit({ type: 'task_status', workspaceId: failed.workspaceId, taskId: failed.id, status: 'failed' });
-        recordTaskEndOutcomes(store, failed); // learning loop WP-C
+        if (!experiment) recordTaskEndOutcomes(store, failed); // learning loop WP-C
         abandonedTasks.push(t.id);
       }
     } else if (t.status === 'waiting_user') {

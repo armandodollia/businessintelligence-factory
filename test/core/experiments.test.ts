@@ -22,6 +22,8 @@ import { promptVersionMetrics } from '../../src/core/metrics/promptMetrics.js';
 import { recordUsage } from '../../src/core/metrics/usage.js';
 import { recordPromptVersion } from '../../src/core/prompts/store.js';
 import { runTaskWithReview } from '../../src/core/research/reviewLoop.js';
+import { resumeInterrupted } from '../../src/core/research/orchestrator.js';
+import { decisionReviewQueue } from '../../src/core/scoring/decisionQueue.js';
 import type { Store } from '../../src/core/store/db.js';
 import { newId } from '../../src/core/store/repos.js';
 import { createWorkspace } from '../../src/core/workspace/tree.js';
@@ -170,5 +172,27 @@ describe('startExperiment / compareExperiment', () => {
     // Work that still finishes in this process does not overwrite the boot verdict.
     expect((await done).status).toBe('interrupted');
     expect(recoverExperiments(w.store)).toEqual([]);
+  });
+
+  it('an arm task abandoned by a restart is retired too, and arm judgments are labelled in the decision queue', async () => {
+    const w = await world();
+    const exp = await runExperiment(w.deps, { taskId: w.source.id, arms: [{}, { model: { provider: 'claude', model: 'haiku' } }] });
+    const queue = decisionReviewQueue(w.ws.id, { store: w.store });
+    const armB = new Set(exp.arms[1]!.taskIds.flatMap((id) => w.store.agentRuns.list({ taskId: id }).flatMap((r) => w.store.decisions.list({ agentRunId: r.id }).map((d) => d.id))));
+    const labelled = queue.filter((q) => armB.has(q.targetId));
+    expect(labelled.length).toBeGreaterThan(0);
+    for (const q of labelled) expect(q.title).toMatch(/^\[experiment arm B\] /);
+    expect(queue.filter((q) => !q.title.startsWith('[')).length).toBeGreaterThan(0);
+
+    const taskId = exp.arms[0]!.taskIds[0]!;
+    w.store.tasks.update(taskId, { status: 'running' });
+    for (const f of w.store.findings.list({ taskId })) w.store.findings.update(f.id, { status: 'pending' });
+    const outcomes = listOutcomes(w.store, { workspaceIds: [w.ws.id], includeExperiments: true }).length;
+    const report = resumeInterrupted(w.deps);
+    await report.done;
+    expect(report.abandonedTasks).toEqual([taskId]);
+    expect(w.store.tasks.get(taskId)!.status).toBe('failed');
+    expect(w.store.findings.list({ taskId }).every((f) => f.status === 'superseded')).toBe(true);
+    expect(listOutcomes(w.store, { workspaceIds: [w.ws.id], includeExperiments: true })).toHaveLength(outcomes);
   });
 });
