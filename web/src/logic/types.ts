@@ -275,3 +275,8 @@ export type RecommendationView = Recommendation & { lastReview?: LastReview };
 
 /** Persona with the last review of the task that last saved it (`GET .../personas`). */
 export type PersonaView = PersonaNode & { lastReview?: LastReview };
+
+// ---------------------------------------------------------------------------
+// learning loop WP-C: decision outcomes report (`GET .../outcomes`)
+
+export type { OutcomeLabel, OutcomeReport, OutcomeReportRow } from '../../../src/core/learning/types.js';

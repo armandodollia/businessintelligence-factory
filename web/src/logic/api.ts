@@ -37,6 +37,7 @@ import type {
   UserRequest,
   WorkspaceNode,
 } from './types.js';
+import type { OutcomeReport } from './types.js';
 
 export class ApiError extends Error {
   constructor(
@@ -177,4 +178,11 @@ export const api = {
   // config
   getConfig: () => get<BifConfig>('/api/config'),
   putConfig: (config: BifConfig) => request<BifConfig>('PUT', '/api/config', config),
+};
+
+// --- learning loop WP-C: decision outcomes ----------------------------------------------------
+export const outcomesApi = {
+  /** Outcome label counts per role / task type / prompt version; `tree`: every node of the business tree. */
+  getOutcomes: (id: string, opts: { tree?: boolean } = {}) =>
+    get<OutcomeReport>(`${ws(id)}/outcomes${opts.tree ? '?scope=tree' : ''}`),
 };

@@ -2,6 +2,7 @@ import { decisionCriteria, formatValue, shortDate, summarize } from '../logic/fo
 import { useCalibration, useDecisions, useForm, usePromptPatch } from '../logic/hooks.js';
 import type { Decision, PatchRole } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
+import { OutcomesTable } from './Outcomes.js';
 
 const KINDS: Decision['kind'][] = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'];
 
@@ -127,6 +128,8 @@ export function DecisionLog({ wsId }: { wsId: string }) {
           </tbody>
         </table>
       )}
+
+      <OutcomesTable wsId={wsId} />
 
       <PromptPatchPanel wsId={wsId} />
     </div>

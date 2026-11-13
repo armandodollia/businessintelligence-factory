@@ -32,6 +32,7 @@ import type { Decision, Phase, Rating, Schedule, UserRequest, Workspace } from '
 import { acceptUnitProposal, crossCuttingSymptoms, rejectUnitProposal, rollup } from '../core/workspace/businessMap.js';
 import { createWorkspace, workspaceTree } from '../core/workspace/tree.js';
 import { mountMcp, type McpDeps } from './mcp.js';
+import { mountOutcomeRoutes } from './learningRoutes.js';
 import { sseResponse } from './sse.js';
 
 export type AppDeps = {
@@ -629,6 +630,9 @@ export function createApp(deps: AppDeps): Hono {
       signal: c.req.raw.signal,
     });
   });
+
+  // --- learning loop WP-C: decision outcomes report -------------------------------------------
+  mountOutcomeRoutes(app, { store }, workspace);
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 
