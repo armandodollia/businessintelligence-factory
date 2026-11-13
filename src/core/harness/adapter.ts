@@ -2,13 +2,15 @@ import type { ProviderId } from '../types.js';
 
 /**
  * Normalized event emitted by every CLI adapter. `usage.costUsd` is an addition to the spec'd
- * shape, filled when the CLI reports cost (Claude Code does).
+ * shape, filled when the CLI reports cost (Claude Code does). `usage.inputTokens` is the total
+ * input including cache reads/writes; `cacheReadTokens` / `cacheWriteTokens` (WP-B) break out the
+ * cached part when the CLI reports it (uncached input = inputTokens − both).
  */
 export type RunEvent =
   | { t: 'message'; text: string }
   | { t: 'tool_call'; name: string; input: unknown }
   | { t: 'tool_result'; name: string; ok: boolean }
-  | { t: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number }
+  | { t: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
   | { t: 'error'; message: string; rateLimited: boolean }
   | { t: 'done'; exitCode: number };
 

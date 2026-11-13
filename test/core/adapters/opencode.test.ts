@@ -59,7 +59,9 @@ describe('OpenCodeAdapter', () => {
     });
     expect(events).toContainEqual({ t: 'tool_result', name: 'save_finding', ok: true });
     expect(events).toContainEqual({ t: 'tool_result', name: 'save_artifact', ok: false });
-    expect(events).toContainEqual({ t: 'usage', inputTokens: 2300, outputTokens: 5, costUsd: 0.0012 });
+    expect(events).toContainEqual({
+      t: 'usage', inputTokens: 2300, outputTokens: 5, costUsd: 0.0012, cacheReadTokens: 1000, cacheWriteTokens: 0,
+    });
     expect(events.filter((e) => e.t === 'done')).toEqual([{ t: 'done', exitCode: 0 }]);
     expect(events.at(-1)).toEqual({ t: 'done', exitCode: 0 });
   });

@@ -131,6 +131,11 @@ export class CodexAdapter implements CliAdapter {
         const output = num(u?.output_tokens);
         if (input !== undefined) ev.inputTokens = input;
         if (output !== undefined) ev.outputTokens = output;
+        // Codex input_tokens already include cached input (OpenAI usage semantics).
+        const cacheRead = num(u?.cached_input_tokens);
+        if (cacheRead !== undefined) ev.cacheReadTokens = cacheRead;
+        const cacheWrite = num(u?.cache_write_input_tokens);
+        if (cacheWrite !== undefined) ev.cacheWriteTokens = cacheWrite;
         return [ev, { t: 'done', exitCode: 0 }];
       }
       case 'turn.failed': {
