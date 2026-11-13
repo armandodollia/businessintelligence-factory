@@ -22,8 +22,9 @@ import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { entityNames, getEntity } from './entities.js';
 import { factFreshness } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
-import { artifactVisibleSql, day, factVisibleSql, recordVisibleSql, visParams, type ReadEnv } from './readCommon.js';
-import { neighbours } from './relations.js';
+import { aroundVisible, artifactVisibleSql, day, factVisibleSql, isCrossNodeCausal, recordVisibleSql, visParams, type ReadEnv } from './readCommon.js';
+import { neighbours, type Edge } from './relations.js';
+import { SOURCE_TABLES } from './usable.js';
 import type { KnowledgeScope, ScopeMode } from './scope.js';
 import { servedLine } from './texts.js';
 import { factUsableSql, outputUsableSql } from './usable.js';
@@ -159,21 +160,47 @@ function changeLines(store: Store, view: KnowledgeScope, mode: ScopeMode, group:
   }));
 }
 
+/** Home node of the record asserting an edge (its "source node"). */
+function edgeSourceNode(store: Store, e: Edge): string | undefined {
+  const row = store.db.prepare(`SELECT workspace_id AS w FROM ${SOURCE_TABLES[e.sourceKind]} WHERE id = ?`).get(e.sourceId) as { w: string } | undefined;
+  return row?.w;
+}
+
+/**
+ * Relation lines of an entity card. Which edges are listed is decided by `aroundVisible` (the request's
+ * scope; its named causal case lists `causes` / `addresses` around a symptom or cause entity
+ * tree-wide). A name is labelled `(source <node>)` when the record asserting its edge lives in another
+ * node than the caller's; a causal edge shown across nodes also logs its edge and source record ids.
+ */
 function relationLines(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, survivor: Entity, group: Set<string>): { lines: CardLine[]; left: number } {
-  const edges = neighbours(env.store, view, survivor.id, { depth: 1, usableOnly: true, mode });
-  const byType = new Map<string, string[]>();
+  const around: ReadEnv = { ...env, scope: view, mode };
+  const edges = neighbours(env.store, view, survivor.id, { depth: 1, usableOnly: true, mode: 'tree' })
+    .filter((e) => aroundVisible(around, { kind: 'relation', relation: e, anchor: survivor }));
+  const byType = new Map<string, Array<{ other: string; edge: Edge }>>();
   for (const e of edges) {
     const out = group.has(e.fromEntityId);
     const other = out ? e.toEntityId : e.fromEntityId;
     const key = out ? `${e.type} →` : `← ${e.type}`;
     const list = byType.get(key) ?? [];
-    if (!list.includes(other)) list.push(other);
+    if (!list.some((x) => x.other === other)) list.push({ other, edge: e });
     byType.set(key, list);
   }
   const lines: CardLine[] = [];
   let left = 0;
   for (const [type, others] of byType) {
-    const names = others.slice(0, CARD_MAX_NAMES_PER_TYPE).map((id) => otherName(env, id)).filter((x) => x !== undefined);
+    const names: CardLine[] = [];
+    for (const { other, edge } of others.slice(0, CARD_MAX_NAMES_PER_TYPE)) {
+      const n = otherName(env, other);
+      if (!n) continue;
+      const src = edgeSourceNode(env.store, edge);
+      const label = src && src !== env.scope.workspaceId ? ` (source ${src})` : '';
+      const causal = isCrossNodeCausal(edge, survivor);
+      names.push({
+        text: `${n.text}${label}`,
+        refs: [...n.refs, ...(causal ? [{ id: edge.id, kind: 'relation' }, { id: edge.sourceId, kind: edge.sourceKind }] : [])],
+        upload: n.upload || (causal && itemIsUploadDerived(env.store, edge.sourceId)),
+      });
+    }
     left += Math.max(0, others.length - CARD_MAX_NAMES_PER_TYPE);
     if (!names.length) continue;
     const upload = names.some((n) => n.upload);

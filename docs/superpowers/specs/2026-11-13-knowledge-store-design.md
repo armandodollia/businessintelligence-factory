@@ -57,6 +57,20 @@ Made by the user:
    is SQLite FTS5. The search interface must allow a vector signal later without
    changing the tool contract.
 
+Approved by the user later (2026-11-13, after the KS-4 gate):
+
+13. **No confidentiality inside a tree.** Nothing in a tree is confidential from another node of
+    the same tree; there is no "restricted" label, now or planned. The user wants a wide view of the
+    company (an HR flow that makes a product flow inefficient must be findable). By-id sibling reads
+    (§7.1) are confirmed as built.
+14. **"Elsewhere" count on `search`.** A node-scoped search that also has matches outside node
+    scope says, in one line, how many more matches exist elsewhere in the business per kind and that
+    `scope: "tree"` returns them. Counts only (no text, no ids); nothing when zero.
+15. **Causal edges cross nodes by default.** On a symptom's card and in `expand` of a symptom or
+    cause entity, `causes` and `addresses` relations are listed tree-wide without `scope: "tree"`,
+    each labelled with its source node. Every other relation type keeps the node boundary.
+16. **Tree-wide diagnosis prompts** (KS-5): diagnosis prompts may draw on the whole tree.
+
 Made by the designer (correct any of these):
 
 6. **Computed cards.** Entity summaries are assembled by code from reviewed facts at
@@ -91,6 +105,9 @@ Non-goals (v1)
 - Embeddings / vector search, OCR, perceptual image hashing, chunk-level diffs of a
   changed page, LLM-written summaries, multi-user access control, cross-tree
   knowledge of any kind.
+- Per-item restriction or confidentiality inside a tree (decision 13): every node of a
+  tree may read every other node's items; node scope is a relevance default, not an
+  access rule.
 
 Anti-goals
 - A tool that can return an unbounded response.
@@ -161,9 +178,14 @@ lists *around* it (an entity card's facts and relations, an entity's neighbours 
 card's entity index and counts) follows node scope unless `scope: "tree"` is passed. A node card
 requested for another node shows that node's own view, labelled. Rationale: same-tree nodes may read
 and cite each other, and an agent only holds a sibling's id because it asked tree-wide or because
-in-scope evidence cites it. (Designer's interpretation pending the user's confirmation; the rule is
-one function, `allowByIdSiblingRead`, so requiring `scope: "tree"` for such reads is a one-line
-change.)
+in-scope evidence cites it. (Confirmed by the user, decision 13; the rule stays one function,
+`allowByIdSiblingRead`.)
+
+Causal edges (decision 15): around a symptom or cause entity (its card, `expand` of it), `causes` and
+`addresses` relations are listed from the whole tree in node scope too, each labelled with its source
+node (the node of the record asserting the edge); the edge and its source record are logged in the
+retrieval row. This is a named case of the one around-item rule (`aroundVisible`); every other
+relation type follows the request's scope.
 
 Invariant: a workspace's parent never changes after creation. If re-parenting is
 ever added it must rewrite `entities.root_workspace_id`.
@@ -378,6 +400,12 @@ Write tools:
 | `describe_artifact` | new: add or replace the description of an artifact that has none (or that the caller saved). |
 | `read_workspace` | Returns the node card plus counts, not every finding. Accepts `scope?`, `cursor?`, `max_tokens?` like `get_card`. |
 
+A node-scoped `search` (first page) adds one note when the same query matches more items elsewhere in
+the tree: `more matches elsewhere in the business (outside node scope): fact 2, entity 1; repeat
+with scope "tree" to see them` — counts only, per kind (up to the search pool, `+` when full), no
+text and no ids; the retrieval row is unchanged; the note is left out when it would cost a hit of the
+page, so the response budget always holds (decision 14).
+
 Search query handling: the agent's text is never passed to `MATCH` raw. It is
 tokenized, each token quoted, joined with AND; quoted phrases are kept. Zero hits →
 one automatic retry with OR, flagged `relaxed`. Empty query with `entity_id` =
@@ -456,6 +484,10 @@ fallback for facts saved as `new`.
 
 ## 12. Privacy and isolation
 
+- **No confidentiality inside a tree** (decision 13). Node scope is a relevance default: any node
+  may read any other node of its tree (by id, or with `scope: "tree"`), the "elsewhere" count says
+  what node scope left out, and causal edges cross nodes by default. There is no per-item
+  restriction label. Tree isolation and the upload / export rules below are unchanged.
 - **Tree isolation.** Every knowledge query takes its ids from `KnowledgeScope`.
   Ids supplied by an agent are checked with `sameTree`; an out-of-tree id and an
   unknown id produce the same error. Entities, merge suggestions, duplicate

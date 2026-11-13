@@ -18,7 +18,8 @@ import { encodeCursor, decodeCursor, estimateTokens, fitToBudget } from './budge
 import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { artifactVisible, canonicalArtifactId } from './texts.js';
-import type { Entity } from '../types.js';
+import type { Entity, EntityKind, Relation, RelationType } from '../types.js';
+import { sourceVisibleSql } from './usable.js';
 
 /** Who reads and with what limits. */
 export type ReadEnv = {
@@ -212,7 +213,8 @@ export const BUDGET_KIND: Record<string, KnowledgeBudgetKind> = {
  * `workspace_id`): may a request read an item of the caller's tree that is OUTSIDE its node scope (a
  * sibling's or cousin's), when it names the item's id?
  *
- * Ruling (the designer's interpretation, pending the user's confirmation): yes, in node scope too —
+ * Ruling (confirmed by the user, design §3 decision 13: nothing inside a tree is confidential from
+ * another node of it): yes, in node scope too —
  * same-tree nodes may read and cite each other, and an agent only holds a sibling id because it asked
  * tree-wide or because in-scope evidence cites it. The item is labelled with its source node; what
  * the response lists AROUND it still follows the request's scope.
@@ -274,12 +276,38 @@ export function entityVisibleIn(store: Store, view: KnowledgeScope, mode: ScopeM
 // ---------------------------------------------------------------------------
 // What a by-id response lists AROUND the named item (re-gate: one helper for every such list)
 
-/** Something listed around a named item: a fact, an artifact, a typed record or capture (by workspace), an entity. */
+/**
+ * Something listed around a named item: a fact, an artifact, a typed record or capture (by workspace),
+ * an entity, or a relation of the named entity (`anchor`: that entity).
+ */
 export type AroundItem =
   | { kind: 'fact'; id: string }
   | { kind: 'artifact'; id: string }
   | { kind: 'workspace'; workspaceId: string }
-  | { kind: 'entity'; entity: Entity };
+  | { kind: 'entity'; entity: Entity }
+  | { kind: 'relation'; relation: Relation; anchor: Entity };
+
+/**
+ * Causal relation types (user decision, design §3): around a symptom or cause entity they are listed
+ * TREE-WIDE in node scope too (an HR cause of a Product symptom must be findable from Product), each
+ * labelled with its source node. Every other relation type keeps the node boundary.
+ */
+export const CAUSAL_RELATION_TYPES: readonly RelationType[] = ['causes', 'addresses'];
+/** Entity kinds whose causal relations cross nodes by default. */
+export const CAUSAL_ANCHOR_KINDS: readonly EntityKind[] = ['symptom', 'cause'];
+
+/** The causal case of `aroundVisible`: a `causes` / `addresses` edge around a symptom or cause entity. */
+export function isCrossNodeCausal(relation: Pick<Relation, 'type'>, anchor: Pick<Entity, 'kind'>): boolean {
+  return CAUSAL_RELATION_TYPES.includes(relation.type) && CAUSAL_ANCHOR_KINDS.includes(anchor.kind);
+}
+
+/** Whether the record asserting an edge is visible from the active ids of `mode` (design §7.1). */
+function relationSourceVisible(store: Store, scope: KnowledgeScope, mode: ScopeMode, r: Relation): boolean {
+  const row = store.db
+    .prepare(`WITH vis(ws) AS (SELECT value FROM json_each(:vis)) SELECT ${sourceVisibleSql(':k', ':id')} AS v`)
+    .get({ vis: idsParam(scope, mode), k: r.sourceKind, id: r.sourceId }) as { v: number } | undefined;
+  return row?.v === 1;
+}
 
 /**
  * Whether an item listed around a named one may be shown: it follows the request's scope (`env.mode`,
@@ -302,6 +330,11 @@ export function aroundVisible(env: ReadEnv, item: AroundItem): boolean {
       return activeIds(scope, mode).includes(item.workspaceId);
     case 'entity':
       return entityVisibleIn(store, scope, mode, item.entity);
+    case 'relation':
+      // Same tree always; then the named case: causal edges around a symptom / cause cross nodes.
+      if (item.relation.rootWorkspaceId !== scope.rootId) return false;
+      if (mode === 'tree' || isCrossNodeCausal(item.relation, item.anchor)) return relationSourceVisible(store, scope, 'tree', item.relation);
+      return relationSourceVisible(store, scope, mode, item.relation);
   }
 }
 

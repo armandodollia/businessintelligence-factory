@@ -180,11 +180,12 @@ function expandFact(env: ReadEnv, id: string): Built {
   if (!env.slice) {
     const edges = knowledgeRepos(store).relations.list({ sourceKind: 'fact', sourceId: f.id });
     for (const e of edges) {
-      const names: Array<{ id: string; name: string }> = [];
+      const names: Array<{ id: string; name: string; source?: string }> = [];
       for (const eid of [e.fromEntityId, e.toEntityId]) {
         try {
           const ent = getEntity(store, env.scope, eid);
-          if (aroundVisible(env, { kind: 'entity', entity: ent })) names.push({ id: ent.id, name: servedLine(store, ws, ent.name, 120) });
+          // Each endpoint carries its source node when it is not the caller's (KS-7, gate nit).
+          if (aroundVisible(env, { kind: 'entity', entity: ent })) names.push({ id: ent.id, name: servedLine(store, ws, ent.name, 120), ...sourceLabel(env, ent.workspaceId) });
         } catch {
           // skip
         }
