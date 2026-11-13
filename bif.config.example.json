@@ -33,7 +33,7 @@
     "mcpServers": {
       "playwright": {
         "command": "npx",
-        "args": ["@playwright/mcp@latest", "--user-data-dir", "data/browser-profile"]
+        "args": ["@playwright/mcp@latest", "--user-data-dir", "{{profileDir}}"]
       }
     },
     "profileDir": "data/browser-profile"

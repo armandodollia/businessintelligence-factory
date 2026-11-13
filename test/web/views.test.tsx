@@ -93,6 +93,21 @@ describe('web views', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
   });
 
+  it('renders weights editor, prompt patch panel and what-changed list', async () => {
+    window.location.hash = '#/w/ws_1/strategy';
+    render(<App />);
+    expect(await screen.findByText('Priority weights')).toBeTruthy();
+    expect(screen.getByLabelText('weight upside')).toBeTruthy();
+    cleanup();
+    window.location.hash = '#/w/ws_1/decisions';
+    render(<App />);
+    expect(await screen.findByRole('button', { name: 'Propose patch' })).toBeTruthy();
+    cleanup();
+    window.location.hash = '#/w/ws_1/research';
+    render(<App />);
+    expect(await screen.findByText('What changed')).toBeTruthy();
+  });
+
   it('renders workspaces and settings', async () => {
     window.location.hash = '#/settings';
     render(<App />);

@@ -159,3 +159,74 @@ export const ALL_PHASES: ResearchPhase[] = [
   'persona_panel',
   'scoring',
 ];
+
+// ---------------------------------------------------------------------------
+// calibration patches, scoring weights, "what changed" (Task 14 routes)
+
+/** Agent roles a prompt calibration patch can target (mirrors `ROLES` in the core config). */
+export const PATCH_ROLES = ['orchestrator', 'worker', 'reviewer', 'interviewer', 'persona', 'synthesizer'] as const;
+export type PatchRole = (typeof PATCH_ROLES)[number];
+
+/** `POST .../calibration/prompt-patch` → proposed patch (nothing written yet). */
+export interface PromptPatch {
+  role: PatchRole;
+  examples: Array<{ criterion: string; agentValue: unknown; userValue: unknown; reason?: string }>;
+  patchText: string;
+}
+
+/** `POST .../calibration/prompt-patch/apply` → where the patch was written. */
+export interface AppliedPromptPatch {
+  path: string;
+  decisionId: string;
+}
+
+/** Recommendation criteria the priority weights apply to (mirrors `RECOMMENDATION_KEYS`). */
+export const WEIGHT_KEYS = [
+  'upside',
+  'difficulty',
+  'cost',
+  'timeToValue',
+  'risk',
+  'confidence',
+  'strategicFit',
+  'competitiveUrgency',
+] as const;
+export type WeightKey = (typeof WEIGHT_KEYS)[number];
+
+/** `GET/PUT .../scoring-weights`. */
+export interface ScoringWeights {
+  weights: Record<string, number>;
+  personaWeight: number;
+  proposedWeights?: Record<string, number>;
+  decisionId?: string;
+}
+
+export type ChangedArtifact = { flow: string; step: number; prev: string; next: string };
+
+/** Payload of a scheduler "what changed" Decision (`GET .../changes`). */
+export interface WhatChangedPayload {
+  actor?: string;
+  event: 'what_changed';
+  scheduleId?: string;
+  scheduleName?: string;
+  phase?: string;
+  prevRunId?: string;
+  nextRunId?: string;
+  /** Finding ids new in the next run. */
+  newFindings?: string[];
+  removedSubjects?: string[];
+  changedArtifacts?: ChangedArtifact[];
+}
+
+/** One "what changed" entry as shown on the Research page. */
+export interface ChangeEntry {
+  id: string;
+  createdAt: string;
+  scheduleName: string;
+  phase: string;
+  newFindings: string[];
+  removedSubjects: string[];
+  changedArtifacts: ChangedArtifact[];
+  /** True when the diff found nothing. */
+  empty: boolean;
+}
