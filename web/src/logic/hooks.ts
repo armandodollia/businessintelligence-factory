@@ -5,6 +5,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, artifactUrl, exportUrl } from './api.js';
 import { subscribe } from './sse.js';
+import {
+  PATCH_ROLES,
+  WEIGHT_KEYS,
+  type AppliedPromptPatch,
+  type ChangeEntry,
+  type PatchRole,
+  type PromptPatch,
+  type WeightKey,
+  type WhatChangedPayload,
+} from './types.js';
 import type {
   Artifact,
   BifConfig,
@@ -544,6 +554,177 @@ export function useDecisions(wsId: string | null | undefined, kind?: Decision['k
 export function useCalibration(wsId: string | null | undefined) {
   const res = useResource(`calibration:${wsId ?? ''}`, wsId ? () => api.getCalibration(wsId) : null);
   return { report: res.data ?? null, loading: res.loading, error: res.error, reload: res.reload };
+}
+
+/**
+ * Prompt calibration patch: propose one for a role from the user's disagreements, let the user
+ * edit the text, and apply it only on explicit approval.
+ */
+export function usePromptPatch(wsId: string | null | undefined) {
+  const [role, setRoleState] = useState<PatchRole>('worker');
+  const [proposal, setProposal] = useState<PromptPatch | null>(null);
+  const [text, setText] = useState('');
+  const [applied, setApplied] = useState<AppliedPromptPatch | null>(null);
+  const action = useAction();
+
+  const setRole = useCallback((r: PatchRole) => {
+    setRoleState(r);
+    setProposal(null);
+    setApplied(null);
+    setText('');
+  }, []);
+
+  const propose = useCallback(async () => {
+    if (!wsId) return;
+    setApplied(null);
+    const p = await action.run(() => api.proposePromptPatch(wsId, role));
+    if (p) {
+      setProposal(p);
+      setText(p.patchText);
+    }
+  }, [wsId, role, action.run]);
+
+  const apply = useCallback(async () => {
+    if (!wsId || !proposal) return;
+    const r = await action.run(() => api.applyPromptPatch(wsId, { ...proposal, patchText: text }));
+    if (r) {
+      setApplied(r);
+      setProposal(null);
+      setText('');
+    }
+  }, [wsId, proposal, text, action.run]);
+
+  const discard = useCallback(() => {
+    setProposal(null);
+    setText('');
+  }, []);
+
+  return {
+    roles: PATCH_ROLES,
+    role,
+    setRole,
+    proposal,
+    text,
+    setText,
+    edited: proposal !== null && text !== proposal.patchText,
+    canApply: proposal !== null && text.trim().length > 0 && !action.busy,
+    propose,
+    apply,
+    discard,
+    applied,
+    busy: action.busy,
+    error: action.error,
+  };
+}
+
+/** Parses a weight input; returns undefined when it is not a finite number ≥ 0. */
+export function parseWeight(raw: string): number | undefined {
+  if (raw.trim() === '') return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/** Editor for the global priority weights (shared by all workspaces; logged as a Decision). */
+export function useScoringWeights(wsId: string | null | undefined) {
+  const res = useResource(`scoring-weights:${wsId ?? ''}`, wsId ? () => api.getScoringWeights(wsId) : null);
+  const action = useAction();
+  const [draft, setDraft] = useState<Record<string, string> | null>(null);
+  const [savedDecisionId, setSavedDecisionId] = useState<string | null>(null);
+
+  const current = res.data;
+  const fromServer = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const k of WEIGHT_KEYS) out[k] = String(current?.weights?.[k] ?? 1);
+    out.personaWeight = String(current?.personaWeight ?? 0);
+    return out;
+  }, [current]);
+  const values = draft ?? fromServer;
+  const invalid = Object.keys(values).filter((k) => parseWeight(values[k] ?? '') === undefined);
+
+  const set = useCallback(
+    (key: WeightKey | 'personaWeight', raw: string) => setDraft((d) => ({ ...(d ?? fromServer), [key]: raw })),
+    [fromServer],
+  );
+  const adoptProposed = useCallback(() => {
+    const proposed = current?.proposedWeights;
+    if (!proposed) return;
+    setDraft((d) => {
+      const next = { ...(d ?? fromServer) };
+      for (const k of WEIGHT_KEYS) if (proposed[k] !== undefined) next[k] = String(proposed[k]);
+      return next;
+    });
+  }, [current, fromServer]);
+
+  const save = useCallback(async () => {
+    if (!wsId || invalid.length > 0) return;
+    const weights: Record<string, number> = {};
+    for (const k of WEIGHT_KEYS) weights[k] = parseWeight(values[k] ?? '') as number;
+    const personaWeight = parseWeight(values.personaWeight ?? '') as number;
+    const saved = await action.run(() => api.putScoringWeights(wsId, { weights, personaWeight }));
+    if (saved) {
+      res.mutate((prev) => ({ ...saved, proposedWeights: prev?.proposedWeights }));
+      setSavedDecisionId(saved.decisionId ?? null);
+      setDraft(null);
+    }
+  }, [wsId, invalid.length, values, action.run, res.mutate]);
+
+  const proposed = current?.proposedWeights;
+  const hasProposal =
+    !!proposed && WEIGHT_KEYS.some((k) => proposed[k] !== undefined && proposed[k] !== (current?.weights?.[k] ?? 1));
+
+  return {
+    keys: WEIGHT_KEYS,
+    values,
+    set,
+    invalid,
+    dirty: draft !== null,
+    proposed: proposed ?? null,
+    hasProposal,
+    adoptProposed,
+    save,
+    revert: () => setDraft(null),
+    savedDecisionId,
+    saving: action.busy,
+    loading: res.loading,
+    error: res.error ?? action.error,
+  };
+}
+
+/** Maps a scheduler "what changed" Decision to a display entry (null when it is not one). */
+export function toChangeEntry(d: Decision): ChangeEntry | null {
+  const p = d.payload as WhatChangedPayload | null;
+  if (!p || p.event !== 'what_changed') return null;
+  const newFindings = p.newFindings ?? [];
+  const removedSubjects = p.removedSubjects ?? [];
+  const changedArtifacts = p.changedArtifacts ?? [];
+  return {
+    id: d.id,
+    createdAt: d.createdAt,
+    scheduleName: p.scheduleName ?? p.scheduleId ?? 'schedule',
+    phase: p.phase ?? '',
+    newFindings,
+    removedSubjects,
+    changedArtifacts,
+    empty: newFindings.length === 0 && removedSubjects.length === 0 && changedArtifacts.length === 0,
+  };
+}
+
+/** "What changed" between consecutive scheduled runs, newest first, updated live. */
+export function useChanges(wsId: string | null | undefined) {
+  const res = useResource(`changes:${wsId ?? ''}`, wsId ? () => api.listChanges(wsId) : null);
+  useBusEvents(wsId, (e) => {
+    if (e.type !== 'decision' || !toChangeEntry(e.decision)) return;
+    res.mutate((list) => (list?.some((d) => d.id === e.decision.id) ? list : [...(list ?? []), e.decision]));
+  });
+  const changes = useMemo(
+    () =>
+      (res.data ?? [])
+        .map(toChangeEntry)
+        .filter((c): c is ChangeEntry => c !== null)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    [res.data],
+  );
+  return { changes, loading: res.loading, error: res.error, reload: res.reload };
 }
 
 // ---------------------------------------------------------------------------

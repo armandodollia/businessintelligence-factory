@@ -1,10 +1,10 @@
 import { formatValue } from '../logic/format.js';
-import { useRecommendations } from '../logic/hooks.js';
+import { useRecommendations, useScoringWeights } from '../logic/hooks.js';
 import type { PersonaFeedback } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
 
 export function Strategy({ wsId }: { wsId: string }) {
-  const { recommendations, loading, error } = useRecommendations(wsId);
+  const { recommendations, loading, error, reload } = useRecommendations(wsId);
   return (
     <div>
       <h2>Strategy</h2>
@@ -47,7 +47,82 @@ export function Strategy({ wsId }: { wsId: string }) {
           ))}
         </tbody>
       </table>
+      <WeightsEditor wsId={wsId} onSaved={() => void reload()} />
     </div>
+  );
+}
+
+function WeightsEditor({ wsId, onSaved }: { wsId: string; onSaved: () => void }) {
+  const w = useScoringWeights(wsId);
+  return (
+    <section>
+      <h3>Priority weights</h3>
+      <p className="muted">
+        Weights apply to all workspaces. Saving rescores every recommendation and is logged as a decision. Persona weight
+        is the share of simulated feedback in priority (default 0).
+      </p>
+      {w.error && <div className="error">{w.error}</div>}
+      <table>
+        <thead>
+          <tr>
+            <th>Criterion</th>
+            <th>Weight</th>
+            {w.proposed && <th>Proposed from your ratings</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {w.keys.map((k) => (
+            <tr key={k}>
+              <td>{k}</td>
+              <td>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  aria-label={`weight ${k}`}
+                  className={w.invalid.includes(k) ? 'invalid' : ''}
+                  value={w.values[k]}
+                  onChange={(e) => w.set(k, e.target.value)}
+                />
+              </td>
+              {w.proposed && <td>{formatValue(w.proposed[k])}</td>}
+            </tr>
+          ))}
+          <tr>
+            <td className="simulated">personaWeight (simulated)</td>
+            <td>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                aria-label="persona weight"
+                className={w.invalid.includes('personaWeight') ? 'invalid' : ''}
+                value={w.values.personaWeight}
+                onChange={(e) => w.set('personaWeight', e.target.value)}
+              />
+            </td>
+            {w.proposed && <td />}
+          </tr>
+        </tbody>
+      </table>
+      {w.invalid.length > 0 && <div className="error">Weights must be numbers ≥ 0: {w.invalid.join(', ')}</div>}
+      <div className="row">
+        <button
+          className="primary"
+          disabled={!w.dirty || w.invalid.length > 0 || w.saving}
+          onClick={() => void w.save().then(onSaved)}
+        >
+          {w.saving ? 'Saving…' : 'Save weights'}
+        </button>
+        <button disabled={!w.hasProposal} onClick={w.adoptProposed}>
+          Use proposed
+        </button>
+        <button disabled={!w.dirty} onClick={w.revert}>
+          Revert
+        </button>
+        {w.savedDecisionId && <span className="muted">saved (decision {w.savedDecisionId})</span>}
+      </div>
+    </section>
   );
 }
 

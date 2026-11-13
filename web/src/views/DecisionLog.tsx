@@ -1,6 +1,6 @@
 import { formatValue, shortDate, summarize } from '../logic/format.js';
-import { useCalibration, useDecisions, useForm } from '../logic/hooks.js';
-import type { Decision } from '../logic/types.js';
+import { useCalibration, useDecisions, useForm, usePromptPatch } from '../logic/hooks.js';
+import type { Decision, PatchRole } from '../logic/types.js';
 
 const KINDS: Decision['kind'][] = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'];
 
@@ -94,6 +94,61 @@ export function DecisionLog({ wsId }: { wsId: string }) {
           </tbody>
         </table>
       )}
+
+      <PromptPatchPanel wsId={wsId} />
     </div>
+  );
+}
+
+function PromptPatchPanel({ wsId }: { wsId: string }) {
+  const p = usePromptPatch(wsId);
+  return (
+    <section>
+      <h3>Prompt calibration patch</h3>
+      <p className="muted">
+        Builds a prompt appendix for one role from the ratings you disagreed with. Nothing is written until you apply it.
+      </p>
+      <div className="row">
+        <label>
+          Role
+          <select value={p.role} onChange={(e) => p.setRole(e.target.value as PatchRole)}>
+            {p.roles.map((r) => (
+              <option key={r}>{r}</option>
+            ))}
+          </select>
+        </label>
+        <button disabled={p.busy} onClick={() => void p.propose()}>
+          {p.busy && !p.proposal ? 'Proposing…' : 'Propose patch'}
+        </button>
+      </div>
+      {p.error && <div className="error">{p.error}</div>}
+      {p.applied && (
+        <div className="muted">
+          Applied. Written to <code>{p.applied.path}</code> (decision {p.applied.decisionId}).
+        </div>
+      )}
+      {p.proposal && (
+        <div>
+          <p className="small muted">
+            Based on {p.proposal.examples.length} disagreement{p.proposal.examples.length === 1 ? '' : 's'}
+            {p.edited ? ' (edited)' : ''}.
+          </p>
+          <textarea
+            className="code"
+            rows={12}
+            spellCheck={false}
+            aria-label="Patch text"
+            value={p.text}
+            onChange={(e) => p.setText(e.target.value)}
+          />
+          <div className="row">
+            <button className="primary" disabled={!p.canApply} onClick={() => void p.apply()}>
+              Apply patch
+            </button>
+            <button onClick={p.discard}>Discard</button>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

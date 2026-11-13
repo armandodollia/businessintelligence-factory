@@ -1,5 +1,5 @@
 import { describeEvent, eventRunId, shortDate, summarize, toggle } from '../logic/format.js';
-import { useDecisions, useForm, useResearch } from '../logic/hooks.js';
+import { artifactUrl, useChanges, useDecisions, useForm, useResearch } from '../logic/hooks.js';
 import { ALL_PHASES, OPTIONAL_PHASES, type ResearchPhase } from '../logic/types.js';
 import { PendingRequests } from './PendingRequests.js';
 
@@ -30,6 +30,8 @@ export function Research({ wsId }: { wsId: string }) {
           {r.starting ? 'Starting…' : 'Start research'}
         </button>
       </section>
+
+      <WhatChanged wsId={wsId} />
 
       <section>
         <h3>Runs</h3>
@@ -114,5 +116,36 @@ export function Research({ wsId }: { wsId: string }) {
         </aside>
       </div>
     </div>
+  );
+}
+
+function WhatChanged({ wsId }: { wsId: string }) {
+  const { changes, error } = useChanges(wsId);
+  return (
+    <section>
+      <h3>What changed</h3>
+      <p className="muted">Differences between consecutive scheduled runs of the same phase.</p>
+      {error && <div className="error">{error}</div>}
+      {changes.length === 0 && <p className="muted">No scheduled runs compared yet.</p>}
+      <ul className="plain">
+        {changes.map((c) => (
+          <li key={c.id}>
+            <b>{c.scheduleName}</b> · {c.phase} <span className="muted">{shortDate(c.createdAt)}</span>
+            {c.empty && <span className="muted"> — no changes</span>}
+            {c.newFindings.length > 0 && <div className="small">{c.newFindings.length} new finding(s)</div>}
+            {c.removedSubjects.length > 0 && (
+              <div className="small">No longer found: {c.removedSubjects.join(', ')}</div>
+            )}
+            {c.changedArtifacts.map((a) => (
+              <div key={`${a.flow}:${a.step}`} className="small">
+                Screenshot changed: {a.flow} step {a.step} (<a href={artifactUrl(a.prev)} target="_blank" rel="noreferrer">before</a>
+                {' / '}
+                <a href={artifactUrl(a.next)} target="_blank" rel="noreferrer">after</a>)
+              </div>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

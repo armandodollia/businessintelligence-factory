@@ -3,8 +3,12 @@
  * `fetch`. All paths are relative so the Vite dev proxy (and same-origin prod serving) work.
  */
 import type {
+  AppliedPromptPatch,
   Artifact,
   BifConfig,
+  PatchRole,
+  PromptPatch,
+  ScoringWeights,
   CalibrationReport,
   CreateWorkspaceInput,
   Decision,
@@ -137,6 +141,16 @@ export const api = {
   rate: (input: RatingInput) => post<Rating>('/api/ratings', input),
   getReviewQueue: (id: string) => get<ReviewQueueItem[]>(`${ws(id)}/review-queue`),
   getCalibration: (id: string) => get<CalibrationReport>(`${ws(id)}/calibration`),
+  proposePromptPatch: (id: string, role: PatchRole) =>
+    post<PromptPatch>(`${ws(id)}/calibration/prompt-patch`, { role }),
+  applyPromptPatch: (id: string, patch: PromptPatch) =>
+    post<AppliedPromptPatch>(`${ws(id)}/calibration/prompt-patch/apply`, patch),
+  getScoringWeights: (id: string) => get<ScoringWeights>(`${ws(id)}/scoring-weights`),
+  putScoringWeights: (id: string, body: { weights?: Record<string, number>; personaWeight?: number }) =>
+    request<ScoringWeights>('PUT', `${ws(id)}/scoring-weights`, body),
+
+  // scheduler diffs
+  listChanges: (id: string) => get<Decision[]>(`${ws(id)}/changes`),
 
   // schedules
   listSchedules: (id: string) => get<Schedule[]>(`${ws(id)}/schedules`),
