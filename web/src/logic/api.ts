@@ -177,4 +177,8 @@ export const api = {
   // config
   getConfig: () => get<BifConfig>('/api/config'),
   putConfig: (config: BifConfig) => request<BifConfig>('PUT', '/api/config', config),
+
+  // WP-D: structured escalation answers (dismiss with `resolveRequest(id, 'denied')`)
+  answerEscalation: (id: string, choice: number, note?: string) =>
+    post<UserRequest>(`/api/requests/${enc(id)}/escalation-answer`, note ? { choice, note } : { choice }),
 };

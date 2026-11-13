@@ -1,10 +1,11 @@
 import { shortDate } from '../logic/format.js';
 import { useForm, useRequests } from '../logic/hooks.js';
 import type { UserRequest } from '../logic/types.js';
+import { EscalationRow } from './EscalationRow.js';
 
 /** Prominent banner of agent requests waiting on the user (register / login / captcha / approval). */
 export function PendingRequests({ wsId }: { wsId: string }) {
-  const { pending, resolve, resolving, error } = useRequests(wsId);
+  const { pending, resolve, answerEscalation, resolving, error } = useRequests(wsId);
   if (pending.length === 0 && !error) return null;
   return (
     <section className="pending" aria-live="polite">
@@ -12,9 +13,13 @@ export function PendingRequests({ wsId }: { wsId: string }) {
         Waiting on you ({pending.length})
       </h3>
       {error && <div className="error">{error}</div>}
-      {pending.map((r) => (
-        <RequestRow key={r.id} request={r} busy={resolving} resolve={resolve} />
-      ))}
+      {pending.map((r) =>
+        r.kind === 'escalation' ? (
+          <EscalationRow key={r.id} request={r} busy={resolving} answer={answerEscalation} dismiss={(id) => resolve(id, 'denied')} />
+        ) : (
+          <RequestRow key={r.id} request={r} busy={resolving} resolve={resolve} />
+        ),
+      )}
     </section>
   );
 }
