@@ -8,7 +8,8 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
 import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-4
-import { tagRun } from '../learning/runTags.js'; // learning loop WP-F
+import { lessonsOff, tagRun } from '../learning/runTags.js'; // learning loop WP-F
+import { lessonsMode } from '../learning/lessons/mode.js'; // wave-2 integration: withLessons marks runs
 
 /** Which agent step a run is for (used by fake pickers and logs). */
 export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate' | 'retro' | 'audit'; // escalate: WP-D; retro: learning loop WP-E; audit: WP-F
@@ -90,7 +91,10 @@ export async function runAgent(
   opts.meta = meta;
   // KS-4: prompt reads are logged once the run id exists and before the agent starts.
   const reads = req.promptReads ?? [];
-  const tags = req.runTags; // learning loop WP-F
+  // Learning loop WP-F tags. Wave-2 integration: a run started inside `withLessons('off')`, or for a
+  // task whose stored flag is lessons-off, is stored with `lessons_off = 1` (prompt assembly reads it).
+  const off = lessonsMode() === 'off' || (req.task ? lessonsOff(deps.store, { taskId: req.task.id }) : false);
+  const tags = off && !req.runTags?.lessonsOff ? { ...req.runTags, lessonsOff: true } : req.runTags;
   if (reads.length || tags) {
     opts.beforeStart = (runCtx) => {
       if (tags) tagRun(deps.store, runCtx.agentRunId, tags);

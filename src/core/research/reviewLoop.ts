@@ -375,7 +375,7 @@ async function workerStep(
   const role = roleForTask(initial);
   const system =
     experimentWorkerPrompt(store, taskId) ?? // learning loop WP-F: an experiment arm's worker prompt version
-    workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config.dataDir, initial.workspaceId));
+    workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config.dataDir, initial.workspaceId, { taskId })); // stored lessons-off flag
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
@@ -433,9 +433,10 @@ export function reviewerRunInput(
   deps: Pick<ResearchDeps, 'store' | 'config'>,
   task: Task,
   round: number,
+  lessons: { lessonsOff?: boolean } = {},
 ): { systemPrompt: string; promptVersion: string; prompt: string; promptReads: PromptRead[] } {
   const { store, config } = deps;
-  const system = reviewerSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId));
+  const system = reviewerSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId, { taskId: task.id, ...lessons }));
   const context = reviewContext(deps, task);
   // Knowledge store KS-2/KS-4: the prior claims and quotes in the reviewer's prompt are a read (design
   // §12), logged on the reviewer run before it starts (a crash mid-run cannot lose the row).

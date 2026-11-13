@@ -110,11 +110,21 @@ export function isExperimentTask(store: Pick<Store, 'db'>, taskId: string): bool
 }
 
 /**
- * WP-E: whether lessons must be left out of a prompt. True for an experiment task (known before its
- * runs exist, so prompt assembly can ask by task) and for a run flagged `lessons_off`.
+ * WP-E: whether lessons must be left out of a prompt. Read from the store by prompt assembly, so it
+ * holds after a restart or resume. True for an experiment task (known before its runs exist, so
+ * prompt assembly can ask by task), for a run flagged `lessons_off`, and (wave-2 integration) for a
+ * task that already has a non-audit run flagged `lessons_off` (e.g. one started inside
+ * `withLessons('off', …)`): a task keeps the lessons mode it started with. Audit runs are left out
+ * of the task rule: an auditor runs without lessons (ruling R5) without changing the audited task.
  */
 export function lessonsOff(store: Pick<Store, 'db'>, input: { taskId?: string; agentRunId?: string }): boolean {
-  if (input.taskId !== undefined && isExperimentTask(store, input.taskId)) return true;
+  if (input.taskId !== undefined) {
+    if (isExperimentTask(store, input.taskId)) return true;
+    const flagged = store.db
+      .prepare('SELECT 1 FROM agent_runs WHERE task_id = ? AND lessons_off = 1 AND audit_id IS NULL LIMIT 1')
+      .get(input.taskId);
+    if (flagged) return true;
+  }
   return input.agentRunId !== undefined && runTags(store, input.agentRunId)?.lessonsOff === true;
 }
 

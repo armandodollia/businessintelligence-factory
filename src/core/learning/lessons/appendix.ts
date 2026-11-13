@@ -8,6 +8,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Store } from '../../store/db.js';
 import type { Role } from '../../types.js';
+import { lessonsOff } from '../runTags.js';
 import { lessonsMode } from './mode.js';
 import { lessonRepos } from './store.js';
 import type { LessonRule } from './types.js';
@@ -30,11 +31,25 @@ export function ruleLine(rule: Pick<LessonRule, 'marker' | 'version' | 'text'>):
 }
 
 /**
- * The lessons section for `role` in the tree of `rootWorkspaceId` ('' when it has no active rule, or
- * when lessons are switched off for the current run: `withLessons('off', …)`).
+ * What the prompt is built for (wave-2 integration): the stored lessons-off flag of the task / run is
+ * read from the store (`lessonsOff`, WP-F), so it survives a restart or resume. `lessonsOff: true`
+ * forces it (reviewer audits, ruling R5).
  */
-export function lessonsAppendix(store: Store, rootWorkspaceId: string, role: string): string {
-  if (lessonsMode() === 'off') return '';
+export type LessonsTarget = { taskId?: string; agentRunId?: string; lessonsOff?: boolean };
+
+/** Whether a prompt built for `target` leaves the lessons out (stored flag, forced, or `withLessons('off')`). */
+export function lessonsOffFor(store: Store, target: LessonsTarget = {}): boolean {
+  // `withLessons('off')` marks the runs it starts (`runAgent` stores the flag); it also covers the
+  // first prompt of a task, built before any of its runs (and so any stored flag) exists.
+  return target.lessonsOff === true || lessonsMode() === 'off' || lessonsOff(store, target);
+}
+
+/**
+ * The lessons section for `role` in the tree of `rootWorkspaceId` ('' when it has no active rule, or
+ * when lessons are off for the task / run the prompt is built for: `lessonsOffFor`).
+ */
+export function lessonsAppendix(store: Store, rootWorkspaceId: string, role: string, target: LessonsTarget = {}): string {
+  if (lessonsOffFor(store, target)) return '';
   const rules = lessonRepos(store).rules.list({ rootWorkspaceId, status: 'active' }).filter((r) => r.role === role);
   if (!rules.length) return '';
   return [

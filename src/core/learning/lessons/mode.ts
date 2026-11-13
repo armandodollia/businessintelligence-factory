@@ -1,14 +1,12 @@
 /**
  * Per-run lessons switch (learning loop WP-E; for WP-F experiments: "lessons off during experiments").
  *
- * Every prompt assembled inside `withLessons('off', fn)` — across awaits, for every run `fn` starts —
- * leaves the accepted lesson rules out (`lessonsMode()` is read by the appendix when a prompt is
- * built). The run's prompt version then differs from a run with lessons, and its stored prompt text
- * carries no tracking marker, so per-version metrics keep the two apart. Outside any context lessons
- * are on.
- *
- * Note: the mode is not persisted. Work resumed after a restart (`resumeInterrupted`) runs outside the
- * caller's context, so a caller that must keep lessons off across restarts wraps its resume too.
+ * The authority is the STORED flag (wave-2 integration): `agent_runs.lessons_off` and the experiment
+ * tag of a task, read by prompt assembly through `lessonsOff` / `lessonsOffFor`, so a run keeps
+ * lessons off after a restart or resume. `withLessons('off', fn)` is a convenience on top: every run
+ * `fn` starts (across awaits) is stored with `lessons_off = 1` by `runAgent`, and a prompt built in
+ * the context leaves the rules out (the first prompt of a task is built before any run, so before a
+ * flag, exists). After that the task's stored flag keeps lessons off with no context.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 

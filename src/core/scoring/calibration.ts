@@ -10,7 +10,7 @@ import { normalizeCriterion, personaScore } from './priority.js';
 import { resolveTarget } from './ratings.js';
 // Learning loop WP-A: feedback signals (include overrides, unit proposal decisions) count in calibration.
 import { ratingsWithSignals, signalDelta } from '../feedback/signals.js';
-import { lessonsAppendix } from '../learning/lessons/appendix.js'; // learning loop WP-E
+import { lessonsAppendix, type LessonsTarget } from '../learning/lessons/appendix.js'; // learning loop WP-E
 
 export type CalibrationRow = { targetType: TargetType; criterion: string; n: number; agreeRate: number; meanDelta: number };
 /**
@@ -21,11 +21,14 @@ export type CalibrationRow = { targetType: TargetType; criterion: string; n: num
 export type CalibrationGroupRow = CalibrationRow & { role: Role | 'unknown'; taskType?: TaskType };
 export type CalibrationReport = { byCriterion: CalibrationRow[]; byRoleTask: CalibrationGroupRow[] };
 
-/** Calibration scope (business tree root + data dir) of a workspace. */
-export function calibrationScope(store: Store, dataDir: string, workspaceId: string): CalibrationScope {
+/**
+ * Calibration scope (business tree root + data dir) of a workspace. `target`: the task / run the
+ * prompt is built for, so the stored lessons-off flag applies (wave-2 integration).
+ */
+export function calibrationScope(store: Store, dataDir: string, workspaceId: string, target: LessonsTarget = {}): CalibrationScope {
   const rootWorkspaceId = rootOf(store, workspaceId);
   // Learning loop WP-E: the tree's accepted lesson rules are appended with the calibration appendix.
-  return { dataDir, rootWorkspaceId, lessons: (name) => lessonsAppendix(store, rootWorkspaceId, name) };
+  return { dataDir, rootWorkspaceId, lessons: (name) => lessonsAppendix(store, rootWorkspaceId, name, target) };
 }
 
 export type PromptPatchExample = {
