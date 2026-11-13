@@ -896,3 +896,93 @@ Merged into `feat/learning-loop` in the order KS-1, KS-2, KS-3, then wired (no m
   is the likely source of KS-3's two unreproduced failures (both `test/api/main.test.ts` boot tests
   fail exactly that way). The two supervisor idle-kill tests that read files the fake CLI writes
   use a 1.5 s idle window (the watchdog starts at spawn; node start-up under load exceeded 200 ms).
+
+## KS-4 builder notes
+
+Smaller decisions taken while building KS-4 (no migration added). Three points that touch §9 are
+raised with the design thread (report) and are marked *pending confirmation* below.
+
+- **Modules:** `knowledge/tools.ts` (`knowledgeRead`: the one entry point — scope, budget, slice check,
+  envelope, one `retrieval_events` row, `policy_blocked` events), `readCommon.ts` (visibility SQL,
+  slice check, paging that counts the whole envelope), `search.ts`, `cards.ts`, `expand.ts` (`expand` +
+  `read_artifact`), `changes.ts`, `promptReads.ts` (prompt-context rows before a run starts). The
+  dispatcher's builtins call `knowledgeRead`; `read_workspace` moved from `research/tools.ts` to a
+  builtin (the old `workspaceSummary` is gone). KS-7's API calls `knowledgeRead` with `role: 'user'`.
+- **Visibility:** queries (`search`, `list_changes`, cards) use `activeIds` (node default; tree only on
+  `scope: "tree"`), always inside the SQL of the FTS query. Reads **by id** (`expand`, `read_artifact`,
+  `get_card` / `read_workspace` with a `workspace_id`) accept any id of the caller's tree and label the
+  source node: the id is the explicit request (*pending confirmation*). Unknown and other-tree ids get
+  the same "<kind> '<id>' not found" (`item` for `expand`, `artifact`, `entity`, `workspace`, `run`).
+  A workspace with no row (legacy tests) is a one-node tree (`factScope`).
+- **Envelope and budgets:** every success carries `tokens` (= `estimateTokens` of the whole JSON as
+  served), `truncated`, `more` (when truncated), `cursor`, `content_trust: "untrusted"`, `relaxed`,
+  `notes`. Paging fits the items into the budget minus the header and a 48-token envelope reserve, so
+  no response exceeds its budget (tested per tool). `max_tokens` is accepted on every read tool with a
+  floor of 100. `get_card` and `read_workspace` accept `cursor` / `max_tokens` too (an additive §9
+  input; needed for the "truncated → cursor" rule) (*pending confirmation*). The cursor key is
+  `{tool, caller node, role, every input except cursor / max_tokens}`. An item larger than the whole
+  budget is replaced by an `{ omitted: true }` placeholder and paging moves on (never stalls; its ids
+  are still logged — over-listing only). If the fixed part alone exceeds a small `max_tokens`, the
+  response is a short "raise max_tokens" note with no store text and no listed ids. A missing stored
+  file (`image` / `raw`) answers with a note.
+- **Search:** quoted phrases kept, other text split into `[\p{L}\p{N}]+` tokens, all quoted (≤ 32), AND;
+  zero hits over the requested kinds with > 1 term → OR, `relaxed`. bm25 weights: facts (subject 2,
+  claim 1), chunks (heading 2, text 1), artifacts (title 3, description 2, note / url / flow 1),
+  entities (name 2, aliases 1); then scope rank, then (facts) fresh before stale and usable before not,
+  then pool order — scores rounded to 1e-6 so float noise never reorders. Per-kind `limit` default 10,
+  max 50; pool 5× the limit. Hits are a flat list ordered by kind (fact, passage, artifact, entity,
+  record). Passages are reported under the canonical artifact when visible, else the oldest visible
+  duplicate; artifact hits collapse on sha256 or content hash. Entity search needs terms of ≥ 3 chars
+  (trigram) and ignores `since`; records ignore `since` (no comparable date). Records use LIKE (v1).
+- **Served text:** chunk text and snippets go through `servedChunkText` / `chunkSnippet` (secrets of the
+  tree redacted across chunk boundaries with `redactRange`, then cut, then fenced); claims, titles and
+  names through `servedLine` (redact whole, then cut). Artifact titles are fence-stripped, not fenced;
+  descriptions, capture notes / descriptions, quotes, chunk text and raw pages are fenced. A capture's
+  description is served under its artifact's flag. Raw mode redacts the stored file whole (up to
+  `maxTextChars` + the longest secret, then `stripSecretTail`) before paging by characters.
+- **Redact before every cut (ruling):** ingest asks `extract` for `maxTextChars` + the longest secret of
+  the tree, redacts, drops a secret the extractor cut in half (`stripSecretTail`), then caps with KS-1a's
+  `capBlocks` (exported) and chunks; a KS-1a error message cut at 300 (`…`) has a half secret dropped
+  before redaction. Serve-time redaction stays (identities created after ingest).
+- **Retrieval rows:** one per successful call (failed calls write none). `results` lists every item
+  whose text was served: fact hits plus the entity named on them; passage hits as chunk + reported
+  artifact (+ canonical); entity hits as survivor + the matched merged row; card lines' records,
+  entities and flow artifacts, plus the card's entity and its upload-only alias rows; `expand` /
+  `read_artifact` the id asked for plus the canonical, chunk ids and nested evidence / versions /
+  relation entities shown; `list_changes` facts (old and new) and both page versions. Card "recent
+  changes" lines show ids only (no history text), so they are not listed. `upload_derived` = any
+  served flag OR `itemIsUploadDerived` of any listed id.
+- **Cards:** typed records, top 15 usable current facts (40 on `expand` of an entity), last 5
+  replacements / retractions (ids only), live relations by type (≤ 10 names each), flows from captures,
+  and a "left out" line. Node cards count facts / artifacts inside the node's own view.
+- **Roles:** worker, orchestrator, synthesizer get all five read tools; interviewer gets `search`,
+  `get_card`, `expand` and **keeps** `read_artifact` / `read_workspace` (its prompt reads uploads with
+  them; §9 lists three tools) (*pending confirmation*); reviewer and escalation get `expand` +
+  `read_artifact` on the review slice. Synthesizer / interviewer: `include_unverified` /
+  `include_history` ignored with a note, non-usable facts and records answer "not found", version
+  history left out, `list_changes` shows old / retracted claims as ids.
+- **Reviewer slice:** `reviewSlice` (research/reviewLoop.ts, next to `reviewContext`): current outputs,
+  findings their recommendations / hypotheses cite, `ReviewFactContext.factIds`, and
+  `reviewContext().evidence` with their (canonical) chunks. Nested items outside it are left out of an
+  expansion. Escalation runs use their task's slice; a reviewer without a task reads nothing. The
+  dispatcher imports `reviewLoop` lazily (it imports the dispatcher).
+- **Blocked attempts:** `policy_blocked` bus event `{ tool, itemId, reason: out_of_slice | out_of_tree,
+  agentRunId?, taskId? }`; out-of-tree only when the id exists in another tree (an unknown id, or an
+  in-tree id the role may not read, is not an attempt). **KS-6:** persist it as a `policy_events` row (`blocked`).
+- **Prompt reads (ruling):** `RunOptions.beforeStart(ctx)` (supervisor) runs after the AgentRun row and
+  the prompt version exist and before the agent starts; a throw fails the run unstarted.
+  `AgentRequest.promptReads: PromptRead[]` → `recordPromptReads` there. The reviewer context uses it;
+  **KS-5:** pass each briefing as a `PromptRead` with the run request (never log after the run).
+- **list_changes:** default window 30 days; `run_id` = a research run of the tree (its start time is the
+  window for newly stale facts); changes come from **applied** observations only; "newly stale" = stale
+  now and its TTL lapsed inside the window; every stale fact observed gets `recordStaleOutcome` (keyed by
+  `last_confirmed_at`, so once per lapse). Changed pages: a later capture of a cited URL with another
+  content hash (canonical hashes compared).
+- **Orphan entities (ruling):** `entityIsUploadOnly` treats an entity with no referencing record as
+  upload-only (fail safe); a node's own `company` entity stays public. Four KS-3 tests that merged /
+  renamed unreferenced entities now give them a public fact first.
+- **Seams:** KS-5 — `PromptRead` / `promptReads`, `entityCard`, `nodeCard`, `cardFacts`, `factLine`,
+  `runListChanges` (briefing "changes since last run"), `servedLine` / `chunkSnippet`. KS-6 —
+  `policy_blocked` events, `retrieval_events` rows complete for `retrieval_uses`. KS-7 —
+  `knowledgeRead(deps, { workspaceId, role: 'user' }, tool, input)` for the API search / card / fact
+  / changes routes (logged as user reads, no agent run).

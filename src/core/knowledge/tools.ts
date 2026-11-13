@@ -85,12 +85,21 @@ const ITEM_TABLES: Record<string, string> = {
   sym_: 'symptoms', hyp_: 'symptom_hypotheses', rec_: 'recommendations', rrun_: 'research_runs',
 };
 
-/** Whether an id names a stored item at all (any tree): a not-found answer for it is a blocked attempt. */
-function exists(store: Store, id: string): boolean {
+/**
+ * Whether an id names a stored item of ANOTHER business tree: a not-found answer for it is a blocked
+ * attempt. Unknown ids, and ids of the caller's tree it may not read (e.g. a non-usable fact for the
+ * synthesizer), are not.
+ */
+function inOtherTree(store: Store, scope: KnowledgeScope, id: string): boolean {
   const prefix = ITEM_PREFIXES.find((p) => id.startsWith(p));
   const table = prefix ? ITEM_TABLES[prefix] : undefined;
-  if (!table) return store.workspaces.get(id) !== undefined;
-  return store.db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id) !== undefined;
+  let ws: string | undefined;
+  if (!table) ws = store.workspaces.get(id)?.id;
+  else if (table === 'entities') {
+    const row = store.db.prepare('SELECT root_workspace_id AS r FROM entities WHERE id = ?').get(id) as { r: string } | undefined;
+    return row !== undefined && row.r !== scope.rootId;
+  } else ws = (store.db.prepare(`SELECT workspace_id AS w FROM ${table} WHERE id = ?`).get(id) as { w: string } | undefined)?.w;
+  return ws !== undefined && !scope.treeIds.includes(ws);
 }
 
 /** The ids a request names (for the slice check and blocked-attempt events). */
@@ -219,7 +228,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     }
   } catch (err) {
     if (err instanceof KnowledgeNotFoundError) {
-      for (const id of namedIds(tool, input)) if (exists(store, id) && err.message.includes(`'${id}'`)) blocked(id, 'out_of_tree');
+      for (const id of namedIds(tool, input)) if (err.message.includes(`'${id}'`) && inOtherTree(store, scope, id)) blocked(id, 'out_of_tree');
       return { ok: false, error: err.message };
     }
     if (err instanceof InvalidCursorError || err instanceof SearchInputError) return { ok: false, error: err.message };
@@ -235,6 +244,17 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   if (notes.length) data.notes = notes;
   data.tokens = estimateTokens(JSON.stringify(data));
   data.tokens = estimateTokens(JSON.stringify(data));
+  if ((data.tokens as number) > budget) {
+    // The fixed part alone (e.g. a long claim) does not fit a very small max_tokens: serve no store
+    // text rather than exceed the budget (design §4 anti-goal: no unbounded response).
+    out = { ...out, results: [], uploadDerived: false, truncated: true };
+    for (const k of Object.keys(data)) delete data[k];
+    Object.assign(data, {
+      tokens: 0, truncated: true, content_trust: CONTENT_TRUST,
+      notes: [`the response does not fit max_tokens ${budget}: call again with a larger max_tokens`],
+    });
+    data.tokens = estimateTokens(JSON.stringify(data));
+  }
 
   const uploadDerived = out.uploadDerived || anyUploadDerived(store, out.results);
   const ev = recordRetrieval(

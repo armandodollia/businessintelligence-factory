@@ -225,6 +225,20 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   an earlier one of the business tree points at it instead of being indexed twice. Screenshots and
   images saved by agents need a `description` (≥ `knowledge.captions.minChars`, default 20
   characters); images without one (e.g. uploads) can be described later with `describe_artifact`.
+- **Knowledge read tools (knowledge store).** Agents read the store through `search` (facts,
+  document passages, artifacts, entity names, records; FTS ranking, labelled hits with ids, no
+  bodies), `get_card` (a card computed from reviewed records for an entity or a node), `expand`
+  (one id in detail), `read_artifact` (outline, extracted text, image, or the raw text file — paged)
+  and `list_changes` (new, replaced, retracted and newly stale facts, changed cited pages);
+  `read_workspace` returns a node's card and counts. A query sees its node, the node's sub-units and
+  what it inherits from its parents; the rest of the business only with `scope: "tree"`; other
+  businesses never (their ids answer exactly like unknown ids). Every response fits a token budget
+  per role (`knowledge.budgets`, capped by `hardMaxTokens`) and continues with a `cursor`; evidence
+  text is redacted and served inside `<<<EVIDENCE … >>>` fences as untrusted data. Reviewers (and
+  escalation agents) can only `expand` / `read_artifact` the ids of their task's review slice.
+  Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,
+  logged before the run starts — is recorded in `retrieval_events`; a run shown upload-derived text
+  counts as upload-exposed.
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.

@@ -444,7 +444,11 @@ export function runReadArtifact(env: ReadEnv, files: ArtifactBytes, input: ReadA
         out.notes = [...(out.notes ?? []), `not an inlinable image (${base}); use mode "outline" or "text"`];
         return out;
       }
-      const { bytes } = files.read(a.id);
+      const bytes = storedBytes(files, a.id);
+      if (!bytes) {
+        out.notes = [...(out.notes ?? []), FILE_GONE];
+        return out;
+      }
       if (bytes.byteLength > IMAGE_MAX_BYTES) {
         out.notes = [...(out.notes ?? []), `image too large to inline (${bytes.byteLength} bytes)`];
         return out;
@@ -462,6 +466,17 @@ export function runReadArtifact(env: ReadEnv, files: ArtifactBytes, input: ReadA
   }
 }
 
+const FILE_GONE = 'the stored file is not available (pruned or missing); its extracted text and description remain';
+
+/** The stored bytes, or `undefined` when the file is gone (pruned, KS-7). */
+function storedBytes(files: ArtifactBytes, id: string): Buffer | undefined {
+  try {
+    return files.read(id).bytes;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Raw text of a text-format artifact: redacted WHOLE (up to the extraction cap), then paged by characters and fenced. */
 function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
   const { store } = env;
@@ -469,7 +484,12 @@ function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budg
   const cap = (env.config.knowledge?.extraction?.maxTextChars ?? 2_000_000);
   const secrets = treeSecrets(store, ws);
   const margin = secrets.reduce((m, s) => Math.max(m, s.length), 0);
-  const all = files.read(a.id).bytes.toString('utf8');
+  const bytes = storedBytes(files, a.id);
+  if (!bytes) {
+    b.notes.push(FILE_GONE);
+    return finish(env, b, budget, key, undefined, query);
+  }
+  const all = bytes.toString('utf8');
   let text = redactServed(store, ws, all.slice(0, cap + margin));
   if (all.length > cap + margin) text = stripSecretTail(text, secrets);
   const docCut = all.length > cap;

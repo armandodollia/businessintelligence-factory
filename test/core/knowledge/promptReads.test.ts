@@ -106,6 +106,24 @@ describe('prompt reads are logged before the run starts', () => {
 });
 
 describe('prompt store covers retrieval_events.prompt_version', () => {
+  it('a tool read by a real run carries the run\'s prompt hash, and it resolves', async () => {
+    const env = setup();
+    const task = addTask(env.store);
+    env.store.findings.insert({ id: 'fnd_e2e', workspaceId: 'ws_a', runId: 'r', taskId: 'x', subject: 'Acme', claim: 'Acme sells widgets', criteria: {}, evidence: [], status: 'verified', createdAt: 'now' });
+    let hits: unknown;
+    env.state.pick = (): FakeScript => async (tools) => {
+      hits = await tools.call('search', { query: 'widgets', kinds: ['fact'] });
+    };
+    const res = await runAgent(env.deps, {
+      kind: 'work', role: 'worker', workspaceId: 'ws_a', task, round: 1, attempt: 1, prompt: 'p', systemPrompt: 'worker system prompt',
+      model: task.model, needsBrowser: false, promptVersion: 'pv_worker_e2e',
+    });
+    expect(hits).toMatchObject({ hits: [{ id: 'fnd_e2e' }] });
+    const [row] = knowledgeRepos(env.store).retrievalEvents.list({ agentRunId: res.agentRunId });
+    expect(row).toMatchObject({ tool: 'search', promptVersion: 'pv_worker_e2e', taskId: task.id });
+    expect(promptStoreGaps(env.store)).toEqual([]);
+  });
+
   it('lists a retrieval row whose prompt hash has no text, and run-logged rows resolve', async () => {
     const env = setup();
     const task = addTask(env.store);

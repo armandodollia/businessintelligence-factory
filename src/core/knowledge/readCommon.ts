@@ -152,6 +152,16 @@ export function pageOf<T>(
     (opts.notes?.length ? estimateTokens(JSON.stringify(opts.notes)) : 0);
   const rest = items.slice(offset);
   const fit = fitToBudget(rest, (x) => JSON.stringify(x), budget, overhead);
+  if (!fit.items.length && rest.length) {
+    // The next item alone is larger than the budget: a placeholder takes its place, so paging never
+    // stalls (its ids are still logged by the caller — over-listing, never under-listing).
+    const placeholder = { omitted: true, note: 'this item is larger than the response budget: raise max_tokens, or expand its id' } as unknown as T;
+    const out: { items: T[]; truncated: boolean; more: number; cursor?: string; offset: number } = {
+      items: [placeholder], truncated: rest.length > 1, more: rest.length - 1, offset,
+    };
+    if (rest.length > 1) out.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
+    return out;
+  }
   const out: { items: T[]; truncated: boolean; more: number; cursor?: string; offset: number } = {
     items: fit.items, truncated: fit.truncated, more: fit.more, offset,
   };
