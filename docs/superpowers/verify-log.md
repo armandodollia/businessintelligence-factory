@@ -15,3 +15,6 @@ Open nits (Opus r3): watchdog may fire during process-group reap; rate-limit ret
 
 ## Section C — NOT PASSED after 3 rounds (Sol 6/7/7, Opus 8/8/8)
 Rounds 1–2 substantive issues all fixed (2e8a273, 16bed89). Round 3 remaining (replay/dedupe edge cases: finding/proposal corrections dropped by dedupe, resolved user-request replay, non-atomic propose_tasks replay, paraphrased replays after rate-limit retry) → fixed post-cap without re-gate (commit "fix: section C post-cap"); covered again by the final whole-branch review.
+
+## Section D — NOT PASSED after 3 rounds (Sol 6/7/7, Opus 8/8/9)
+Rounds 1–2 substantive issues fixed (fa6bf6d, 311c632). Round 3 remaining (recommendation revisions not logged as new decisions; weight fit ignoring persona term) + Opus nits → fixed post-cap (commit "fix: section D post-cap"), covered by final review.
