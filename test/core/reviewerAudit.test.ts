@@ -124,7 +124,7 @@ describe('runReviewerAudit', () => {
     expect(audit.promptReads?.length).toBe(orig.promptReads?.length);
 
     // Tagged run and decision; the task, its last review and normal metrics are untouched.
-    expect(runTags(w.store, a.auditRunId!)).toMatchObject({ auditId: a.id, lessonsOff: false });
+    expect(runTags(w.store, a.auditRunId!)).toMatchObject({ auditId: a.id, lessonsOff: true }); // ruling R5: auditors run without lessons
     expect((w.store.db.prepare('SELECT audit_id AS u FROM decisions WHERE id = ?').get(a.auditDecisionId!) as { u: string }).u).toBe(a.id);
     expect(w.store.tasks.get(task.id)!.status).toBe('verified');
     expect(taskLastReviewDecision(w.store, task)!.id).toBe(original.id);

@@ -3,9 +3,9 @@
  *
  * An audit re-reviews recently verified tasks of ONE business tree with a different configured model
  * (another provider when one is enabled). The auditor is a `reviewer` run of the audited task with the
- * exact reviewer input of the task's final round (`reviewerRunInput`: same system prompt, minimal
- * prompt and prompt reads, logged before the run starts; the dispatcher limits its reads to the task's
- * review slice). The run and its decisions are tagged `audit_id`, so they are never the task's review
+ * reviewer input of the task's final round (`reviewerRunInput`: same system prompt, minimal prompt and
+ * prompt reads, logged before the run starts; the dispatcher limits its reads to the task's review
+ * slice), except that it runs without lesson rules and is stored with `lessons_off` (ruling R5). The run and its decisions are tagged `audit_id`, so they are never the task's review
  * and stay out of normal metrics. An audit never changes the task.
  *
  * Verdicts: `agree` (auditor passes it too), `miss` (auditor fails work the original reviewer passed),
@@ -225,12 +225,13 @@ async function auditOne(deps: ResearchDeps, audit: ReviewerAudit, task: Task): P
   const repo = repos(store).audits;
   const end = (patch: Partial<ReviewerAudit>) => repo.update(audit.id, { ...patch, endedAt: new Date().toISOString() });
   try {
-    // Exactly what the reviewer of the final round was started with (minimal context, reads logged first).
-    const input = reviewerRunInput(deps, task, task.round);
+    // What the reviewer of the final round was started with (minimal context, reads logged first), but
+    // without lesson rules: ruling R5 — the auditor stays independent of what the reviewer learned.
+    const input = reviewerRunInput(deps, task, task.round, { lessonsOff: true });
     const res = await runAgent(deps, {
       kind: 'audit', role: 'reviewer', workspaceId: task.workspaceId, task, round: task.round, attempt: 1,
       prompt: input.prompt, systemPrompt: input.systemPrompt, model: audit.auditModel!, needsBrowser: false,
-      promptVersion: input.promptVersion, runTags: { auditId: audit.id },
+      promptVersion: input.promptVersion, runTags: { auditId: audit.id, lessonsOff: true }, // R5: stored lessons_off
       ...(input.promptReads.length ? { promptReads: input.promptReads } : {}),
     });
     const review = getRunOutputs(store, res.agentRunId).review;
