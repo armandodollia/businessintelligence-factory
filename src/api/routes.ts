@@ -46,6 +46,7 @@ import { mountOutcomeRoutes } from './learningRoutes.js';
 import { sseResponse } from './sse.js';
 import { mountUsageRoutes } from './usageRoutes.js';
 import { mountOversightRoutes } from './oversightRoutes.js'; // WP-D
+import { mountKnowledgeRoutes } from './knowledgeRoutes.js'; // knowledge store KS-7
 
 export type AppDeps = {
   store: Store;
@@ -664,6 +665,10 @@ export function createApp(deps: AppDeps): Hono {
 
   // --- WP-D: escalation answers, policy-event and bus-event history -----------------------------
   mountOversightRoutes(app, { store, events, config });
+
+  // --- knowledge store KS-7: Knowledge view (search, cards, items, changes, lists, actions, gc) ----
+  mountKnowledgeRoutes(app, { store, artifacts, config, events });
+  // --- end knowledge store KS-7 ----------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 
