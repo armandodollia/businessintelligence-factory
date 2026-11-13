@@ -217,7 +217,7 @@ export async function runEscalation(deps: ResearchDeps, taskId: string): Promise
   if (escalationRequests(store, task).some((r) => r.status === 'pending')) return [];
   const runs = store.agentRuns.list({ taskId, role: 'escalation' }).filter((r) => r.workspaceId === task.workspaceId);
   if (runs.length >= settings.maxPerTask) return [];
-  const system = escalationSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId, { taskId: task.id }));
+  const system = escalationSystemPrompt(config, calibrationScope(store, config, task.workspaceId, { taskId: task.id }));
   const { prompt, reads } = escalationPromptWithReads(store, task, settings.maxQuestions, config); // KS-5
   const res = await runAgent(deps, {
     kind: 'escalate', role: 'escalation', workspaceId: task.workspaceId, task, round: task.round, attempt: 1,

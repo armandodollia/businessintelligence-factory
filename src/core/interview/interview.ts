@@ -197,7 +197,7 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
   if (!text.trim()) throw new Error('interview message is empty');
   const userTurn = insertTurn(store, workspaceId, 'user', text);
 
-  const prompt = loadPrompt('interviewer', calibrationScope(store, config.dataDir, workspaceId));
+  const prompt = loadPrompt('interviewer', calibrationScope(store, config, workspaceId));
   const built = buildInterviewPromptWithReads(ws, store, config.dataDir); // KS-5: the drill-down is a prompt read
   let fakeReply: string | undefined;
   const opts: RunOptions = {

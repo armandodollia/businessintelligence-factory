@@ -22,13 +22,23 @@ export type CalibrationGroupRow = CalibrationRow & { role: Role | 'unknown'; tas
 export type CalibrationReport = { byCriterion: CalibrationRow[]; byRoleTask: CalibrationGroupRow[] };
 
 /**
- * Calibration scope (business tree root + data dir) of a workspace. `target`: the task / run the
- * prompt is built for, so the stored lessons-off flag applies (wave-2 integration).
+ * Calibration scope (business tree root + data dir) of a workspace. `config` (or just the data dir):
+ * with a config, `lessons.enabled: false` leaves the accepted lesson rules out (ruling R1); a bare data
+ * dir (tests, read-only callers) keeps them. `target`: the task / run the prompt is built for, so the
+ * stored lessons-off flag applies (wave-2 integration).
  */
-export function calibrationScope(store: Store, dataDir: string, workspaceId: string, target: LessonsTarget = {}): CalibrationScope {
+export function calibrationScope(
+  store: Store,
+  config: string | Pick<BifConfig, 'dataDir' | 'lessons'>,
+  workspaceId: string,
+  target: LessonsTarget = {},
+): CalibrationScope {
   const rootWorkspaceId = rootOf(store, workspaceId);
+  const dataDir = typeof config === 'string' ? config : config.dataDir;
+  // Read when the prompt is built, so a config change applies to the next prompt.
+  const enabled = () => typeof config === 'string' || config.lessons?.enabled !== false;
   // Learning loop WP-E: the tree's accepted lesson rules are appended with the calibration appendix.
-  return { dataDir, rootWorkspaceId, lessons: (name) => lessonsAppendix(store, rootWorkspaceId, name, target) };
+  return { dataDir, rootWorkspaceId, lessons: (name) => (enabled() ? lessonsAppendix(store, rootWorkspaceId, name, target) : '') };
 }
 
 export type PromptPatchExample = {

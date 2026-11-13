@@ -192,7 +192,7 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
   const jobs: Array<Promise<void>> = [];
   for (const persona of personas) {
     // This business's approved persona calibration (calibration/persona.md) goes after every persona's agent.md.
-    const systemPrompt = withCalibration(agentMdOf(deps, persona), 'persona', calibrationScope(store, config.dataDir, workspaceId));
+    const systemPrompt = withCalibration(agentMdOf(deps, persona), 'persona', calibrationScope(store, config, workspaceId));
     for (const rec of recs) jobs.push(one(rec, persona, systemPrompt));
   }
   const results = await Promise.allSettled(jobs);

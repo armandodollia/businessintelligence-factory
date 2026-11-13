@@ -410,7 +410,7 @@ function recheckProblem(store: Store, workspaceId: string, ids: readonly string[
 
 async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: number): Promise<void> {
   const { store, config } = deps;
-  const system = loadPrompt('orchestrator', calibrationScope(store, config.dataDir, rr.workspaceId)).text;
+  const system = loadPrompt('orchestrator', calibrationScope(store, config, rr.workspaceId)).text;
   const version = promptVersion(system);
   const model = config.roles.orchestrator;
   const before = store.tasks.list({ runId: rr.id }).length;

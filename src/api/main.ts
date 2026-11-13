@@ -32,6 +32,7 @@ import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.j
 import { ingestorFor } from '../core/knowledge/ingest.js';
 import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
 import { retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
+import { recordLessonsPromptVersions } from '../core/learning/lessons/switch.js'; // ruling R1
 import { recoverExperiments } from '../core/learning/experiments.js'; // learning loop WP-F
 
 /** `scoring` phase: recompute every recommendation's priority with the current weights. */
@@ -190,6 +191,8 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
         `${report.continuedPipelines.length} pipelines continued`,
     );
   }
+  // Ruling R1: the prompt versions under the current lessons switch are in the prompt store.
+  recordLessonsPromptVersions(runtime.store, runtime.config);
   // Learning loop WP-F: experiments the last process left running are interrupted (resume failed their arm tasks).
   const interrupted = recoverExperiments(runtime.store);
   if (interrupted.length) console.log(`[bif] ${interrupted.length} experiments were interrupted by the restart`);

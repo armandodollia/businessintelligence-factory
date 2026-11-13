@@ -470,7 +470,7 @@ export function applyPromptPatchAsUser(
 ): AppliedPatch {
   const { store, config } = deps;
   const who = actor(opts);
-  const scope = calibrationScope(store, config.dataDir, workspaceId);
+  const scope = calibrationScope(store, config, workspaceId);
   const previousPromptVersion = recordRolePromptVersion(store, config, patch.role, scope);
   const previousAppendix = calibrationAppendix(patch.role, scope);
   const sources = proposePromptPatch(workspaceId, patch.role, { store }).sources ?? [];
@@ -531,7 +531,7 @@ export function revertCalibrationAsUser(
 ): RevertedPatch {
   const { store, config } = deps;
   const who = actor(opts);
-  const scope = calibrationScope(store, config.dataDir, workspaceId);
+  const scope = calibrationScope(store, config, workspaceId);
   return store.transaction(() => {
     let result: ReturnType<typeof revertCalibration>;
     let previousPromptVersion: string;
@@ -880,7 +880,7 @@ export function acceptLessonProposalAsUser(
   const repos = lessonRepos(store);
   return store.transaction(() => {
     const p = callerProposal(store, workspaceId, proposalId);
-    const scope = calibrationScope(store, config.dataDir, workspaceId);
+    const scope = calibrationScope(store, config, workspaceId);
     const now = new Date().toISOString();
     const previousPromptVersion = recordRolePromptVersion(store, config, p.role, scope);
     let rule: LessonRule | undefined;

@@ -95,7 +95,7 @@ export function mountUsageRoutes(app: Hono, deps: UsageRouteDeps): void {
     if (!store.workspaces.get(id)) return c.json(notFound(`workspace '${id}'`), 404);
     const role = roleParam(c.req.query('role'));
     if (role === null) return c.json({ error: `unknown role '${c.req.query('role')}'` }, 400);
-    return c.json(calibrationHistory(store, calibrationScope(store, config.dataDir, id), role));
+    return c.json(calibrationHistory(store, calibrationScope(store, config, id), role));
   });
 
   /**

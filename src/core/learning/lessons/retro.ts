@@ -266,7 +266,7 @@ export async function runRetro(deps: ResearchDeps, workspaceId: string, opts: Ru
       return repo.insert({ ...base, status: 'skipped', endedAt: now.toISOString() });
     }
     const retro = repo.insert(base);
-    const scope = calibrationScope(store, config.dataDir, root);
+    const scope = calibrationScope(store, config, root);
     const system = retroSystemPrompt(scope);
     const rootWs = store.workspaces.get(root);
     try {

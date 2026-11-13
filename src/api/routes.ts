@@ -49,6 +49,7 @@ import { mountOversightRoutes } from './oversightRoutes.js'; // WP-D
 import { mountKnowledgeMetricsRoutes } from './knowledgeMetricsRoutes.js'; // knowledge store KS-6
 import { mountKnowledgeRoutes } from './knowledgeRoutes.js'; // knowledge store KS-7
 import { mountLessonsRoutes } from './lessonsRoutes.js'; // learning loop WP-E
+import { recordLessonsPromptVersions } from '../core/learning/lessons/switch.js'; // ruling R1
 import { mountWpfRoutes } from './experimentRoutes.js'; // learning loop WP-F
 import { mountMetricsRoutes } from './metricsRoutes.js'; // learning loop WP-G
 
@@ -645,8 +646,11 @@ export function createApp(deps: AppDeps): Hono {
     }
     const next = parseConfig(raw, 'PUT /api/config');
     const before = structuredClone(config.scoring);
+    const lessonsWereOn = config.lessons?.enabled !== false; // ruling R1
     replaceConfig(config, next);
     persistConfig();
+    // Ruling R1: the lessons kill switch changes role prompt versions; record them in the prompt store.
+    if (lessonsWereOn !== (config.lessons?.enabled !== false)) recordLessonsPromptVersions(store, config);
     // Weights are global: a change made here rescores and is logged in every workspace, exactly
     // like `PUT .../scoring-weights`.
     if (JSON.stringify(before) !== JSON.stringify(config.scoring)) {
