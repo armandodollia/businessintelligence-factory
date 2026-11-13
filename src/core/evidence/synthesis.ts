@@ -5,10 +5,13 @@ import { descendants, rootOf, sameTree } from '../workspace/tree.js';
 /**
  * Whether a finding may feed recommendation synthesis (spec §7.2): verified findings only, unless
  * the user overrode it (`includeInSynthesis` true includes an unverified finding, false excludes a
- * verified one). Superseded findings (replaced in a later review round) are never used.
+ * verified one). Superseded findings (replaced in a later review round) are never used, nor are
+ * facts whose lifecycle is not `current` (an unverified update, a replaced or retracted version).
  */
-export function isSynthesisEligible(f: Pick<Finding, 'status' | 'includeInSynthesis'>): boolean {
+export function isSynthesisEligible(f: Pick<Finding, 'status' | 'includeInSynthesis'> & Partial<Pick<Finding, 'lifecycle'>>): boolean {
   if (f.status === 'superseded') return false;
+  // Knowledge store KS-2: only the current version of a fact (not candidate / replaced / retracted).
+  if ((f.lifecycle ?? 'current') !== 'current') return false;
   return f.includeInSynthesis ?? f.status === 'verified';
 }
 

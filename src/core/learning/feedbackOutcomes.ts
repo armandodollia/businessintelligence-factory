@@ -5,12 +5,15 @@
  * relevant ones into outcomes through `recordOutcome`:
  * - `include_override` on a finding / recommendation / persona / competitor / hypothesis →
  *   `recordOverrideOutcome` (`user-rejected`, `weak-review`, `confirmed`);
- * - `proposal_reject` → `recordUnitProposalRejected` (`user-rejected`).
+ * - `proposal_reject` → `recordUnitProposalRejected` (`user-rejected`);
+ * - `fact_retract` / `fact_replacement_accept` → `factOutcomesFromFeedback` (KS-2: `user-rejected` on
+ *   the retracted version, `changed` on the version an accepted update replaced).
  * The core primitives (`setIncludeInSynthesis`, `setOutputInclude`, `rejectUnitProposal`) write no
  * outcome, so an action never writes one twice. Listeners run inside the action's transaction.
  */
 import { onFeedback, type FeedbackEvent } from '../feedback/events.js';
 import type { Store } from '../store/db.js';
+import { factOutcomesFromFeedback } from '../knowledge/facts.js'; // KS-2
 import { recordOverrideOutcome, recordUnitProposalRejected, type OutputKind } from './outcomes.js';
 import type { DecisionOutcome } from './types.js';
 
@@ -30,6 +33,8 @@ export function outcomesFromFeedback(store: Store, event: FeedbackEvent): Decisi
       ...(event.reason ? { reason: event.reason } : {}),
     });
   }
+  // Knowledge store KS-2: human fact actions (retract → `user-rejected`; accepted update → `changed`).
+  if (event.kind === 'fact_retract' || event.kind === 'fact_replacement_accept') return factOutcomesFromFeedback(store, event);
   if (event.kind === 'proposal_reject') {
     const proposal = store.unitProposals.get(event.targetId);
     if (!proposal) return [];

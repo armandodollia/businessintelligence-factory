@@ -21,6 +21,10 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   weights_change: 'weights changed',
   prompt_patch_apply: 'prompt patch applied',
   prompt_patch_revert: 'prompt calibration reverted',
+  // knowledge store KS-2
+  fact_scope_change: 'fact scope changed',
+  fact_retract: 'fact retracted',
+  fact_replacement_accept: 'fact update accepted',
 };
 
 const short = (v: unknown, max = 80): string => {
