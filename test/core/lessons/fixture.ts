@@ -3,6 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { vi } from 'vitest';
 import { defaultConfig, type BifConfig } from '../../../src/core/config/schema.js';
+import { EventBus } from '../../../src/core/events.js';
+import { ArtifactStore } from '../../../src/core/evidence/artifacts.js';
+import type { FakeScript } from '../../../src/core/harness/adapter.js';
+import { Supervisor } from '../../../src/core/harness/supervisor.js';
+import { TokenRegistry } from '../../../src/core/harness/tokens.js';
+import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js';
+import { retroToolHandlers } from '../../../src/core/learning/lessons/retro.js';
+import type { AgentRequest, ResearchDeps } from '../../../src/core/research/deps.js';
 import { learningRepos } from '../../../src/core/learning/store.js';
 import { recordPromptVersion } from '../../../src/core/prompts/store.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from '../../../src/core/research/systemPrompts.js';
@@ -68,4 +76,25 @@ export function lessonsSetup(opened: Store[], configure?: (c: BifConfig) => void
   }
 
   return { dir, store, config, a, aChild, b, at, task, run, issue };
+}
+
+/** Supervisor + fake agents over a `lessonsSetup` store (retro tool handler registered). */
+export function lessonsHarness(t: ReturnType<typeof lessonsSetup>, pick: (req: AgentRequest) => FakeScript | undefined) {
+  const events = new EventBus();
+  const artifacts = new ArtifactStore(t.store, t.dir);
+  const tokens = new TokenRegistry(t.store);
+  const handle = createToolHandlers({ store: t.store, artifacts, config: t.config, events, extraHandlers: retroToolHandlers() });
+  const supervisor = new Supervisor({
+    store: t.store, config: t.config, tokens, events, handle, dataDir: t.dir, mcpBaseUrl: 'http://127.0.0.1:4317',
+    backoff: { baseMs: 5, maxMs: 20, maxAttempts: 2 }, killGraceMs: 100,
+  });
+  const requests: AgentRequest[] = [];
+  const deps: ResearchDeps = {
+    store: t.store, config: t.config, supervisor, events, tokens,
+    fake: (req) => {
+      requests.push(req);
+      return pick(req) ?? (async () => { throw new Error(`no fake for ${req.kind}`); });
+    },
+  };
+  return { deps, requests, events, artifacts };
 }

@@ -1,26 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { EventBus } from '../../../src/core/events.js';
-import { ArtifactStore } from '../../../src/core/evidence/artifacts.js';
 import { acceptLessonProposalAsUser } from '../../../src/core/feedback/actions.js';
 import { listFeedback, recordFeedback } from '../../../src/core/feedback/events.js';
-import type { FakeScript } from '../../../src/core/harness/adapter.js';
-import { Supervisor } from '../../../src/core/harness/supervisor.js';
-import { TokenRegistry } from '../../../src/core/harness/tokens.js';
-import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js';
 import { ROLE_TOOLS } from '../../../src/core/harness/tools/registry.js';
 import { estimateTokens } from '../../../src/core/knowledge/budget.js';
 import { recordRetrieval, runIsUploadExposed } from '../../../src/core/knowledge/retrievalLog.js';
 import { lessonRepos } from '../../../src/core/learning/lessons/store.js';
-import { retroBudget, retroDigest, retroJobs, retroToolHandlers, runRetro } from '../../../src/core/learning/lessons/retro.js';
+import { retroBudget, retroDigest, retroJobs, runRetro } from '../../../src/core/learning/lessons/retro.js';
 import { calibrationAppendix } from '../../../src/core/prompts/index.js';
 import { promptStoreGaps } from '../../../src/core/prompts/store.js';
-import type { AgentRequest, ResearchDeps } from '../../../src/core/research/deps.js';
 import { workerSystemPrompt } from '../../../src/core/research/systemPrompts.js';
 import { calibrationScope } from '../../../src/core/scoring/calibration.js';
 import { startScheduler } from '../../../src/core/scheduler/scheduler.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
-import { lessonsSetup } from './fixture.js';
+import { lessonsHarness, lessonsSetup } from './fixture.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -30,25 +23,7 @@ afterEach(() => {
 
 type T = ReturnType<typeof lessonsSetup>;
 
-function harness(t: T, pick: (req: AgentRequest) => FakeScript | undefined) {
-  const events = new EventBus();
-  const artifacts = new ArtifactStore(t.store, t.dir);
-  const tokens = new TokenRegistry(t.store);
-  const handle = createToolHandlers({ store: t.store, artifacts, config: t.config, events, extraHandlers: retroToolHandlers() });
-  const supervisor = new Supervisor({
-    store: t.store, config: t.config, tokens, events, handle, dataDir: t.dir, mcpBaseUrl: 'http://127.0.0.1:4317',
-    backoff: { baseMs: 5, maxMs: 20, maxAttempts: 2 }, killGraceMs: 100,
-  });
-  const requests: AgentRequest[] = [];
-  const deps: ResearchDeps = {
-    store: t.store, config: t.config, supervisor, events, tokens,
-    fake: (req) => {
-      requests.push(req);
-      return pick(req) ?? (async () => { throw new Error(`no fake for ${req.kind}`); });
-    },
-  };
-  return { deps, requests };
-}
+const harness = lessonsHarness;
 
 /** Three tasks with substantive issues in tree A; the first task's worker read an upload. */
 function history(t: T) {
