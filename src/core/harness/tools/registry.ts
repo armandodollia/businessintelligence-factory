@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { entityKindSchema, modelRefSchema, taskTypeSchema } from '../../config/schema.js';
 // knowledge store KS-3
+import { QUOTE_MAX_CHARS, QUOTE_TOO_LONG } from '../../knowledge/factTools.js';
 import { RELATION_TYPES } from '../../knowledge/relations.js';
 import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
 import type { Role } from '../../types.js';
@@ -242,7 +243,7 @@ export const toolInputSchemas = {
         z.object({
           artifact_id: id,
           chunk_id: id.optional().describe('Passage id, a locator hint'),
-          quote: z.string().min(1).max(2000).optional().describe('Exact text from the artifact; verified against its extracted text'),
+          quote: z.string().min(1).max(QUOTE_MAX_CHARS, QUOTE_TOO_LONG).optional().describe(`Exact text from the artifact, at most ${QUOTE_MAX_CHARS} characters (cite several quotes for a longer passage); verified against its extracted text`),
         }),
       )
       .optional()

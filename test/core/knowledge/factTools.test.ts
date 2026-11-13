@@ -8,7 +8,7 @@ import { ArtifactStore } from '../../../src/core/evidence/artifacts.js';
 import type { RunContext } from '../../../src/core/harness/tokens.js';
 import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js';
 import { uploadInternal } from '../../../src/core/internal/uploads.js';
-import { NO_TEXT_ERROR } from '../../../src/core/knowledge/factTools.js';
+import { NO_TEXT_ERROR, QUOTE_MAX_CHARS, verifyEvidenceRefs } from '../../../src/core/knowledge/factTools.js';
 import { runIsUploadExposed } from '../../../src/core/knowledge/retrievalLog.js';
 import { openStore, type Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
@@ -207,6 +207,30 @@ describe('save_finding: relations, applies_to, evidence_refs', () => {
     expect(bad.ok).toBe(false);
     expect((bad as { error: string }).error).toMatch(/quote not found/);
     expect(env.store.findings.list({ claim: 'Acme Pro costs $15' })).toHaveLength(0);
+  });
+
+  it('caps a quote at QUOTE_MAX_CHARS (design §7.3): a longer one is rejected, asking for a shorter span or several quotes', async () => {
+    const env = setup();
+    const t = task(env.store);
+    const ctx = ctxFor(t);
+    const sentence = 'The Pro plan costs twelve dollars per seat per month. ';
+    const page = captured(env, t, sentence.repeat(60));
+    const text = sentence.repeat(60);
+    const at = (n: number) => text.slice(0, n).trim();
+    expect(at(QUOTE_MAX_CHARS).length).toBe(QUOTE_MAX_CHARS);
+    const ok = await env.handle(ctx, 'save_finding', {
+      claim: 'Pro costs $12', subject: 'Acme', evidence: [page.id], relation: 'new', evidence_refs: [{ artifact_id: page.id, quote: at(QUOTE_MAX_CHARS) }],
+    });
+    expect(ok.ok).toBe(true);
+    const long = await env.handle(ctx, 'save_finding', {
+      claim: 'Pro costs $12 a seat', subject: 'Acme', evidence: [page.id], relation: 'new', evidence_refs: [{ artifact_id: page.id, quote: text.slice(0, QUOTE_MAX_CHARS + 1) }],
+    });
+    expect(long.ok).toBe(false);
+    expect((long as { error: string }).error).toMatch(/cite a shorter span or several quotes/);
+    expect(env.store.findings.list({ claim: 'Pro costs $12 a seat' })).toHaveLength(0);
+    // The check itself (also for callers that skip the tool schema).
+    const v = await verifyEvidenceRefs({ store: env.store, artifacts: env.artifacts, config: defaultConfig } as never, 'R', [{ artifact_id: page.id, quote: text.slice(0, 1300) }]);
+    expect(v).toEqual({ ok: false, error: expect.stringMatching(/at most 1200 characters: cite a shorter span or several quotes/) });
   });
 
   it('resolves a quote to its indexed chunk, and rejects a quote on an artifact without text', async () => {

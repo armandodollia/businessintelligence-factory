@@ -79,6 +79,14 @@ export function capturedByTask(store: Store, task: Pick<Task, 'id'>, ids: string
 
 export const NO_TEXT_ERROR = 'artifact has no extracted text; cite without a quote';
 
+/**
+ * Longest `evidence_refs.quote` (characters; design §7.3 as amended by the paging rework): a quote is an
+ * item of `expand <fact>`, and a bounded quote always fits a page whole (and a pointer to it is never
+ * `too_large`). Quotes stored before the cap are served as ordinary items.
+ */
+export const QUOTE_MAX_CHARS = 1200;
+export const QUOTE_TOO_LONG = `quote is at most ${QUOTE_MAX_CHARS} characters: cite a shorter span or several quotes`;
+
 type ArtifactTextView = { text: string; chunks: TextChunk[] };
 
 /** Whitespace-insensitive form used for the quote match. */
@@ -146,6 +154,7 @@ export async function verifyEvidenceRefs(
       row.chunkId = chunk.id;
     }
     const quote = ref.quote?.trim();
+    if (quote && quote.length > QUOTE_MAX_CHARS) return { ok: false, error: `evidence_refs: ${QUOTE_TOO_LONG} (${quote.length} given)` };
     if (quote) {
       const text = await artifactText(env, id);
       if (!text) return { ok: false, error: `evidence_refs: artifact '${id}': ${NO_TEXT_ERROR}` };
