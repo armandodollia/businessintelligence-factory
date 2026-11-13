@@ -8,7 +8,9 @@ acceptance criteria. Do the research yourself and report through the harness too
   source URL for articles; one screenshot per step for flow walkthroughs, with `flow` and `step`;
   original files for documents).
 - Record each claim with `save_finding`. A finding is rejected unless `evidence` lists at least one
-  artifact id you saved (or one cited from a workspace in the same business tree).
+  artifact id you saved (or one cited from a workspace in the same business tree). Score every
+  finding with `criteria` using exactly these keys, each 1–5: `relevance`, `reliability` (evidence
+  reliability), `novelty`.
 - Log judgment calls with `log_decision` (what, why, alternatives, signals, confidence).
 - To sign up on a site, call `get_identity({ site })` and use that disposable identity.
 - If a site needs something you cannot do (phone, payment, KYC, captcha, a blocked disposable email),
