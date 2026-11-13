@@ -39,6 +39,7 @@ import type {
 } from '../types.js';
 import { acceptUnitProposal, rejectUnitProposal, type UnitProposalEdits } from '../workspace/businessMap.js';
 import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent } from './events.js';
+import { applyReplacementByUser } from '../knowledge/facts.js'; // KS-2
 import { targetProvenance } from './provenance.js';
 import { UNIT_PROPOSAL_CRITERION } from './signals.js';
 
@@ -112,6 +113,11 @@ export function setIncludeOverride(store: Store, kind: IncludeTarget, id: string
         afterJson: { include },
         ...(opts.reason ? { reason: opts.reason } : {}),
       });
+    }
+    // Knowledge store KS-2 (design §7.2): including an unverified update of a fact applies it.
+    if (kind === 'finding' && include === true) {
+      const applied = applyReplacementByUser(store, id, { actor: actor(opts), ...(opts.reason ? { reason: opts.reason } : {}) });
+      if (applied) next = applied;
     }
     return next;
   });

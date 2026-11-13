@@ -5,6 +5,7 @@ import type { Decision, InterviewTurn, Rating, UserRequest } from '../types.js';
 // Learning loop WP-A: human feedback lines (request answers, interview turns, feedback events).
 import { listFeedback, type FeedbackEvent } from '../feedback/events.js';
 import { descendants, rootOf } from '../workspace/tree.js';
+import { itemIsUploadDerived } from '../knowledge/provenance.js'; // KS-2
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
@@ -148,7 +149,7 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   const { store } = deps;
   const ratings = store.ratings.list({ workspaceId });
   const decisions = store.decisions.list({ workspaceId });
-  const uploads = includeUploads ? undefined : uploadIds(store);
+  const uploads = includeUploads ? undefined : uploadExclusionSet(store); // KS-2: + materialized / resolved flags
 
   const judgments = new Map<string, Decision[]>();
   for (const d of decisions) {
@@ -353,3 +354,39 @@ export function evidenceIncludesUpload(store: Store, id: string, uploads: Set<st
   return evidenceOf(store, id).some((e) => uploads.has(e));
 }
 // --- end knowledge store KS-0 ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Knowledge store KS-2: the export read path also honours the materialized `upload_derived` flags
+// (design §12; KS-2 ruling). The reference expansion above only sees artifact ids an item's own
+// evidence names, so a fact flagged through a confirmation / replacement / retraction observation,
+// a later lineage version, a text duplicate of an upload, or a record citing any of these, would
+// pass it. Every id the expansion reaches is therefore ALSO checked with `itemIsUploadDerived`
+// (stored flags of artifacts, chunks and findings; records resolved through what they cite).
+// `explainUploadDerived` (knowledge/uploadCause.ts) explains such an exclusion.
+
+/** The upload ids, plus every id that is upload-derived now (`has` only; iteration = the uploads). */
+class UploadExclusionSet extends Set<string> {
+  private readonly memo = new Map<string, boolean>();
+  constructor(
+    private readonly store: Store,
+    uploads: Set<string>,
+  ) {
+    super(uploads);
+  }
+  override has(id: string): boolean {
+    if (super.has(id)) return true;
+    // Set's constructor calls `add` before the memo exists; `has` is only called afterwards.
+    let v = this.memo.get(id);
+    if (v === undefined) {
+      v = itemIsUploadDerived(this.store, id);
+      this.memo.set(id, v);
+    }
+    return v;
+  }
+}
+
+/** What the export excludes by (unless `includeUploads`): internal uploads and anything upload-derived. */
+export function uploadExclusionSet(store: Store): Set<string> {
+  return new UploadExclusionSet(store, uploadIds(store));
+}
+// --- end knowledge store KS-2 ---------------------------------------------------------------------

@@ -72,6 +72,7 @@ describe('role scope table', () => {
       new Set([
         ...base, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
         'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis', 'describe_artifact',
+        'confirm_finding', 'retract_finding', // knowledge store KS-2
       ]),
     );
     expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(new Set([...base, 'propose_tasks', 'read_workspace', 'read_artifact', 'describe_artifact']));

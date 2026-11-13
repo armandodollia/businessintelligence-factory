@@ -1,4 +1,5 @@
 import type { Store } from '../store/db.js';
+import { applyObservations } from '../knowledge/facts.js'; // KS-2
 import type { Competitor, Finding, OutputStatus, Persona, Recommendation, SymptomHypothesis, Task } from '../types.js';
 
 /**
@@ -98,6 +99,9 @@ export function applyTaskStatus(store: Store, task: Task, status: TaskOutcome): 
   for (const p of outputs.personas) store.personas.update(p.id, { status: next(p.id) });
   for (const c of outputs.competitors) store.competitors.update(c.id, { status: next(c.id) });
   for (const h of outputs.hypotheses) store.symptomHypotheses.update(h.id, { status: next(h.id) });
+  // Knowledge store KS-2: the task's fact observations (create / confirm / replace / retract) are
+  // applied, rejected or superseded with the same outcome, in the same transaction (design §7.2).
+  applyObservations(store, task, status, { cited: citedOutputIds(task.result) });
 }
 
 /** JSON of refs + payload of every Decision made by the task's runs (worker, reviewer, ...). */

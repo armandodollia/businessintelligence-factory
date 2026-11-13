@@ -43,6 +43,14 @@ export const FEEDBACK_KINDS = [
   'prompt_patch_apply',
   /** A role's calibration appendix was reverted to an earlier version (integration: WP-B history). */
   'prompt_patch_revert',
+  // --- knowledge store KS-2: human fact actions (target type `finding`) ---
+  /** The user changed the nodes a fact applies to (`item_scopes`, source `user`). */
+  'fact_scope_change',
+  /** The user retracted a current fact. */
+  'fact_retract',
+  /** The user applied an unverified replacement (include override on a `candidate` version). */
+  'fact_replacement_accept',
+  // --- end KS-2 ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 

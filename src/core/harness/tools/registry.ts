@@ -28,6 +28,9 @@ export const TOOL_NAMES = [
   'submit_escalation',
   // Knowledge store KS-1
   'describe_artifact',
+  // Knowledge store KS-2: living facts
+  'confirm_finding',
+  'retract_finding',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -42,6 +45,7 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   worker: [
     ...BASE, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
     'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis',
+    'confirm_finding', 'retract_finding', // KS-2
   ],
   orchestrator: [...BASE, 'propose_tasks', 'read_workspace', 'read_artifact'],
   reviewer: ['log_decision', 'submit_review', 'read_artifact'],
@@ -131,6 +135,39 @@ export const toolInputSchemas = {
     subject: z.string().min(1).describe('Company / product the claim is about'),
     criteria: criteria.default({}),
     evidence: z.array(id).min(1, 'evidence must reference at least one saved artifact'),
+    // Knowledge store KS-2 (design §7.2, §7.3, §9)
+    relation: z
+      .union([z.literal('new'), z.object({ confirms: id }), z.object({ replaces: id })])
+      .optional()
+      .describe(
+        'How this claim relates to facts already in the store: "new", {"confirms": "<fact id>"} (same claim, still true) or ' +
+          '{"replaces": "<fact id>"} (the claim changed). Omit it and likely duplicates are returned instead of saving.',
+      ),
+    applies_to: z
+      .array(id)
+      .min(1)
+      .optional()
+      .describe('Workspace ids of this business tree the fact is about, when not (only) your own node'),
+    evidence_refs: z
+      .array(
+        z.object({
+          artifact_id: id,
+          chunk_id: id.optional().describe('Passage id, a locator hint'),
+          quote: z.string().min(1).max(2000).optional().describe('Exact text from the artifact; verified against its extracted text'),
+        }),
+      )
+      .optional()
+      .describe('Citations with optional verified quotes; their artifacts count as evidence'),
+    ttl_days: z.number().int().min(1).max(3650).optional().describe('Days after which this fact should be re-checked'),
+  }),
+  confirm_finding: z.object({
+    finding_id: id.describe('A current fact of this business tree, saved by earlier work'),
+    evidence: z.array(id).min(1, 'cite at least one artifact you saved in this task'),
+  }),
+  retract_finding: z.object({
+    finding_id: id.describe('A current fact of this business tree that is no longer true'),
+    reason: z.string().min(1),
+    evidence: z.array(id).min(1, 'cite at least one artifact you saved in this task'),
   }),
   submit_result: z
     .record(z.string(), z.unknown())
@@ -287,7 +324,10 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Returns artifactId, captureId and the text extraction status.',
   read_artifact: 'Read a stored evidence artifact by id (text content, or the image for screenshots).',
   save_finding:
-    'Save a finding. Rejected unless evidence lists at least one artifact saved in this workspace.',
+    'Save a finding (a fact). Rejected unless evidence lists at least one artifact saved in this workspace. Without `relation`, ' +
+    'the store is checked for the same fact: an identical current claim is confirmed instead (cite an artifact saved in this ' +
+    'task), and similar current facts are returned WITHOUT saving — call again with relation "new", {"confirms": id} or ' +
+    '{"replaces": id}. `evidence_refs` quotes must occur in the artifact text.',
   submit_result: 'Submit your task deliverable (one JSON object). Call once at the end; resubmit after revisions.',
   submit_review: 'Submit your review: score 0–10 and issues classed blocking | substantive | nit | scope_expansion.',
   respond_to_review: 'Answer one review issue: fix (and say what changed) or pushback (with reason).',
@@ -310,6 +350,10 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Save or update a rated competitor: threat, directness and per-area comparison (pricing, onboarding, ux, features), each 1–5, with evidence.',
   save_hypothesis:
     'Save a hypothesis about the cause of an interview symptom (confidence 0–100, evidence); the interviewer asks the user about it.',
+  confirm_finding:
+    'Confirm that a current fact saved by earlier work is still true, citing at least one artifact you saved in this task. Applied when your task is verified.',
+  retract_finding:
+    'Retract a current fact that is no longer true (reason + at least one artifact you saved in this task). Applied when your task is verified.',
   submit_escalation:
     'Ask the user 0–3 multiple-choice questions (2–4 options each, one recommended) about a task that ended unverified or failed. Call once.',
   // Knowledge store KS-1

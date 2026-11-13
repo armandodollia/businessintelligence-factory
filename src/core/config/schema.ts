@@ -213,7 +213,11 @@ export const knowledgeConfigSchema = z.strictObject({
     .strictObject({
       /** Duplicate-handshake candidates returned to the saving agent. */
       candidateLimit: z.number().int().min(1).max(20).optional(),
-      /** Minimum normalized similarity (0–1) for a candidate. */
+      /**
+       * Minimum similarity (0–1) for a candidate (KS-2): Jaccard overlap of the word-token sets of the
+       * two normalized claims, |A ∩ B| / |A ∪ B| (`claimSimilarity`, knowledge/facts.ts). bm25 is
+       * unbounded and corpus-dependent, so it only selects which facts are compared.
+       */
       similarityFloor: z.number().min(0).max(1).optional(),
     })
     .optional(),

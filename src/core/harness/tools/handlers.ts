@@ -16,6 +16,7 @@ import { findReplay } from './idempotency.js';
 // Knowledge store KS-1: captures, captions, entity / applies_to, extraction, describe_artifact.
 import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave } from '../../knowledge/artifactTools.js';
 import type { CaptureResult } from '../../evidence/artifacts.js';
+import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
 import { ROLE_TOOLS, TOOL_NAMES, toolInputSchemas, type IssueClass, type ToolInput, type ToolName } from './registry.js';
 
 export type ToolResult =
@@ -118,6 +119,9 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     store.decisions.insert(decision);
     return decision;
   }
+
+  // Knowledge store KS-2: living-fact tools (save_finding beyond the replay rule, confirm / retract).
+  const factEnv: FactToolEnv = { store, artifacts, config: deps.config, events, recordDecision };
 
   function taskOf(ctx: RunContext): Task | undefined {
     if (!ctx.taskId) return undefined;
@@ -294,6 +298,10 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       if (missing.length) {
         return fail(`evidence references unknown artifacts (not in this workspace's business tree): ${missing.join(', ')}`);
       }
+      // KS-2: artifacts cited by evidence_refs count as evidence too (checked in the tree).
+      const refIds = (input.evidence_refs ?? []).map((r) => r.artifact_id);
+      const missingRefs = artifacts.exists(ctx.workspaceId, refIds);
+      if (missingRefs.length) return fail(`evidence_refs: artifact '${missingRefs[0]}' not found`);
       // Idempotent per (task, claim): a rate-limit retry restarts the agent on the same run and may
       // replay save_finding. The existing finding is kept and the new evidence merged into it.
       const dup = store.findings
@@ -303,7 +311,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         // Same (task, claim): update the mutable fields in place (keeping the id) and log a new
         // score Decision when the judgment (criteria / subject) changed. Re-saving marks the finding
         // as re-submitted in the task's current round (superseded tracking, reviewLoop).
-        const evidence = [...new Set([...dup.evidence, ...input.evidence])];
+        const evidence = [...new Set([...dup.evidence, ...input.evidence, ...refIds])];
         const judgmentChanged =
           JSON.stringify(dup.criteria) !== JSON.stringify(input.criteria) || dup.subject !== input.subject;
         if (!judgmentChanged && evidence.length === dup.evidence.length) {
@@ -323,31 +331,24 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         if (d) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
         return okData({ findingId: dup.id, duplicate: true, updated: true });
       }
-      const finding: Finding = {
-        id: newId('fnd'),
-        workspaceId: ctx.workspaceId,
-        runId: task.runId,
-        taskId: task.id,
-        subject: input.subject,
-        claim: input.claim,
-        criteria: input.criteria,
-        evidence: input.evidence,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        taskRound: task.round,
-      };
-      const d = store.transaction(() => {
-        store.findings.insert(finding);
-        return recordDecision(
-          ctx,
-          'score',
-          { tool: 'save_finding', findingId: finding.id, criteria: input.criteria },
-          [finding.id, ...input.evidence],
-        );
-      });
-      events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
-      return okData({ findingId: finding.id });
+      // Knowledge store KS-2: relation / duplicate handshake / applies_to / evidence_refs / ttl_days
+      // (knowledge/factTools.ts). KS-3: pass the resolved entity as `{ entityId }`.
+      return saveFindingFact(factEnv, ctx, task, input, {});
     },
+
+    // --- knowledge store KS-2: confirm / retract a current fact (design §7.2, §9) ---
+    async confirm_finding(ctx, input: ToolInput<'confirm_finding'>) {
+      const task = taskOf(ctx);
+      if (!task) return fail('confirm_finding needs a task: this run has no task in this workspace');
+      return observeFact(factEnv, ctx, task, input.finding_id, input.evidence, 'confirm');
+    },
+
+    async retract_finding(ctx, input: ToolInput<'retract_finding'>) {
+      const task = taskOf(ctx);
+      if (!task) return fail('retract_finding needs a task: this run has no task in this workspace');
+      return observeFact(factEnv, ctx, task, input.finding_id, input.evidence, 'retract', { reason: input.reason });
+    },
+    // --- end KS-2 ---
 
     async submit_result(ctx, input: ToolInput<'submit_result'>) {
       const task = taskOf(ctx);

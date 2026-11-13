@@ -39,7 +39,10 @@ export function reviewQueue(workspaceId: string, deps: { store: Store }): Review
 
   for (const s of store.symptoms.list({ workspaceId })) push('symptom', s.id, s.title, s.criteria);
   const live = <T extends { status?: string | undefined }>(xs: T[]) => xs.filter((x) => x.status !== 'superseded');
-  for (const f of live(store.findings.list({ workspaceId }))) push('finding', f.id, f.claim, f.criteria);
+  // KS-2: one entry per fact lineage, its live version — a new version re-queues the lineage (the
+  // rated revision is no longer current); replaced and retracted versions are history.
+  const lineageLive = (f: { lifecycle?: string | undefined }) => f.lifecycle !== 'replaced' && f.lifecycle !== 'retracted';
+  for (const f of live(store.findings.list({ workspaceId })).filter(lineageLive)) push('finding', f.id, f.claim, f.criteria);
   for (const r of live(store.recommendations.list({ workspaceId }))) {
     push('recommendation', r.id, r.title, { ...r.criteria, priority: r.priority });
     for (const fb of r.personaFeedback) {

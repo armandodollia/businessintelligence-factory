@@ -765,8 +765,13 @@ export interface EntityMergeSuggestion {
   actor?: string;
 }
 
-/** Read tools (design §9) plus `prompt_context` (assembled briefings, design §11). */
-export type RetrievalTool = 'search' | 'get_card' | 'expand' | 'read_artifact' | 'list_changes' | 'read_workspace' | 'prompt_context';
+/**
+ * Read tools (design §9) plus `prompt_context` (assembled briefings and the reviewer's knowledge
+ * context, design §11) and `save_finding` (duplicate-handshake candidates, KS-2).
+ */
+export type RetrievalTool =
+  | 'search' | 'get_card' | 'expand' | 'read_artifact' | 'list_changes' | 'read_workspace' | 'prompt_context'
+  | 'save_finding';
 /** Who retrieved: an agent role, or the user through the API (design §17). */
 export type RetrievalRole = Role | 'user';
 /** One returned item, in response order. `kind`: fact, passage, chunk, artifact, entity, record, card, ... */

@@ -509,6 +509,8 @@ Exact DDL is in the build plan.
 byEntityKind), `extraction` (maxTextChars, chunkTokens, maxChunkTokens,
 xlsxMaxRows, inlineMaxBytes, concurrency), `captions` (required, minChars),
 `dedupe` (candidateLimit, similarityFloor), `retention` (pruneMinAgeDays).
+`similarityFloor` applies to the Jaccard overlap of the word-token sets of the two normalized claims
+(0–1); FTS5 bm25 only selects the candidates it is computed on.
 
 ## 17. Web and API (minimal)
 
