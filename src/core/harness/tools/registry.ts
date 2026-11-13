@@ -22,6 +22,8 @@ export const TOOL_NAMES = [
   'save_recommendation',
   'read_workspace',
   'propose_business_unit',
+  'save_competitor',
+  'save_hypothesis',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -35,7 +37,7 @@ const BASE: ToolName[] = ['log_decision', 'save_artifact', 'request_user_action'
 export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   worker: [
     ...BASE, 'save_finding', 'submit_result', 'respond_to_review', 'get_identity', 'save_persona',
-    'read_workspace', 'propose_business_unit', 'read_artifact',
+    'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis',
   ],
   orchestrator: [...BASE, 'propose_tasks', 'read_workspace', 'read_artifact'],
   reviewer: ['log_decision', 'submit_review', 'read_artifact'],
@@ -51,6 +53,7 @@ export type IssueClass = (typeof ISSUE_CLASSES)[number];
 
 const id = z.string().min(1);
 const criteria = z.record(z.string(), z.union([z.number(), z.string()]));
+const score15 = z.number().min(1).max(5);
 
 /** One persona profile field: value, confidence 0–1, ≥ 1 evidence artifact (fields may share artifacts). */
 const personaField = z.object({
@@ -141,7 +144,9 @@ export const toolInputSchemas = {
           type: taskTypeSchema,
           brief: z.string().min(1),
           subject: z.string().optional(),
-          model: modelRefSchema,
+          model: modelRefSchema
+            .optional()
+            .describe('Omit to use the configured default for the task type (listed in your prompt); set only to override it'),
           needs_browser: z.boolean(),
           acceptance_criteria: z.array(z.string().min(1)).min(1),
         }),
@@ -204,6 +209,22 @@ export const toolInputSchemas = {
     evidence: z.array(id).default([]).describe('Artifact ids supporting the unit (site, filings, org signals)'),
     reasoning: z.string().min(1),
   }),
+  save_competitor: z.object({
+    name: z.string().min(1).describe('Competitor (or alternative) name; same name = update'),
+    site: z.string().optional().describe('Main site / host'),
+    threat: score15.describe('1–5: threat to the business in scope'),
+    directness: score15.describe('1–5: how directly it competes for the same audience'),
+    comparison: z
+      .object({ pricing: score15, onboarding: score15, ux: score15, features: score15 })
+      .describe('Each 1–5: competitor vs. the business in scope (5 = competitor much better, 3 = on par)'),
+    evidence: z.array(id).min(1, 'evidence must reference at least one saved artifact'),
+  }),
+  save_hypothesis: z.object({
+    symptom_id: id.describe('Interview symptom this hypothesis explains'),
+    hypothesis: z.string().min(1).describe('Suspected cause, one sentence'),
+    confidence: z.number().min(0).max(100).describe('0–100 (percent)'),
+    evidence: z.array(id).min(1, 'cite at least one finding or artifact id'),
+  }),
 } satisfies Record<ToolName, z.ZodType>;
 
 export type ToolInput<N extends ToolName> = z.output<(typeof toolInputSchemas)[N]>;
@@ -232,6 +253,10 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Read another workspace of this business tree (read-only): scope, profile, finding and symptom titles, tagged by source.',
   propose_business_unit:
     'Propose a child business unit (division, product, team, internal platform) for the user to accept or reject.',
+  save_competitor:
+    'Save or update a rated competitor: threat, directness and per-area comparison (pricing, onboarding, ux, features), each 1–5, with evidence.',
+  save_hypothesis:
+    'Save a hypothesis about the cause of an interview symptom (confidence 0–100, evidence); the interviewer asks the user about it.',
 };
 
 /** JSON Schema of a tool's input as agents should send it (defaults shown as optional). */

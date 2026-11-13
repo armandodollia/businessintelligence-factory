@@ -1,4 +1,4 @@
-import { describeEvent, eventRunId, shortDate, summarize, toggle } from '../logic/format.js';
+import { changedArtifactLabel, describeEvent, eventRunId, shortDate, summarize, toggle } from '../logic/format.js';
 import { artifactUrl, useChanges, useDecisions, useForm, useResearch } from '../logic/hooks.js';
 import { ALL_PHASES, OPTIONAL_PHASES, type ResearchPhase } from '../logic/types.js';
 import { PendingRequests } from './PendingRequests.js';
@@ -137,8 +137,8 @@ function WhatChanged({ wsId }: { wsId: string }) {
               <div className="small">No longer found: {c.removedSubjects.join(', ')}</div>
             )}
             {c.changedArtifacts.map((a) => (
-              <div key={`${a.flow}:${a.step}`} className="small">
-                Screenshot changed: {a.flow} step {a.step} (<a href={artifactUrl(a.prev)} target="_blank" rel="noreferrer">before</a>
+              <div key={`${a.subject ?? ''}:${a.flow}:${a.step}`} className="small">
+                Screenshot changed: {changedArtifactLabel(a)} (<a href={artifactUrl(a.prev)} target="_blank" rel="noreferrer">before</a>
                 {' / '}
                 <a href={artifactUrl(a.next)} target="_blank" rel="noreferrer">after</a>)
               </div>

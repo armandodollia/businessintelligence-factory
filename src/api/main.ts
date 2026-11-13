@@ -131,10 +131,11 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
   // Blocking MCP tools (request_approval) keep requests open for as long as the user takes.
   if ('requestTimeout' in server) server.requestTimeout = 0;
   const report = resumeInterrupted(runtime.research);
-  if (report.failedRuns.length || report.requeuedTasks.length || report.continuedRuns.length) {
+  if (report.failedRuns.length || report.requeuedTasks.length || report.continuedRuns.length || report.continuedPipelines.length) {
     console.log(
       `[bif] resumed: ${report.failedRuns.length} interrupted agent runs failed, ${report.requeuedTasks.length} tasks requeued, ` +
-        `${report.waitingTasks.length} waiting for the user, ${report.continuedRuns.length} research runs continued`,
+        `${report.waitingTasks.length} waiting for the user, ${report.continuedRuns.length} research runs and ` +
+        `${report.continuedPipelines.length} pipelines continued`,
     );
   }
   const scheduler = startScheduler(runtime.research);

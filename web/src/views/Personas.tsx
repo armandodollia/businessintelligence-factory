@@ -1,9 +1,11 @@
 import { usePersonas } from '../logic/hooks.js';
 import { CriterionRating } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
+import { LastReviewNote } from './LastReviewNote.js';
 
 export function Personas({ wsId }: { wsId: string }) {
-  const { personas, loading, error } = usePersonas(wsId);
+  const ps = usePersonas(wsId);
+  const { personas, loading, error } = ps;
   return (
     <div>
       <h2>Audience & Personas</h2>
@@ -11,6 +13,7 @@ export function Personas({ wsId }: { wsId: string }) {
         Personas are built from evidence; their feedback on recommendations is <b>simulated</b>.
       </p>
       {error && <div className="error">{error}</div>}
+      {ps.actionError && <div className="error">{ps.actionError}</div>}
       {loading && <div className="muted">loading…</div>}
       {!loading && personas.length === 0 && <p className="muted">No personas yet — run research.</p>}
       {personas.map((p) => (
@@ -18,8 +21,26 @@ export function Personas({ wsId }: { wsId: string }) {
           <div>
             <b>{p.segment}</b> <span className="tag">{p.slug}</span>
             {p.audience && <span className="tag">{p.audience}</span>}
+            {p.status && <span className={`status ${p.status}`}>{p.status}</span>}
             <span className="muted"> v{p.version} · {p.agentMdPath}</span>
           </div>
+          {ps.needsReviewFlag(p) && p.lastReview && <LastReviewNote review={p.lastReview} />}
+          <label className="muted small">
+            <input
+              type="checkbox"
+              aria-label={`use ${p.id} in persona panel`}
+              checked={ps.usedInPanel(p)}
+              disabled={ps.saving || p.status === 'superseded'}
+              onChange={(e) => void ps.setInclude(p.id, e.currentTarget.checked)}
+            />{' '}
+            Use in persona panel
+            {p.includeOverride !== undefined ? ' (your override)' : p.status && p.status !== 'verified' ? ' (excluded: not verified)' : ''}
+          </label>{' '}
+          {p.includeOverride !== undefined && (
+            <button className="link" disabled={ps.saving} onClick={() => void ps.setInclude(p.id, null)}>
+              reset to default
+            </button>
+          )}
           <table>
             <thead>
               <tr>

@@ -96,6 +96,14 @@ export interface Artifact {
   capturedAt: string;
 }
 
+/**
+ * Review status of a task output (finding, recommendation, persona; migration 11). `pending` while
+ * its task is in the review loop; then the task's final status (`verified | unverified | failed`).
+ * `superseded`: created in an earlier round of its task and not re-submitted in the final round
+ * (re-saved, or cited by id in the final deliverable) — excluded from synthesis, panel and Strategy.
+ */
+export type OutputStatus = 'pending' | 'verified' | 'unverified' | 'failed' | 'superseded';
+
 export interface Finding {
   id: string;
   workspaceId: string;
@@ -106,8 +114,10 @@ export interface Finding {
   criteria: Criteria;
   /** Artifact ids. */
   evidence: string[];
-  status: 'verified' | 'unverified' | 'pending';
+  status: OutputStatus;
   createdAt: string;
+  /** Review round of its task in which the finding was last saved or re-saved (migration 11). */
+  taskRound?: number;
   /**
    * User override for recommendation synthesis (migration 8). Unset: only `verified` findings are
    * used (spec §7.2). `true`: used even if unverified. `false`: excluded even if verified.
@@ -151,6 +161,25 @@ export interface ResearchRun {
   endedAt?: string;
   /** Schedule that started this run (migration 10); unset for manual runs. */
   scheduleId?: string;
+  /** Pipeline this run belongs to (migration 11). */
+  pipelineId?: string;
+}
+
+/**
+ * A requested sequence of phases (migration 11), persisted so an interrupted pipeline resumes its
+ * remaining phases (and, for scheduled pipelines, the "what changed" step) after a restart.
+ */
+export interface Pipeline {
+  id: string;
+  workspaceId: string;
+  /** Requested phases in pipeline order. */
+  phases: Phase[];
+  /** Index into `phases` of the next phase to finish (progress). */
+  nextIndex: number;
+  scheduleId?: string;
+  status: 'running' | 'done' | 'failed';
+  startedAt: string;
+  endedAt?: string;
 }
 
 export interface AgentRun {
@@ -240,10 +269,22 @@ export interface Recommendation {
   title: string;
   summary: string;
   criteria: Criteria;
+  /** Finding ids; may come from any workspace of the same business tree. */
   findingIds: string[];
   personaFeedback: PersonaFeedback[];
   priority: number;
   createdAt: string;
+  /** Task that saved it (migration 11). */
+  taskId?: string;
+  /** Review status (migration 11). Optional on insert only: the column defaults to `pending`. */
+  status?: OutputStatus;
+  /** Review round of its task in which it was last saved (migration 11). */
+  taskRound?: number;
+  /**
+   * User override (migration 11). Unset: only `verified` recommendations go to the persona panel and
+   * failed ones are hidden. `true`: used/shown anyway. `false`: excluded. Never applies to `superseded`.
+   */
+  includeOverride?: boolean;
 }
 
 export interface PersonaProfileField {
@@ -262,6 +303,14 @@ export interface Persona {
   version: number;
   /** Default `external` (DB default, migration 6). */
   audience?: Audience;
+  /** Task that last saved it (migration 11). */
+  taskId?: string;
+  /** Review status of its last save (migration 11). Optional on insert only: the column defaults to `pending`. */
+  status?: OutputStatus;
+  /** Review round of its task in which it was last saved (migration 11). */
+  taskRound?: number;
+  /** User override for the persona panel (migration 11); same semantics as `Recommendation.includeOverride`. */
+  includeOverride?: boolean;
 }
 
 export interface Symptom {
@@ -272,6 +321,51 @@ export interface Symptom {
   detail: string;
   criteria: Criteria;
   evidence: string[];
+}
+
+/** Per-area comparison of a competitor vs. the business in scope, each 1–5 (5 = competitor much better). */
+export interface CompetitorComparison {
+  pricing: number;
+  onboarding: number;
+  ux: number;
+  features: number;
+}
+
+/**
+ * A rated competitor (spec §9; migration 12), saved by `save_competitor`. One row per workspace +
+ * normalized name; a later save updates it. Ratable criteria: threat, directness and the four
+ * comparison areas (rating target id = competitor id).
+ */
+export interface Competitor {
+  id: string;
+  workspaceId: string;
+  name: string;
+  site?: string;
+  /** 1–5. */
+  threat: number;
+  /** 1–5. */
+  directness: number;
+  comparison: CompetitorComparison;
+  /** Artifact ids. */
+  evidence: string[];
+  /** Task whose run saved (or last updated) it. */
+  taskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A research hypothesis about the cause of an interview symptom (spec §8 drill-down; migration 12). */
+export interface SymptomHypothesis {
+  id: string;
+  workspaceId: string;
+  symptomId: string;
+  hypothesis: string;
+  /** 0–100 (percent). */
+  confidence: number;
+  /** Finding and/or artifact ids. */
+  evidence: string[];
+  taskId?: string;
+  createdAt: string;
 }
 
 export interface Schedule {

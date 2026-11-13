@@ -175,7 +175,8 @@ describe('store', () => {
     delete ratingNull.reason;
     const recommendation: Recommendation = {
       id: newId('rec'), workspaceId: ws, title: 'Publish pricing', summary: 's', criteria: { impact: 8 },
-      findingIds: ['fnd_1'], priority: 1.5, createdAt: now(),
+      findingIds: ['fnd_1'], priority: 1.5, createdAt: now(), taskId: 'tsk_1', status: 'verified', taskRound: 2,
+      includeOverride: false,
       personaFeedback: [{
         personaId: 'per_1', scores: { appeal: 7, adoption: 6, willingnessToPay: 5, friction: 3 },
         concerns: ['c'], reasoning: 'r', wouldChangeMind: 'w', simulated: true,
@@ -184,7 +185,8 @@ describe('store', () => {
     const persona: Persona = {
       id: newId('per'), workspaceId: ws, slug: 'ops-olivia', segment: 'ops',
       profile: { role: { value: 'Ops lead', confidence: 0.8, evidence: ['art_1'] } },
-      agentMdPath: 'data/ws/personas/ops-olivia.md', version: 1,
+      agentMdPath: 'data/ws/personas/ops-olivia.md', version: 1, status: 'unverified', taskId: 'tsk_2', taskRound: 1,
+      includeOverride: true,
     };
     const symptom: Symptom = {
       id: newId('sym'), workspaceId: ws, kind: 'strength', title: 't', detail: 'd', criteria: { a: 1 }, evidence: ['art_1'],
@@ -290,6 +292,37 @@ describe('store', () => {
     expect('taskId' in store.userRequests.get('ureq_1')!).toBe(false);
     expect(store.userRequests.get('ureq_2')!.taskId).toBe('tsk_1');
     expect(store.userRequests.list({ status: 'pending' }).map((r) => r.id)).toEqual(['ureq_1', 'ureq_2']);
+  });
+
+  it('migration 11 backfills recommendation / persona task + status from their save decisions', () => {
+    const path = tmpDb();
+    openStore(path).close();
+    rmSync(path);
+    const raw = new DatabaseSync(path);
+    raw.exec('BEGIN');
+    for (const m of MIGRATIONS.slice(0, 10)) raw.exec(m);
+    raw.exec('PRAGMA user_version = 10');
+    raw.exec(`INSERT INTO tasks (id, workspace_id, run_id, phase, type, brief, model, needs_browser, acceptance_criteria, status, round, created_at)
+      VALUES ('tsk_syn', 'ws', 'r', 'synthesis', 'synthesize_recommendations', 'b', '{}', 0, '[]', 'verified', 1, 'now'),
+             ('tsk_per', 'ws', 'r', 'market_research', 'persona_profile', 'b', '{}', 0, '[]', 'unverified', 3, 'now')`);
+    raw.exec(`INSERT INTO agent_runs (id, workspace_id, task_id, role, model, token, status, started_at)
+      VALUES ('arun_s', 'ws', 'tsk_syn', 'synthesizer', '{}', 't1', 'done', 'now'),
+             ('arun_p', 'ws', 'tsk_per', 'worker', '{}', 't2', 'done', 'now')`);
+    raw.exec(`INSERT INTO decisions (id, workspace_id, agent_run_id, role, model, kind, payload, refs, prompt_version, created_at)
+      VALUES ('dec_1', 'ws', 'arun_s', 'synthesizer', '{}', 'score', '{"tool":"save_recommendation","recommendationId":"rec_1"}', '[]', 'v', 'now'),
+             ('dec_2', 'ws', 'arun_p', 'worker', '{}', 'score', '{"tool":"save_persona","personaId":"per_1"}', '[]', 'v', 'now')`);
+    raw.exec(`INSERT INTO recommendations (id, workspace_id, title, summary, criteria, finding_ids, persona_feedback, priority, created_at)
+      VALUES ('rec_1', 'ws', 't', 's', '{}', '[]', '[]', 1, 'now'), ('rec_orphan', 'ws', 't', 's', '{}', '[]', '[]', 1, 'now')`);
+    raw.exec(`INSERT INTO personas (id, workspace_id, slug, segment, profile, agent_md_path, version)
+      VALUES ('per_1', 'ws', 'sam', 'SMB', '{}', 'x.md', 1)`);
+    raw.exec('COMMIT');
+    raw.close();
+    const store = open(path);
+    expect(store.schemaVersion()).toBe(MIGRATIONS.length);
+    expect(store.recommendations.get('rec_1')).toMatchObject({ taskId: 'tsk_syn', status: 'verified' });
+    expect(store.recommendations.get('rec_orphan')!.status).toBe('unverified');
+    expect(store.personas.get('per_1')).toMatchObject({ taskId: 'tsk_per', status: 'unverified' });
+    expect(store.pipelines.list()).toEqual([]);
   });
 });
 

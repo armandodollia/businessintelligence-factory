@@ -5,8 +5,11 @@ import { AbortError } from '../events.js';
 import type { RunOutcome } from '../harness/supervisor.js';
 import { getRunOutputs, type ReviewIssue } from '../harness/tools/handlers.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
-import type { Role, Task, TaskType } from '../types.js';
+import { calibrationScope } from '../scoring/calibration.js';
+import type { Finding, Role, Task, TaskType } from '../types.js';
+import { sameTree } from '../workspace/tree.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
+import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
@@ -31,14 +34,82 @@ export function roleForTask(task: Pick<Task, 'type'>): Role {
 
 const ARTIFACT_ID = /\bart_[0-9A-Z]{26}\b/g;
 
-/** Evidence artifact ids of a task: its findings' evidence plus artifact ids cited in the deliverable. */
-export function evidenceIds(deps: Pick<ResearchDeps, 'store'>, task: Task): string[] {
+const trunc = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+export type ReviewContext = {
+  /** Evidence artifact ids: of the task's current outputs (transitively) and cited in the deliverable. */
+  evidence: string[];
+  /** Prompt section with the content of the task's submitted outputs (empty when it has none). */
+  outputs: string;
+};
+
+/**
+ * What the reviewer gets besides brief, criteria and deliverable (spec §7.2, task-scoped only): the
+ * content of the task's current findings, recommendations and personas (outputs of earlier rounds
+ * that were re-submitted or cited by id in the deliverable included), the findings cited by those
+ * recommendations, and the evidence artifact ids reachable from all of these. Nothing else of the
+ * workspace is included.
+ */
+export function reviewContext(deps: Pick<ResearchDeps, 'store'>, task: Task): ReviewContext {
+  const { store } = deps;
+  const outputs = taskOutputs(store, task);
+  const current = currentOutputIds(store, task, outputs);
+  const findings = outputs.findings.filter((f) => current.has(f.id));
+  const recs = outputs.recommendations.filter((r) => current.has(r.id));
+  const personas = outputs.personas.filter((p) => current.has(p.id));
   const ids = new Set<string>();
-  for (const f of deps.store.findings.list({ taskId: task.id })) {
-    if (f.workspaceId === task.workspaceId) for (const a of f.evidence) ids.add(a);
+  for (const f of findings) for (const a of f.evidence) ids.add(a);
+  const own = new Set(findings.map((f) => f.id));
+  const cited: Finding[] = [];
+  for (const r of recs) {
+    for (const fid of r.findingIds) {
+      if (own.has(fid) || cited.some((c) => c.id === fid)) continue;
+      const f = store.findings.get(fid);
+      // Recommendations may cite findings of any node of the same business tree.
+      if (f && sameTree(store, task.workspaceId, f.workspaceId)) cited.push(f);
+    }
   }
+  for (const f of cited) for (const a of f.evidence) ids.add(a);
+  for (const p of personas) for (const field of Object.values(p.profile)) for (const a of field.evidence) ids.add(a);
   if (task.result !== undefined) for (const m of JSON.stringify(task.result).matchAll(ARTIFACT_ID)) ids.add(m[0]);
-  return [...ids];
+
+  const sections: string[] = [];
+  const findingLine = (f: Finding) =>
+    `- [${f.id}] ${f.subject}: ${f.claim}` +
+    `${Object.keys(f.criteria).length ? ` (criteria: ${JSON.stringify(f.criteria)})` : ''} (evidence: ${f.evidence.join(', ')})`;
+  if (findings.length) sections.push(`### Findings saved by this task\n${findings.map(findingLine).join('\n')}`);
+  if (recs.length) {
+    sections.push(
+      `### Recommendations saved by this task\n${recs
+        .map((r) => `- [${r.id}] ${r.title}: ${r.summary}\n  criteria: ${JSON.stringify(r.criteria)}\n  cites findings: ${r.findingIds.join(', ')}`)
+        .join('\n')}`,
+    );
+  }
+  if (cited.length) {
+    sections.push(
+      `### Findings cited by these recommendations\n${cited
+        .map((f) => `${findingLine(f)}${f.workspaceId !== task.workspaceId ? ` (source ${f.workspaceId})` : ''}`)
+        .join('\n')}`,
+    );
+  }
+  if (personas.length) {
+    sections.push(
+      `### Personas saved by this task\n${personas
+        .map(
+          (p) =>
+            `- [${p.id}] ${p.slug} (${p.segment}; audience ${p.audience ?? 'external'})\n${Object.entries(p.profile)
+              .map(([k, v]) => `  - ${k}: ${trunc(v.value, 400)} (confidence ${v.confidence}; evidence: ${v.evidence.join(', ')})`)
+              .join('\n')}`,
+        )
+        .join('\n')}`,
+    );
+  }
+  return { evidence: [...ids], outputs: sections.length ? `## Submitted outputs\n${sections.join('\n\n')}` : '' };
+}
+
+/** Evidence artifact ids of a task (see `reviewContext`). */
+export function evidenceIds(deps: Pick<ResearchDeps, 'store'>, task: Task): string[] {
+  return reviewContext(deps, task).evidence;
 }
 
 function bullets(items: string[]): string {
@@ -96,6 +167,7 @@ export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<Rese
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     `## Your current deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     `## Review issues\n${issueLines.join('\n') || '- (none)'}`,
+    deps ? currentOutputsSection(deps, task) : '',
     deps && task.phase === 'synthesis' ? synthesisFindingsSection(deps.store, task.workspaceId) : '',
     deps ? answeredRequestsSection(deps, task) : '',
   ]
@@ -104,18 +176,42 @@ export function revisePrompt(task: Task, issues: ReviewIssue[], deps?: Pick<Rese
 }
 
 /**
- * Reviewer prompt: ONLY the task brief, acceptance criteria, the current deliverable and its
- * evidence artifact ids (spec §7.2: no worker transcript, other tasks, or prior review rounds).
+ * Revision prompt section: the task's current outputs and the superseded rule (outputs neither
+ * re-saved in this revision nor cited by id in the resubmitted deliverable are superseded).
  */
-export function reviewPrompt(task: Task, evidence: string[]): string {
+export function currentOutputsSection(deps: Pick<ResearchDeps, 'store'>, task: Task): string {
+  const outputs = taskOutputs(deps.store, task);
+  const current = currentOutputIds(deps.store, task, outputs);
+  const lines = [
+    ...outputs.findings.filter((f) => current.has(f.id)).map((f) => `- finding ${f.id}: ${trunc(f.claim, 200)}`),
+    ...outputs.recommendations.filter((r) => current.has(r.id)).map((r) => `- recommendation ${r.id}: ${trunc(r.title, 200)}`),
+    ...outputs.personas.filter((p) => current.has(p.id)).map((p) => `- persona ${p.id}: ${p.slug}`),
+  ];
+  if (!lines.length) return '';
+  return (
+    `## Your current outputs\n${lines.join('\n')}\n` +
+    'Outputs you neither re-save in this revision nor cite by id in your resubmitted deliverable are marked ' +
+    'superseded and are not used. Save corrected outputs anew (e.g. a corrected claim) and leave wrong ones out.'
+  );
+}
+
+/**
+ * Reviewer prompt: ONLY the task brief, acceptance criteria, the current deliverable, the content of
+ * the task's submitted outputs and their evidence artifact ids (spec §7.2: no worker transcript,
+ * other tasks, or prior review rounds).
+ */
+export function reviewPrompt(task: Task, evidence: string[], outputs = ''): string {
   return [
     taskHeader(task),
     `## Brief\n${task.brief}`,
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     `## Deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
+    outputs,
     `## Evidence artifact ids (inspect with read_artifact)\n${bullets(evidence)}`,
     'Call `submit_review` exactly once.',
-  ].join('\n\n');
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 /** Human-readable failure of a run: exit code, supervisor reason, last error event. */
@@ -140,7 +236,7 @@ async function workerStep(
   const { store, config } = deps;
   const initial = store.tasks.get(taskId)!;
   const role = roleForTask(initial);
-  const system = workerSystemPrompt(config, role, initial.needsBrowser, initial.type);
+  const system = workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config.dataDir, initial.workspaceId));
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
@@ -194,12 +290,13 @@ async function reviewStep(
 ): Promise<{ valid: boolean; score: number; issues: ReviewIssue[] }> {
   const { store, config } = deps;
   const task = store.tasks.get(taskId)!;
-  const system = reviewerSystemPrompt(config);
+  const system = reviewerSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId));
   const version = promptVersion(system);
   const model = reviewerFor(task.model, config);
+  const context = reviewContext(deps, task);
   const res = await runAgent(deps, {
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
-    prompt: reviewPrompt(task, evidenceIds(deps, task)), systemPrompt: system,
+    prompt: reviewPrompt(task, context.evidence, context.outputs), systemPrompt: system,
     model, needsBrowser: false, promptVersion: version,
   });
   throwIfAborted(deps.signal);
@@ -223,11 +320,9 @@ function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unveri
   const { store } = deps;
   return store.transaction(() => {
     const task = store.tasks.update(taskId, { status, round });
-    if (status !== 'failed') {
-      for (const f of store.findings.list({ taskId })) {
-        if (f.workspaceId === task.workspaceId) store.findings.update(f.id, { status });
-      }
-    }
+    // Findings, recommendations and personas of the task take its status; outputs of earlier rounds
+    // that were not re-submitted become `superseded`.
+    applyTaskStatus(store, task, status);
     return task;
   });
 }

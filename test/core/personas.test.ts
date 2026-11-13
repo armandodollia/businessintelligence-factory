@@ -51,7 +51,7 @@ const personaInput = (evidence: string[], extra: Record<string, unknown> = {}) =
 function rec(id: string): Recommendation {
   return {
     id, workspaceId: 'ws_a', title: `Rec ${id}`, summary: `Do ${id}`, criteria: { upside: 4 }, findingIds: [],
-    personaFeedback: [], priority: 0, createdAt: new Date().toISOString(),
+    personaFeedback: [], priority: 0, createdAt: new Date().toISOString(), status: 'verified',
   };
 }
 
@@ -197,6 +197,8 @@ describe('persona panel', () => {
       const r = await t.handle(ctx(), 'save_persona', personaInput([t.art], { segment, audience }));
       expect(r.ok).toBe(true);
     }
+    // The panel only uses verified personas (as if their persona_profile tasks passed review).
+    for (const p of t.store.personas.list({ workspaceId: 'ws_a' })) t.store.personas.update(p.id, { status: 'verified' });
     t.store.recommendations.insert(rec('rec_1'));
     t.store.recommendations.insert(rec('rec_2'));
     t.state.pick = (req) => {

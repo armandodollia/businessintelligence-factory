@@ -10,18 +10,20 @@ import type {
   PromptPatch,
   ScoringWeights,
   CalibrationReport,
+  CompetitorView,
   CreateWorkspaceInput,
   Decision,
   Finding,
-  FindingView,
   InterviewState,
   InterviewTurn,
   NewSchedule,
   PersonaNode,
+  PersonaView,
   ResearchPhase,
   Rating,
   RatingInput,
   Recommendation,
+  RecommendationView,
   ResearchRun,
   ReviewQueueItem,
   Rollup,
@@ -29,6 +31,7 @@ import type {
   SchedulePatch,
   Symptom,
   Task,
+  TreeFindingView,
   UnitProposal,
   UnitProposalEdits,
   UserRequest,
@@ -118,11 +121,18 @@ export const api = {
     get<Task[]>(`${ws(id)}/tasks${runId ? `?runId=${enc(runId)}` : ''}`),
 
   // results
-  listFindings: (id: string) => get<FindingView[]>(`${ws(id)}/findings`),
+  /** `tree`: findings of every node of the business tree (each tagged with `sourceWorkspaceId`). */
+  listFindings: (id: string, opts: { tree?: boolean } = {}) =>
+    get<TreeFindingView[]>(`${ws(id)}/findings${opts.tree ? '?scope=tree' : ''}`),
   setFindingInclude: (id: string, include: boolean | null) => post<Finding>(`/api/findings/${enc(id)}/include`, { include }),
+  /** Persona-panel / Strategy override; `null` resets to the default (verified only). */
+  setRecommendationInclude: (id: string, include: boolean | null) =>
+    post<Recommendation>(`/api/recommendations/${enc(id)}/include`, { include }),
+  setPersonaInclude: (id: string, include: boolean | null) => post<PersonaNode>(`/api/personas/${enc(id)}/include`, { include }),
   listSymptoms: (id: string) => get<Symptom[]>(`${ws(id)}/symptoms`),
-  listPersonas: (id: string) => get<PersonaNode[]>(`${ws(id)}/personas`),
-  listRecommendations: (id: string) => get<Recommendation[]>(`${ws(id)}/recommendations`),
+  listPersonas: (id: string) => get<PersonaView[]>(`${ws(id)}/personas`),
+  listCompetitors: (id: string) => get<CompetitorView[]>(`${ws(id)}/competitors`),
+  listRecommendations: (id: string) => get<RecommendationView[]>(`${ws(id)}/recommendations`),
   listDecisions: (id: string, kind?: Decision['kind']) =>
     get<Decision[]>(`${ws(id)}/decisions${kind ? `?kind=${enc(kind)}` : ''}`),
   /**

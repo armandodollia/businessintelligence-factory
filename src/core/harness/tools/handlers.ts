@@ -276,15 +276,17 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         .find((f) => f.workspaceId === ctx.workspaceId);
       if (dup) {
         // Same (task, claim): update the mutable fields in place (keeping the id) and log a new
-        // score Decision when the judgment (criteria / subject) changed.
+        // score Decision when the judgment (criteria / subject) changed. Re-saving marks the finding
+        // as re-submitted in the task's current round (superseded tracking, reviewLoop).
         const evidence = [...new Set([...dup.evidence, ...input.evidence])];
         const judgmentChanged =
           JSON.stringify(dup.criteria) !== JSON.stringify(input.criteria) || dup.subject !== input.subject;
         if (!judgmentChanged && evidence.length === dup.evidence.length) {
+          if (dup.taskRound !== task.round) store.findings.update(dup.id, { taskRound: task.round });
           return okData({ findingId: dup.id, duplicate: true });
         }
         const d = store.transaction(() => {
-          store.findings.update(dup.id, { evidence, criteria: input.criteria, subject: input.subject });
+          store.findings.update(dup.id, { evidence, criteria: input.criteria, subject: input.subject, taskRound: task.round });
           if (!judgmentChanged) return undefined;
           return recordDecision(
             ctx,
@@ -307,6 +309,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         evidence: input.evidence,
         status: 'pending',
         createdAt: new Date().toISOString(),
+        taskRound: task.round,
       };
       const d = store.transaction(() => {
         store.findings.insert(finding);
@@ -325,7 +328,16 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       const task = taskOf(ctx);
       const d = store.transaction(() => {
         if (task) store.tasks.update(task.id, { result: input });
-        return recordDecision(ctx, 'decision', { tool: 'submit_result', result: input }, task ? [task.id] : []);
+        // Evidence provenance: every artifact the deliverable rests on (the task's findings'
+        // evidence, artifacts cited in the deliverable or brief), so the training export can tell
+        // upload-derived results apart.
+        const provenance = resultProvenance(store, task, input);
+        return recordDecision(
+          ctx,
+          'decision',
+          { tool: 'submit_result', result: input, provenance },
+          task ? [task.id, ...provenance] : provenance,
+        );
       });
       events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
       return okData({ accepted: true });
@@ -480,6 +492,29 @@ export function resolveUserRequest(
   });
   deps.events.emit({ type: 'user_request_resolved', workspaceId: request.workspaceId, request });
   return request;
+}
+
+const ARTIFACT_ID = /\bart_[0-9A-Z]{26}\b/g;
+
+/** Artifact ids mentioned anywhere in `value` (JSON-serialized). */
+export function artifactIdsIn(value: unknown): string[] {
+  if (value === undefined) return [];
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return [...new Set(text.match(ARTIFACT_ID) ?? [])];
+}
+
+/**
+ * Evidence provenance of a task deliverable: the evidence of the task's findings plus every
+ * artifact id cited in the deliverable or in the task brief (e.g. an internal upload the
+ * orchestrator pointed the task at), restricted to artifacts that exist.
+ */
+export function resultProvenance(store: Store, task: Task | undefined, result: unknown): string[] {
+  const ids = new Set<string>(artifactIdsIn(result));
+  if (task) {
+    for (const f of store.findings.list({ taskId: task.id })) if (f.workspaceId === task.workspaceId) for (const a of f.evidence) ids.add(a);
+    for (const a of artifactIdsIn(task.brief)) ids.add(a);
+  }
+  return [...ids].filter((id) => store.artifacts.get(id) !== undefined);
 }
 
 /** Reads back what a run submitted through `submit_result`, `submit_review`, `respond_to_review`. */

@@ -19,7 +19,7 @@ import { ancestors, audiencesOf, children, createWorkspace, descendants, sameTre
 // ---------------------------------------------------------------------------
 // reading across the tree
 
-/** Read-only summary of a workspace: profile + finding titles (+ symptom titles). */
+/** Read-only summary of a workspace: profile + findings (with their evidence artifact ids) + symptom titles. */
 export function workspaceSummary(store: Store, ws: Workspace) {
   return {
     workspace: {
@@ -33,7 +33,7 @@ export function workspaceSummary(store: Store, ws: Workspace) {
     profile: store.profiles.get(ws.id)?.data ?? {},
     findings: store.findings
       .list({ workspaceId: ws.id })
-      .map((f) => ({ id: f.id, subject: f.subject, claim: f.claim, status: f.status })),
+      .map((f) => ({ id: f.id, subject: f.subject, claim: f.claim, status: f.status, evidence: f.evidence })),
     symptoms: store.symptoms.list({ workspaceId: ws.id }).map((s) => ({ id: s.id, kind: s.kind, title: s.title })),
   };
 }
@@ -255,13 +255,17 @@ export function rejectUnitProposal(store: Store, id: string, reason: string): { 
 const tag = <T extends { workspaceId: string }>(items: T[]): Sourced<T>[] =>
   items.map((i) => ({ ...i, sourceWorkspaceId: i.workspaceId }));
 
-/** Own + descendants' symptoms/strengths, recommendations and findings, tagged by source workspace. */
+/**
+ * Own + descendants' symptoms/strengths, recommendations and findings, tagged by source workspace.
+ * Superseded outputs (replaced in a later review round) are left out.
+ */
 export function rollup(store: Store, wsId: string): Rollup {
   const ids = [wsId, ...descendants(store, wsId).map((w) => w.id)];
+  const live = <T extends { status?: string | undefined }>(xs: T[]) => xs.filter((x) => x.status !== 'superseded');
   return {
     symptoms: ids.flatMap((id) => tag(store.symptoms.list({ workspaceId: id }))),
-    recommendations: ids.flatMap((id) => tag(store.recommendations.list({ workspaceId: id }))),
-    findings: ids.flatMap((id) => tag(store.findings.list({ workspaceId: id }))),
+    recommendations: ids.flatMap((id) => tag(live(store.recommendations.list({ workspaceId: id })))),
+    findings: ids.flatMap((id) => tag(live(store.findings.list({ workspaceId: id })))),
   };
 }
 

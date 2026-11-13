@@ -3,17 +3,20 @@ import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import type {
   AgentRun,
   Artifact,
+  Competitor,
   Decision,
   Finding,
   Identity,
   InterviewTurn,
   Persona,
+  Pipeline,
   Profile,
   Rating,
   Recommendation,
   ResearchRun,
   Schedule,
   Symptom,
+  SymptomHypothesis,
   Task,
   UnitProposal,
   UserRequest,
@@ -222,6 +225,7 @@ export const specs = {
     fields: {
       id: 'text', workspaceId: 'text', runId: 'text', taskId: 'text', subject: 'text', claim: 'text',
       criteria: 'json', evidence: 'json', status: 'text', createdAt: 'text', includeInSynthesis: 'bool',
+      taskRound: 'int',
     },
   } satisfies TableSpec<Finding>,
   tasks: {
@@ -238,6 +242,7 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', phase: 'text', status: 'text', startedAt: 'text', endedAt: 'text', scheduleId: 'text',
+      pipelineId: 'text',
     },
   } satisfies TableSpec<ResearchRun>,
   agentRuns: {
@@ -279,7 +284,8 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', title: 'text', summary: 'text', criteria: 'json',
-      findingIds: 'json', personaFeedback: 'json', priority: 'real', createdAt: 'text',
+      findingIds: 'json', personaFeedback: 'json', priority: 'real', createdAt: 'text', taskId: 'text', status: 'text',
+      taskRound: 'int', includeOverride: 'bool',
     },
   } satisfies TableSpec<Recommendation>,
   personas: {
@@ -287,7 +293,8 @@ export const specs = {
     key: 'id',
     fields: {
       id: 'text', workspaceId: 'text', slug: 'text', segment: 'text', profile: 'json',
-      agentMdPath: 'text', version: 'int', audience: 'text',
+      agentMdPath: 'text', version: 'int', audience: 'text', taskId: 'text', status: 'text', taskRound: 'int',
+      includeOverride: 'bool',
     },
   } satisfies TableSpec<Persona>,
   symptoms: {
@@ -333,6 +340,30 @@ export const specs = {
       createdAt: 'text',
     },
   } satisfies TableSpec<UnitProposal>,
+  pipelines: {
+    table: 'pipelines',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', phases: 'json', nextIndex: 'int', scheduleId: 'text', status: 'text',
+      startedAt: 'text', endedAt: 'text',
+    },
+  } satisfies TableSpec<Pipeline>,
+  competitors: {
+    table: 'competitors',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', name: 'text', site: 'text', threat: 'int', directness: 'int', comparison: 'json',
+      evidence: 'json', taskId: 'text', createdAt: 'text', updatedAt: 'text',
+    },
+  } satisfies TableSpec<Competitor>,
+  symptomHypotheses: {
+    table: 'symptom_hypotheses',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', symptomId: 'text', hypothesis: 'text', confidence: 'real', evidence: 'json',
+      taskId: 'text', createdAt: 'text',
+    },
+  } satisfies TableSpec<SymptomHypothesis>,
 } as const;
 
 export function createRepos(db: DatabaseSync) {
@@ -354,6 +385,9 @@ export function createRepos(db: DatabaseSync) {
     profiles: new Repo<Profile, 'workspaceId'>(db, specs.profiles),
     identities: new Repo<Identity, 'id'>(db, specs.identities),
     unitProposals: new Repo<UnitProposal, 'id'>(db, specs.unitProposals),
+    pipelines: new Repo<Pipeline, 'id'>(db, specs.pipelines),
+    competitors: new Repo<Competitor, 'id'>(db, specs.competitors),
+    symptomHypotheses: new Repo<SymptomHypothesis, 'id'>(db, specs.symptomHypotheses),
   };
 }
 

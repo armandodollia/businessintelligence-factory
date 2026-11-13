@@ -6,6 +6,7 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { RunContext } from '../harness/tokens.js';
 import type { Criteria, Decision, Recommendation } from '../types.js';
+import { sameTree } from '../workspace/tree.js';
 import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, pctFraction, toNumber } from './criteria.js';
 
 export type PriorityConfig = { weights?: Record<string, number>; personaWeight?: number };
@@ -192,8 +193,18 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
     async save_recommendation(ctx, raw, deps) {
       const input = raw as ToolInput<'save_recommendation'>;
       const { store, config, events } = deps;
-      const missing = input.finding_ids.filter((id) => store.findings.get(id)?.workspaceId !== ctx.workspaceId);
-      if (missing.length) return fail(`finding_ids reference unknown findings (not in this workspace): ${missing.join(', ')}`);
+      // Findings of any node of the same business tree may be cited (spec §8c).
+      const missing = input.finding_ids.filter((id) => {
+        const f = store.findings.get(id);
+        return !f || !sameTree(store, ctx.workspaceId, f.workspaceId);
+      });
+      if (missing.length) return fail(`finding_ids reference unknown findings (not in this business tree): ${missing.join(', ')}`);
+      const task = ctx.taskId ? store.tasks.get(ctx.taskId) : undefined;
+      const owner = task && task.workspaceId === ctx.workspaceId ? task : undefined;
+      // Review tracking (migration 11): the saving task, its current round, status pending until the loop ends.
+      const tracking: Pick<Recommendation, 'taskId' | 'taskRound' | 'status'> = owner
+        ? { taskId: owner.id, taskRound: owner.round, status: 'pending' }
+        : { status: 'pending' };
       const bad = checkRecommendationCriteria(input.criteria);
       if (bad) return fail(bad);
       // Idempotent per (task, title): a replay (or a revision re-saving it) updates the existing
@@ -212,8 +223,8 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
           stableJson(prior.criteria) !== stableJson(next.criteria) ||
           stableJson([...prior.findingIds].sort()) !== stableJson([...next.findingIds].sort());
         if (!changed) {
-          // Identical replay: nothing new was judged — no second Decision.
-          store.recommendations.update(id, { priority });
+          // Identical replay: nothing new was judged — no second Decision (but it was re-submitted).
+          store.recommendations.update(id, { priority, ...tracking });
           return { ok: true, data: { recommendationId: id, priority, duplicate: true } };
         }
         // A revision is a new judgment: record a new score Decision (ratings made after it join it).
@@ -227,7 +238,7 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
         if (input.priority !== undefined) payload.agentPriority = input.priority;
         const decision = scoreDecision(ctx, payload, [id, ...input.finding_ids]);
         store.transaction(() => {
-          store.recommendations.update(id, { summary: next.summary, criteria: next.criteria, findingIds: next.findingIds, priority });
+          store.recommendations.update(id, { summary: next.summary, criteria: next.criteria, findingIds: next.findingIds, priority, ...tracking });
           store.decisions.insert(decision);
         });
         events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision });
@@ -243,6 +254,7 @@ export function scoringToolHandlers(): Partial<Record<ToolName, ExtraToolHandler
         personaFeedback: [],
         priority: 0,
         createdAt: new Date().toISOString(),
+        ...tracking,
       };
       rec.priority = computePriority(rec, config.scoring);
       const payload: Record<string, unknown> = { tool: 'save_recommendation', recommendationId: rec.id, criteria: input.criteria, priority: rec.priority };

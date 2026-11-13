@@ -8,9 +8,11 @@ import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
 import { listUploads } from '../internal/uploads.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
+import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
-import type { Decision, ModelRef, Phase, ResearchRun, Task, Workspace } from '../types.js';
+import type { Decision, ModelRef, Phase, Pipeline, ResearchRun, Task, TaskType, Workspace } from '../types.js';
+import { recordWhatChanged } from '../scheduler/whatChanged.js';
 import { treeContext } from '../workspace/businessMap.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
@@ -34,6 +36,18 @@ export function allowedModels(config: BifConfig): ModelRef[] {
   }
   return out;
 }
+
+/**
+ * Configured default model for a task type: `roles.workers[type]`, else `roles.workers.default`;
+ * `synthesize_recommendations` runs as the synthesizer, so it defaults to `roles.synthesizer`.
+ */
+export function defaultTaskModel(config: BifConfig, type: TaskType): ModelRef {
+  if (type === 'synthesize_recommendations') return config.roles.workers[type] ?? config.roles.synthesizer;
+  return config.roles.workers[type] ?? config.roles.workers.default;
+}
+
+const sameModel = (a: ModelRef, b: ModelRef) => a.provider === b.provider && a.model === b.model;
+const modelName = (m: ModelRef) => `${m.provider}/${m.model}`;
 
 /** The workspace's running research run (latest), which `propose_tasks` adds tasks to. */
 export function currentResearchRun(store: Store, workspaceId: string): ResearchRun | undefined {
@@ -77,16 +91,26 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
     const existing = store.tasks.list({ runId: rr.id }).filter((t) => t.workspaceId === ctx.workspaceId);
     const keys = new Map(existing.map((t) => [taskKey(t), t.id]));
     let remaining = config.limits.maxTasksPerRun - existing.length;
-    const accepted: Array<{ index: number; taskId: string; type: string }> = [];
+    const accepted: Array<{
+      index: number;
+      taskId: string;
+      type: string;
+      model: ModelRef;
+      /** `default`: configured default for the type; `override`: the orchestrator chose another model. */
+      modelSource: 'default' | 'override';
+      defaultModel: ModelRef;
+    }> = [];
     const rejected: Array<{ index: number; type: string; reason: string; duplicateOf?: string }> = [];
     const now = new Date().toISOString();
     input.tasks.forEach((t, index) => {
       let reason: string | undefined;
       const dupOf = keys.get(taskKey(t));
+      const defaultModel = defaultTaskModel(config, t.type);
+      const model = t.model ?? defaultModel;
       if (!allowedTypes.includes(t.type)) {
         reason = `task type '${t.type}' is not allowed in phase '${rr.phase}' (allowed: ${allowedTypes.join(', ') || 'none'})`;
-      } else if (!models.some((m) => m.provider === t.model.provider && m.model === t.model.model)) {
-        reason = `model '${t.model.provider}/${t.model.model}' is not enabled (allowed: ${models.map((m) => `${m.provider}/${m.model}`).join(', ')})`;
+      } else if (!models.some((m) => sameModel(m, model))) {
+        reason = `model '${modelName(model)}' is not enabled (allowed: ${models.map(modelName).join(', ')})`;
       } else if (dupOf) {
         reason = `duplicate of task ${dupOf} already in this phase run (same type, subject and brief)`;
       } else if (remaining <= 0) {
@@ -103,7 +127,7 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
         phase: rr.phase,
         type: t.type,
         brief: t.brief,
-        model: t.model,
+        model,
         needsBrowser: t.needs_browser,
         acceptanceCriteria: t.acceptance_criteria,
         status: 'queued',
@@ -115,9 +139,16 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
       store.tasks.insert(task);
       keys.set(taskKey(task), task.id);
       remaining--;
-      accepted.push({ index, taskId: task.id, type: t.type });
+      accepted.push({
+        index, taskId: task.id, type: t.type, model, defaultModel,
+        modelSource: t.model && !sameModel(t.model, defaultModel) ? 'override' : 'default',
+      });
     });
-    const result = { accepted, rejected, remaining: Math.max(0, remaining) };
+    // Explicit model overrides are listed on their own so they are easy to audit and rate.
+    const overrides = accepted
+      .filter((a) => a.modelSource === 'override')
+      .map((a) => ({ index: a.index, taskId: a.taskId, type: a.type, model: a.model, defaultModel: a.defaultModel }));
+    const result = { accepted, rejected, remaining: Math.max(0, remaining), modelOverrides: overrides };
     const decision: Decision = {
       id: newId('dec'),
       workspaceId: ctx.workspaceId,
@@ -254,6 +285,9 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
     `## Phase: ${rr.phase} (orchestrator round ${round} of ${MAX_ORCHESTRATOR_ROUNDS})\nGoal: ${phaseGoal(rr.phase, ws)}`,
     `## Allowed task types\n${PHASE_TASK_TYPES[rr.phase].map((t) => `- ${t}`).join('\n') || '- (none)'}`,
     `## Allowed models\n${allowedModels(config).map((m) => `- {"provider":"${m.provider}","model":"${m.model}"}`).join('\n')}`,
+    `## Default model per task type (used when you omit \`model\`; set \`model\` only to override)\n${PHASE_TASK_TYPES[rr.phase]
+      .map((t) => `- ${t}: ${JSON.stringify(defaultTaskModel(config, t))}`)
+      .join('\n') || '- (no task types in this phase)'}`,
     `## Task budget\n${remaining} more task(s) may be proposed in this phase run (limits.maxTasksPerRun = ${config.limits.maxTasksPerRun}).`,
   ];
   const problems = previousPhaseProblems(store, rr);
@@ -273,7 +307,7 @@ export function orchestratorPrompt(store: Store, config: BifConfig, rr: Research
 
 async function orchestratorRound(deps: ResearchDeps, rr: ResearchRun, round: number): Promise<void> {
   const { store, config } = deps;
-  const system = loadPrompt('orchestrator').text;
+  const system = loadPrompt('orchestrator', calibrationScope(store, config.dataDir, rr.workspaceId)).text;
   const version = promptVersion(system);
   const model = config.roles.orchestrator;
   const before = store.tasks.list({ runId: rr.id }).length;
@@ -410,7 +444,7 @@ export async function startPhase(
   workspaceId: string,
   phase: Phase,
   deps: ResearchDeps,
-  opts: { scheduleId?: string } = {},
+  opts: { scheduleId?: string; pipelineId?: string } = {},
 ): Promise<ResearchRun> {
   const { store } = deps;
   const running = currentResearchRun(store, workspaceId);
@@ -422,15 +456,57 @@ export async function startPhase(
     status: 'running',
     startedAt: new Date().toISOString(),
     ...(opts.scheduleId ? { scheduleId: opts.scheduleId } : {}),
+    ...(opts.pipelineId ? { pipelineId: opts.pipelineId } : {}),
   };
   store.researchRuns.insert(rr);
   return executePhase(deps, rr);
 }
 
 /**
- * Runs phases sequentially in pipeline order; stops after a phase that fails. Holds the
- * workspace's pipeline lock for the whole pipeline (taken synchronously, before the first await),
- * and rejects with `PipelineBusyError` when another pipeline holds it. `scheduleId` tags the runs.
+ * Runs (or continues) a persisted pipeline from `nextIndex`: a phase whose run is still `running`
+ * (interrupted) is continued, a finished one is reused, a missing one is started. Progress is saved
+ * after every phase; the pipeline stops after a failed phase. Scheduled pipelines then record the
+ * scheduler's "what changed" step. Returns the pipeline's runs in phase order. The caller holds the
+ * workspace's pipeline lock. The first missing ResearchRun is inserted synchronously.
+ */
+async function continuePipeline(deps: ResearchDeps, pipelineId: string): Promise<ResearchRun[]> {
+  const { store } = deps;
+  const pipeline = store.pipelines.get(pipelineId)!;
+  const runOf = (phase: Phase) =>
+    store.researchRuns
+      .list({ pipelineId })
+      .filter((r) => r.workspaceId === pipeline.workspaceId && r.phase === phase)
+      .at(-1);
+  let failed = false;
+  for (let i = pipeline.nextIndex; i < pipeline.phases.length; i++) {
+    const phase = pipeline.phases[i]!;
+    const existing = runOf(phase);
+    const rr = !existing
+      ? await startPhase(pipeline.workspaceId, phase, deps, {
+          pipelineId,
+          ...(pipeline.scheduleId ? { scheduleId: pipeline.scheduleId } : {}),
+        })
+      : existing.status === 'running'
+        ? await executePhase(deps, existing)
+        : existing;
+    if (rr.status === 'failed') {
+      failed = true;
+      break;
+    }
+    store.pipelines.update(pipelineId, { nextIndex: i + 1 });
+  }
+  store.pipelines.update(pipelineId, { status: failed ? 'failed' : 'done', endedAt: new Date().toISOString() });
+  const runs = pipeline.phases.map(runOf).filter((r): r is ResearchRun => r !== undefined);
+  if (pipeline.scheduleId) recordWhatChanged(deps, pipeline.scheduleId, runs);
+  return runs;
+}
+
+/**
+ * Runs phases sequentially in pipeline order; stops after a phase that fails. The pipeline (requested
+ * phases, progress, schedule) is persisted, so `resumeInterrupted` continues its remaining phases after
+ * a restart. Holds the workspace's pipeline lock for the whole pipeline (taken synchronously, before
+ * the first await), and rejects with `PipelineBusyError` when another pipeline holds it. `scheduleId`
+ * tags the runs; a scheduled pipeline records "what changed" when it ends.
  */
 export async function runPipeline(
   workspaceId: string,
@@ -441,13 +517,17 @@ export async function runPipeline(
   const release = tryLockPipeline(deps.store, workspaceId);
   if (!release) throw new PipelineBusyError(workspaceId);
   try {
-    const out: ResearchRun[] = [];
-    for (const phase of orderPhases(phases)) {
-      const rr = await startPhase(workspaceId, phase, deps, opts);
-      out.push(rr);
-      if (rr.status === 'failed') break;
-    }
-    return out;
+    const pipeline: Pipeline = {
+      id: newId('pipe'),
+      workspaceId,
+      phases: orderPhases(phases),
+      nextIndex: 0,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      ...(opts.scheduleId ? { scheduleId: opts.scheduleId } : {}),
+    };
+    deps.store.pipelines.insert(pipeline);
+    return await continuePipeline(deps, pipeline.id);
   } finally {
     release();
   }
@@ -464,6 +544,8 @@ export type ResumeReport = {
   abandonedTasks: string[];
   /** Research runs being continued. */
   continuedRuns: string[];
+  /** Pipelines whose remaining phases are being continued. */
+  continuedPipelines: string[];
   /** Settles when every continued research run has finished. */
   done: Promise<ResearchRun[]>;
 };
@@ -495,7 +577,9 @@ export function killOrphanGroup(pid: number, startedAt?: string): boolean {
  * revoked and their orphaned process groups killed (`AgentRun.pid`). Tasks in `running|reviewing`
  * are re-queued with the same round when their research run is still `running` (otherwise they are
  * marked `failed`: nothing would run them); tasks in `waiting_user` keep their pending request and resume
- * when it is answered. Research runs still `running` are continued in the background (`done`).
+ * when it is answered. Pipelines still `running` continue their interrupted phase and remaining phases
+ * (and a scheduled pipeline's "what changed" step); research runs `running` outside a pipeline are
+ * continued alone. All of this runs in the background (`done`).
  */
 export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
   const { store, tokens } = deps;
@@ -528,14 +612,29 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
     }
   }
   const runs = store.researchRuns.list({ status: 'running' });
+  const pipelines = store.pipelines.list({ status: 'running' });
+  const piped = new Set(pipelines.map((p) => p.id));
+  const loose = runs.filter((rr) => !rr.pipelineId || !piped.has(rr.pipelineId));
   // Continue on a later tick so callers (server boot) can finish their own setup first.
   // Continued runs hold their workspace's pipeline lock until they finish.
-  const releases = runs.map((rr) => tryLockPipeline(store, rr.workspaceId));
+  const workspaces = [...new Set([...pipelines.map((p) => p.workspaceId), ...loose.map((r) => r.workspaceId)])];
+  const releases = workspaces.map((id) => tryLockPipeline(store, id));
   const done = new Promise<void>((r) => setImmediate(r))
-    .then(() => Promise.all(runs.map((rr) => executePhase(deps, rr))))
+    .then(() =>
+      Promise.all([
+        ...pipelines.map((p) => continuePipeline(deps, p.id)),
+        ...loose.map((rr) => executePhase(deps, rr).then((r) => [r])),
+      ]),
+    )
+    .then((lists) => lists.flat())
     .finally(() => {
       for (const r of releases) r?.();
     });
   done.catch(() => {});
-  return { failedRuns, requeuedTasks, waitingTasks, abandonedTasks, continuedRuns: runs.map((r) => r.id), done };
+  return {
+    failedRuns, requeuedTasks, waitingTasks, abandonedTasks,
+    continuedRuns: runs.map((r) => r.id),
+    continuedPipelines: pipelines.map((p) => p.id),
+    done,
+  };
 }

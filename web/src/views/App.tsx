@@ -2,6 +2,7 @@ import { workspaceLabel } from '../logic/format.js';
 import { useWorkspace } from '../logic/hooks.js';
 import { href, useHashRoute, WORKSPACE_PAGES, workspaceHref, type WorkspacePage } from '../logic/router.js';
 import { BusinessMap } from './BusinessMap.js';
+import { Competitors } from './Competitors.js';
 import { DecisionLog } from './DecisionLog.js';
 import { Findings } from './Findings.js';
 import { Interview } from './Interview.js';
@@ -78,6 +79,8 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Research wsId={wsId} />;
     case 'findings':
       return <Findings wsId={wsId} />;
+    case 'competitors':
+      return <Competitors wsId={wsId} />;
     case 'strategy':
       return <Strategy wsId={wsId} />;
     case 'review':

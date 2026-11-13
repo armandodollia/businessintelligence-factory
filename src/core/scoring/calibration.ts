@@ -1,15 +1,27 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROLES, type BifConfig } from '../config/schema.js';
-import { calibrationDir } from '../prompts/index.js';
+import { calibrationDir, type CalibrationScope } from '../prompts/index.js';
 import type { Store } from '../store/db.js';
-import type { Rating, Role } from '../types.js';
+import type { Rating, Role, TaskType } from '../types.js';
+import { rootOf } from '../workspace/tree.js';
 import { RECOMMENDATION_KEYS, criterionDef, normalizedDelta, toNumber, type TargetType } from './criteria.js';
 import { normalizeCriterion, personaScore } from './priority.js';
 import { resolveTarget } from './ratings.js';
 
 export type CalibrationRow = { targetType: TargetType; criterion: string; n: number; agreeRate: number; meanDelta: number };
-export type CalibrationReport = { byCriterion: CalibrationRow[] };
+/**
+ * One (role, taskType, targetType, criterion) group (spec §10: disagreements per role / criterion /
+ * task type). `taskType` is absent for values not produced by a research task (interview symptoms,
+ * system decisions).
+ */
+export type CalibrationGroupRow = CalibrationRow & { role: Role | 'unknown'; taskType?: TaskType };
+export type CalibrationReport = { byCriterion: CalibrationRow[]; byRoleTask: CalibrationGroupRow[] };
+
+/** Calibration scope (business tree root + data dir) of a workspace. */
+export function calibrationScope(store: Store, dataDir: string, workspaceId: string): CalibrationScope {
+  return { dataDir, rootWorkspaceId: rootOf(store, workspaceId) };
+}
 
 export type PromptPatchExample = {
   criterion: string;
@@ -30,31 +42,107 @@ const round = (v: number, d = 3) => Math.round(v * 10 ** d) / 10 ** d;
  * /4, pct → fraction points, trend → /2, range → relative) over comparable ratings; an agree is 0.
  */
 export function calibrationReport(workspaceId: string, deps: { store: Store }): CalibrationReport {
-  const groups = new Map<string, { targetType: TargetType; criterion: string; ratings: Rating[] }>();
-  for (const r of deps.store.ratings.list({ workspaceId })) {
-    const key = `${r.targetType}\u0000${r.criterion}`;
-    let g = groups.get(key);
-    if (!g) groups.set(key, (g = { targetType: r.targetType, criterion: r.criterion, ratings: [] }));
-    g.ratings.push(r);
-  }
-  const byCriterion = [...groups.values()].map(({ targetType, criterion, ratings }) => {
-    const def = criterionDef(targetType, criterion);
-    const deltas: number[] = [];
-    for (const r of ratings) {
-      if (!def) continue;
-      const d = normalizedDelta(def, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue);
-      if (d !== undefined) deltas.push(d);
-    }
-    return {
-      targetType,
-      criterion,
-      n: ratings.length,
-      agreeRate: round(ratings.filter((r) => r.verdict === 'agree').length / ratings.length),
-      meanDelta: deltas.length ? round(deltas.reduce((a, b) => a + b, 0) / deltas.length) : 0,
-    };
-  });
+  const { store } = deps;
+  const ratings = store.ratings.list({ workspaceId });
+  const byCriterion = groupRows(ratings, (r) => `${r.targetType}\u0000${r.criterion}`).map(({ first, rows }) =>
+    summarize(first.targetType, first.criterion, rows),
+  );
   byCriterion.sort((a, b) => a.targetType.localeCompare(b.targetType) || a.criterion.localeCompare(b.criterion));
-  return { byCriterion };
+
+  // Per role / task type that produced the rated value (spec §10).
+  const runOf = judgingRuns(store, workspaceId);
+  const origin = new Map<string, { role: Role | 'unknown'; taskType?: TaskType }>();
+  const originOf = (r: Rating) => {
+    const k = `${r.targetType}\u0000${r.targetId}\u0000${r.criterion}`;
+    let o = origin.get(k);
+    if (!o) {
+      o = { role: resolveTarget(store, workspaceId, r.targetType, r.targetId, r.criterion)?.role ?? 'unknown' };
+      const tt = taskTypeOf(store, workspaceId, r, runOf);
+      if (tt) o.taskType = tt;
+      origin.set(k, o);
+    }
+    return o;
+  };
+  const byRoleTask = groupRows(ratings, (r) => {
+    const o = originOf(r);
+    return `${o.role}\u0000${o.taskType ?? ''}\u0000${r.targetType}\u0000${r.criterion}`;
+  }).map(({ first, rows }) => {
+    const o = originOf(first);
+    const row: CalibrationGroupRow = { role: o.role, ...summarize(first.targetType, first.criterion, rows) };
+    if (o.taskType) row.taskType = o.taskType;
+    return row;
+  });
+  byRoleTask.sort(
+    (a, b) =>
+      a.role.localeCompare(b.role) ||
+      (a.taskType ?? '').localeCompare(b.taskType ?? '') ||
+      a.targetType.localeCompare(b.targetType) ||
+      a.criterion.localeCompare(b.criterion),
+  );
+  return { byCriterion, byRoleTask };
+}
+
+function groupRows(ratings: Rating[], keyOf: (r: Rating) => string): Array<{ first: Rating; rows: Rating[] }> {
+  const groups = new Map<string, { first: Rating; rows: Rating[] }>();
+  for (const r of ratings) {
+    const key = keyOf(r);
+    const g = groups.get(key);
+    if (g) g.rows.push(r);
+    else groups.set(key, { first: r, rows: [r] });
+  }
+  return [...groups.values()];
+}
+
+function summarize(targetType: TargetType, criterion: string, ratings: Rating[]): CalibrationRow {
+  const def = criterionDef(targetType, criterion);
+  const deltas: number[] = [];
+  for (const r of ratings) {
+    if (!def) continue;
+    const d = normalizedDelta(def, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue);
+    if (d !== undefined) deltas.push(d);
+  }
+  return {
+    targetType,
+    criterion,
+    n: ratings.length,
+    agreeRate: round(ratings.filter((r) => r.verdict === 'agree').length / ratings.length),
+    meanDelta: deltas.length ? round(deltas.reduce((a, b) => a + b, 0) / deltas.length) : 0,
+  };
+}
+
+const SUBJECT_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
+
+/** Item id → agent run of the first Decision that judged it (save_finding / save_persona / ...). */
+function judgingRuns(store: Store, workspaceId: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const d of store.decisions.list({ workspaceId })) {
+    const p = d.payload as Record<string, unknown> | null;
+    if (!p || typeof p !== 'object') continue;
+    for (const k of SUBJECT_KEYS) {
+      const v = p[k];
+      if (typeof v === 'string' && !out.has(v)) out.set(v, d.agentRunId);
+    }
+  }
+  return out;
+}
+
+/** Task type of the research task whose run produced the rated value, if any. */
+function taskTypeOf(store: Store, workspaceId: string, r: Rating, runOf: Map<string, string>): TaskType | undefined {
+  const taskType = (taskId: string | undefined) => {
+    const t = taskId ? store.tasks.get(taskId) : undefined;
+    return t && t.workspaceId === workspaceId ? t.type : undefined;
+  };
+  const ofRun = (runId: string | undefined) => taskType(runId ? store.agentRuns.get(runId)?.taskId : undefined);
+  switch (r.targetType) {
+    case 'finding':
+      return taskType(store.findings.get(r.targetId)?.taskId);
+    case 'persona_feedback':
+      return 'persona_panel';
+    case 'decision':
+      return ofRun(store.decisions.get(r.targetId)?.agentRunId);
+    default:
+      return ofRun(runOf.get(r.targetId));
+  }
 }
 
 /** Euclidean projection of `v` onto the probability simplex {a ≥ 0, Σa = 1} (Duchi et al. 2008). */
@@ -269,16 +357,65 @@ export function proposePromptPatch(workspaceId: string, role: Role, deps: { stor
   return { role, examples, patchText };
 }
 
+const EXAMPLE_LINE = /^\s*\d+\.\s+(.*\S)\s*$/;
+
+/** Dedupe key of one example line: the item + criterion part (before "you said"), else the whole line. */
+function exampleKey(text: string): string {
+  const i = text.indexOf(': you said ');
+  return (i > 0 ? text.slice(0, i) : text).trim().toLowerCase();
+}
+
+/** Numbered example lines (`1. ...`) of an appendix, without their numbers. */
+function exampleLines(text: string): string[] {
+  return text.split('\n').flatMap((l) => {
+    const m = EXAMPLE_LINE.exec(l);
+    return m ? [m[1]!] : [];
+  });
+}
+
+/** Free text (headers / rubric clarifications) of an appendix: every non-example line. */
+function proseOf(text: string): string {
+  return text
+    .split('\n')
+    .filter((l) => !EXAMPLE_LINE.test(l))
+    .join('\n')
+    .trim();
+}
+
 /**
- * Writes the approved patch to `calibration/<role>.md`, which `loadPrompt(role)` appends (so the
- * prompt version changes). Replaces any previous appendix for the role. Call only on explicit
- * user approval (API).
+ * Merges an approved patch into an existing appendix: examples are appended, a newer example for
+ * the same item + criterion replaces the older one (the user changed their mind), exact
+ * duplicates are dropped, and examples are renumbered. Prose (header, rubric clarifications) of
+ * the existing appendix is kept; prose of the patch is added when not already present.
  */
-export function applyPromptPatch(patch: PromptPatch): { path: string } {
+export function mergeCalibration(existing: string, patchText: string): string {
+  if (!existing.trim()) return patchText;
+  if (!patchText.trim()) return existing;
+  const examples = new Map<string, string>();
+  for (const line of [...exampleLines(existing), ...exampleLines(patchText)]) {
+    const k = exampleKey(line);
+    examples.delete(k);
+    examples.set(k, line);
+  }
+  const prose = [proseOf(existing)];
+  const extra = proseOf(patchText);
+  if (extra && !prose[0]!.includes(extra)) prose.push(extra);
+  const numbered = [...examples.values()].map((l, i) => `${i + 1}. ${l}`);
+  return `${[prose.filter(Boolean).join('\n\n'), numbered.join('\n')].filter(Boolean).join('\n\n')}\n`;
+}
+
+/**
+ * Merges the approved patch into `<dataDir>/<rootWorkspaceId>/calibration/<role>.md` of the
+ * business tree in `scope` (`mergeCalibration`: append + dedupe, never overwrite), which
+ * `loadPrompt(role, scope)` appends — so the prompt version of that business's runs changes and
+ * other businesses are untouched. Call only on explicit user approval (API).
+ */
+export function applyPromptPatch(patch: PromptPatch, scope: CalibrationScope): { path: string; text: string } {
   if (!(ROLES as readonly string[]).includes(patch.role)) throw new Error(`unknown role '${patch.role}'`);
-  const dir = calibrationDir();
+  const dir = calibrationDir(scope);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${patch.role}.md`);
-  writeFileSync(path, patch.patchText);
-  return { path };
+  const text = mergeCalibration(existsSync(path) ? readFileSync(path, 'utf8') : '', patch.patchText);
+  writeFileSync(path, text);
+  return { path, text };
 }

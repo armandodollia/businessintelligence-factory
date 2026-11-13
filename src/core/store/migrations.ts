@@ -290,4 +290,87 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE research_runs ADD COLUMN schedule_id TEXT;
   `,
+  // 11: final review B — review status of every task output (findings already have one; they gain
+  // `failed` / `superseded`), the review round each output was last saved in (superseded tracking),
+  // user include overrides for recommendations / personas, and persisted pipelines (resume).
+  // Existing recommendations / personas take the status of the task that saved them (via their
+  // save Decision); rows without a known task become `unverified` (shown flagged, not used).
+  `
+  ALTER TABLE findings ADD COLUMN task_round INTEGER;
+
+  ALTER TABLE recommendations ADD COLUMN task_id TEXT;
+  ALTER TABLE recommendations ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE recommendations ADD COLUMN task_round INTEGER;
+  ALTER TABLE recommendations ADD COLUMN include_override INTEGER;
+  UPDATE recommendations SET task_id = (
+    SELECT ar.task_id FROM decisions d JOIN agent_runs ar ON ar.id = d.agent_run_id
+    WHERE json_valid(d.payload) AND json_extract(d.payload, '$.tool') = 'save_recommendation'
+      AND json_extract(d.payload, '$.recommendationId') = recommendations.id
+    ORDER BY d.rowid DESC LIMIT 1
+  );
+  UPDATE recommendations SET status = COALESCE(
+    (SELECT CASE t.status WHEN 'verified' THEN 'verified' WHEN 'unverified' THEN 'unverified' WHEN 'failed' THEN 'failed' ELSE 'pending' END
+     FROM tasks t WHERE t.id = recommendations.task_id),
+    'unverified'
+  );
+
+  ALTER TABLE personas ADD COLUMN task_id TEXT;
+  ALTER TABLE personas ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE personas ADD COLUMN task_round INTEGER;
+  ALTER TABLE personas ADD COLUMN include_override INTEGER;
+  UPDATE personas SET task_id = (
+    SELECT ar.task_id FROM decisions d JOIN agent_runs ar ON ar.id = d.agent_run_id
+    WHERE json_valid(d.payload) AND json_extract(d.payload, '$.tool') = 'save_persona'
+      AND json_extract(d.payload, '$.personaId') = personas.id
+    ORDER BY d.rowid DESC LIMIT 1
+  );
+  UPDATE personas SET status = COALESCE(
+    (SELECT CASE t.status WHEN 'verified' THEN 'verified' WHEN 'unverified' THEN 'unverified' WHEN 'failed' THEN 'failed' ELSE 'pending' END
+     FROM tasks t WHERE t.id = personas.task_id),
+    'unverified'
+  );
+
+  CREATE TABLE pipelines (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    phases TEXT NOT NULL,
+    next_index INTEGER NOT NULL,
+    schedule_id TEXT,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT
+  );
+  CREATE INDEX pipelines_ws ON pipelines (workspace_id);
+  ALTER TABLE research_runs ADD COLUMN pipeline_id TEXT;
+  `,
+  // 12: final review C — rated competitors (spec §9) and persisted symptom hypotheses (spec §8 drill-down).
+  `
+  CREATE TABLE competitors (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    site TEXT,
+    threat INTEGER NOT NULL,
+    directness INTEGER NOT NULL,
+    comparison TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    task_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX competitors_ws ON competitors (workspace_id);
+
+  CREATE TABLE symptom_hypotheses (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    symptom_id TEXT NOT NULL,
+    hypothesis TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    evidence TEXT NOT NULL,
+    task_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX symptom_hypotheses_ws ON symptom_hypotheses (workspace_id);
+  CREATE INDEX symptom_hypotheses_symptom ON symptom_hypotheses (symptom_id);
+  `,
 ];

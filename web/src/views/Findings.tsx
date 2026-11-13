@@ -1,8 +1,9 @@
 import { shortDate } from '../logic/format.js';
-import { useFindings } from '../logic/hooks.js';
-import type { LastReview, Symptom } from '../logic/types.js';
+import { findingCriteriaKeys, useFindings } from '../logic/hooks.js';
+import type { Symptom } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
+import { LastReviewNote } from './LastReviewNote.js';
 
 export function Findings({ wsId }: { wsId: string }) {
   const f = useFindings(wsId);
@@ -31,10 +32,17 @@ export function Findings({ wsId }: { wsId: string }) {
               type="checkbox"
               aria-label={`use ${x.id} in synthesis`}
               checked={f.usedInSynthesis(x)}
-              disabled={f.saving}
+              disabled={f.saving || x.status === 'superseded'}
               onChange={(e) => void f.setIncludeInSynthesis(x.id, e.currentTarget.checked)}
             />{' '}
-            Use in recommendations{x.includeInSynthesis !== undefined ? ' (your override)' : x.status === 'verified' ? '' : ' (excluded: not verified)'}
+            Use in recommendations
+            {x.status === 'superseded'
+              ? ' (excluded: superseded by a later revision)'
+              : x.includeInSynthesis !== undefined
+                ? ' (your override)'
+                : x.status === 'verified'
+                  ? ''
+                  : ' (excluded: not verified)'}
           </label>{' '}
           {x.includeInSynthesis !== undefined && (
             <button className="link" disabled={f.saving} onClick={() => void f.setIncludeInSynthesis(x.id, null)}>
@@ -42,7 +50,7 @@ export function Findings({ wsId }: { wsId: string }) {
             </button>
           )}
           {x.status !== 'verified' && x.lastReview && <LastReviewNote review={x.lastReview} />}
-          <CriteriaRatings workspaceId={wsId} targetType="finding" targetId={x.id} criteria={x.criteria} />
+          <CriteriaRatings workspaceId={wsId} targetType="finding" targetId={x.id} criteria={x.criteria} only={findingCriteriaKeys(x.criteria)} />
           <EvidenceList ids={x.evidence} />
         </div>
       ))}
@@ -64,26 +72,5 @@ function SymptomList({ wsId, title, items }: { wsId: string; title: string; item
         </div>
       ))}
     </section>
-  );
-}
-
-/** Last reviewer verdict on an unverified finding's task (spec §7.2). */
-function LastReviewNote({ review }: { review: LastReview }) {
-  return (
-    <div className="review-note">
-      <span className="muted">Last review score</span> <b>{review.score}/10</b>
-      {review.synthetic && <span className="muted"> (reviewer run failed; recorded by the harness)</span>}
-      {review.issues.length > 0 ? (
-        <ul className="small">
-          {review.issues.map((i, n) => (
-            <li key={i.id ?? n}>
-              {i.class && <span className="tag">{i.class}</span>} {i.description}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <span className="muted"> (no issues listed)</span>
-      )}
-    </div>
   );
 }

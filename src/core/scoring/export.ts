@@ -1,14 +1,22 @@
+import { artifactIdsIn } from '../harness/tools/handlers.js';
 import type { Store } from '../store/db.js';
 import type { Decision, Rating } from '../types.js';
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
-const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId'] as const;
+const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
 
 /** The primary subject id a (non-persona_feedback) decision judges, if its payload names one. */
 function primarySubject(d: Decision): string | undefined {
   const p = (d.payload ?? {}) as Record<string, unknown>;
   for (const k of PRIMARY_KEYS) if (typeof p[k] === 'string') return p[k] as string;
   return undefined;
+}
+
+/** Whether `id` is a finding, recommendation or persona superseded in a later review round. */
+function isSuperseded(store: Store, id: string | undefined): boolean {
+  if (!id) return false;
+  const item = store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id);
+  return item?.status === 'superseded';
 }
 
 /**
@@ -48,18 +56,47 @@ function evidenceOf(store: Store, id: string): string[] {
   if (p) return Object.values(p.profile ?? {}).flatMap((x) => x.evidence ?? []);
   const r = store.recommendations.get(id);
   if (r) return r.findingIds.flatMap((fid) => store.findings.get(fid)?.evidence ?? []);
+  const c = store.competitors.get(id);
+  if (c) return c.evidence;
+  const h = store.symptomHypotheses.get(id);
+  if (h) return h.evidence.flatMap((e) => store.findings.get(e)?.evidence ?? [e]);
   return [];
 }
 
 /**
- * A decision's refs expanded by the evidence the referenced items cite (finding / symptom / persona
- * evidence; recommendation → its findings → their evidence), so a decision about an item backed by
- * an internal upload counts as upload-linked.
+ * Everything a task's outputs rest on: its findings' evidence, artifact ids cited in its
+ * deliverable (`result`) or brief. Empty for a non-task id.
+ */
+function taskEvidence(store: Store, id: string): string[] {
+  const task = store.tasks.get(id);
+  if (!task) return [];
+  const out = new Set<string>(artifactIdsIn(task.result));
+  for (const a of artifactIdsIn(task.brief)) out.add(a);
+  for (const f of store.findings.list({ taskId: task.id })) for (const e of f.evidence) out.add(e);
+  return [...out];
+}
+
+const ITEM_ID = /\b(?:art|fnd|sym|rec|per|tsk|cmp|hyp)_[0-9A-Z]{26}\b/g;
+
+/**
+ * A decision's provenance: its refs and every item id in its payload (artifact / finding /
+ * task ids an agent wrote, recorded `provenance`), expanded by the evidence the referenced items
+ * cite (finding / symptom / persona evidence; recommendation → its findings → their evidence) and
+ * by task outputs (a referenced task, and the task of the decision's own run: its findings,
+ * deliverable and brief). So a decision whose result was derived from an internal upload counts as
+ * upload-linked even when the upload id appears only in the task's outputs.
  */
 function expandedRefs(store: Store, d: Decision): string[] {
   const out = new Set(d.refs);
   const subject = primarySubject(d);
-  for (const id of subject ? [...d.refs, subject] : d.refs) for (const e of evidenceOf(store, id)) out.add(e);
+  if (subject) out.add(subject);
+  for (const m of JSON.stringify(d.payload ?? null).matchAll(ITEM_ID)) out.add(m[0]);
+  const runTask = store.agentRuns.get(d.agentRunId)?.taskId;
+  if (runTask) out.add(runTask);
+  for (const id of [...out]) {
+    for (const e of evidenceOf(store, id)) out.add(e);
+    for (const e of taskEvidence(store, id)) out.add(e);
+  }
   return [...out];
 }
 
@@ -88,7 +125,8 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  *   of the subject (`judgmentFor`);
  * - any other decision joins ratings of its refs.
  * Decisions referencing an internal upload — directly or via the evidence of a referenced item
- * (`expandedRefs`) — are excluded unless `includeUploads`.
+ * (`expandedRefs`) — are excluded unless `includeUploads`. Decisions whose primary subject was
+ * superseded (replaced in a later review round) are excluded.
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   const { store } = deps;
@@ -106,6 +144,7 @@ export function exportTrainingData(workspaceId: string, deps: { store: Store }, 
   const lines: string[] = [];
   for (const decision of decisions) {
     if (uploads && expandedRefs(store, decision).some((id) => uploads.has(id))) continue;
+    if (isSuperseded(store, primarySubject(decision))) continue;
     const self = (r: Rating) => r.targetType === 'decision' && r.targetId === decision.id;
     let joined: Rating[];
     if (decision.kind === 'persona_feedback') {

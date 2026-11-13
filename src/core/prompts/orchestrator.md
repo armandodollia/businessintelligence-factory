@@ -7,7 +7,9 @@ Each task has:
 - `type`: one of the allowed task types for this phase.
 - `brief`: what to research and the exact deliverable shape.
 - `subject`: the company or product, when relevant.
-- `model`: one of the allowed models.
+- `model` (optional): omit it to use the configured default for the task type (listed in your
+  context). Set it to one of the allowed models only to override that default for a reason; overrides
+  are recorded as such.
 - `needs_browser`: true only if the task must browse interactively.
 - `acceptance_criteria`: concrete, checkable statements a reviewer will verify.
 

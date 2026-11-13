@@ -11,13 +11,7 @@ import { createWorkspace } from '../../src/core/workspace/tree.js';
 import { researchSetup, tick } from '../core/helpers/research.js';
 
 const opened: Store[] = [];
-let calibration: string;
-beforeEach(() => {
-  calibration = mkdtempSync(join(tmpdir(), 'bif-calib-'));
-  process.env.BIF_CALIBRATION_DIR = calibration;
-});
 afterEach(() => {
-  delete process.env.BIF_CALIBRATION_DIR;
   for (const s of opened.splice(0)) s.close();
 });
 
@@ -240,10 +234,12 @@ describe('ratings and review', () => {
     const p = await t.json('POST', `/api/workspaces/${t.ws.id}/calibration/prompt-patch`, { role: 'synthesizer' });
     expect(p.status).toBe(200);
     expect(p.body.patchText).toContain('Calibration examples');
-    expect(existsSync(join(calibration, 'synthesizer.md'))).toBe(false);
+    const file = join(t.dir, t.ws.id, 'calibration', 'synthesizer.md');
+    expect(existsSync(file)).toBe(false);
     const a = await t.json('POST', `/api/workspaces/${t.ws.id}/calibration/prompt-patch/apply`, p.body);
     expect(a.status).toBe(200);
-    expect(readFileSync(join(calibration, 'synthesizer.md'), 'utf8')).toBe(p.body.patchText);
+    expect(a.body.path).toBe(file);
+    expect(readFileSync(file, 'utf8')).toBe(p.body.patchText);
     const d = t.store.decisions.get(a.body.decisionId)!;
     expect(d.payload).toMatchObject({ actor: 'user', tool: 'apply_prompt_patch', role: 'synthesizer' });
     expect((await t.json('POST', `/api/workspaces/${t.ws.id}/calibration/prompt-patch`, { role: 'nobody' })).status).toBe(400);
@@ -361,6 +357,54 @@ describe('interview', () => {
     const g = await t.json('GET', `/api/workspaces/${t.ws.id}/interview`);
     expect(g.body.turns).toHaveLength(2);
     expect((await t.json('POST', `/api/workspaces/${t.ws.id}/interview`, { text: '  ' })).status).toBe(400);
+  });
+
+  it('one turn at a time per workspace: a concurrent POST gets 409 (final review C7)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const t = setup({
+      interviewFake: async () => {
+        calls++;
+        await gate;
+        return 'Tell me more';
+      },
+    });
+    const other = createWorkspace(t.store, { name: 'Beta', sector: 'retail' });
+    const first = t.json('POST', `/api/workspaces/${t.ws.id}/interview`, { text: 'first' });
+    await tick();
+    const second = await t.json('POST', `/api/workspaces/${t.ws.id}/interview`, { text: 'second' });
+    expect(second.status).toBe(409);
+    expect(second.body.error).toMatch(/already in progress/);
+    // Only the first user turn was stored; another workspace is not blocked.
+    expect(t.store.interview.list({ workspaceId: t.ws.id }).map((x) => x.text)).toEqual(['first']);
+    const otherTurn = t.json('POST', `/api/workspaces/${other.id}/interview`, { text: 'hello' });
+    await tick();
+    release();
+    expect((await first).status).toBe(200);
+    expect((await otherTurn).status).toBe(200);
+    expect(calls).toBe(2);
+    // Lock released: the next turn goes through.
+    expect((await t.json('POST', `/api/workspaces/${t.ws.id}/interview`, { text: 'third' })).status).toBe(200);
+  });
+});
+
+describe('competitors & hypotheses', () => {
+  it('GET competitors returns rated competitors with their criteria; GET hypotheses lists drill-down hypotheses', async () => {
+    const t = setup();
+    t.store.competitors.insert({
+      id: 'cmp_1', workspaceId: t.ws.id, name: 'Globex', threat: 4, directness: 3, comparison: { pricing: 2, onboarding: 5, ux: 4, features: 3 },
+      evidence: [], createdAt: 'now', updatedAt: 'now',
+    });
+    const r = await t.json('GET', `/api/workspaces/${t.ws.id}/competitors`);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual([
+      expect.objectContaining({ id: 'cmp_1', name: 'Globex', criteria: { threat: 4, directness: 3, pricing: 2, onboarding: 5, ux: 4, features: 3 } }),
+    ]);
+    t.store.symptomHypotheses.insert({ id: 'hyp_1', workspaceId: t.ws.id, symptomId: 'sym_1', hypothesis: 'h', confidence: 50, evidence: [], createdAt: 'now' });
+    expect((await t.json('GET', `/api/workspaces/${t.ws.id}/hypotheses`)).body).toHaveLength(1);
+    const q = await t.json('GET', `/api/workspaces/${t.ws.id}/review-queue`);
+    expect(q.body.find((i: { targetType: string }) => i.targetType === 'competitor')).toMatchObject({ targetId: 'cmp_1' });
   });
 });
 

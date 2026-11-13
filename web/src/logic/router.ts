@@ -7,6 +7,7 @@ export const WORKSPACE_PAGES = [
   { page: 'personas', label: 'Audience & Personas' },
   { page: 'research', label: 'Research' },
   { page: 'findings', label: 'Findings & Evidence' },
+  { page: 'competitors', label: 'Competitors' },
   { page: 'strategy', label: 'Strategy' },
   { page: 'review', label: 'Review queue' },
   { page: 'decisions', label: 'Decision log' },

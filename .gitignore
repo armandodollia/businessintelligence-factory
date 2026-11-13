@@ -5,3 +5,4 @@ dist/
 *.tsbuildinfo
 bif.config.json
 .claude/worktrees/
+src/core/prompts/calibration/*.md

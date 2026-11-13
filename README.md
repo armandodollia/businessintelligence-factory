@@ -114,7 +114,8 @@ It stays logged into the throwaway accounts the agents create.
 Environment overrides for `npm start`: `BIF_CONFIG` (config path), `BIF_DATA_DIR`, `PORT`.
 
 The server binds to 127.0.0.1 only and has no authentication. While it runs, it resumes interrupted
-work on start and runs scheduled jobs (missed runs execute once on the next start).
+work on start (an interrupted pipeline continues its current and remaining phases, and a scheduled one
+then records "what changed") and runs scheduled jobs (missed runs execute once on the next start).
 
 ## Concepts
 
@@ -130,14 +131,24 @@ work on start and runs scheduled jobs (missed runs execute once on the next star
   severity/trend/confidence. Uploads (CSV, PDFs, decks) are optional evidence.
 - **Phases.** `mapping` (optional) → `market_research` → `competitor_discovery` → `deep_dives` →
   `synthesis` → `persona_panel` → `scoring`. Each research phase is a fresh orchestrator run that
-  proposes tasks; the program validates them against the config limits and runs the workers.
+  proposes tasks; the program validates them against the config limits and runs the workers. A task
+  without a `model` uses the configured default for its type (`roles.workers.<type>`, else
+  `roles.workers.default`; recommendation synthesis uses `roles.synthesizer`); explicit overrides are
+  recorded as such in the task-proposal decision.
 - **Review loop.** Every worker result goes to a new reviewer run with minimal context, which scores
   it 0–10 and lists issues (`blocking | substantive | nit | scope_expansion`). Score ≥ `passThreshold`
   (default 8) → *verified*. Otherwise the worker fixes or pushes back (pushback on nits and scope
   expansion is expected and logged) and resubmits, up to `maxRounds` (default 3); then it stays
-  *unverified* and is flagged with that status. Only verified findings feed recommendation
-  synthesis; on the Findings page you can include an unverified finding (or exclude a verified
-  one) with the "Use in recommendations" toggle.
+  *unverified* and is flagged with that status. The task's findings, recommendations and personas
+  take its final status (*verified*, *unverified* or *failed*); outputs from an earlier round that the
+  final revision neither re-saved nor cited by id are *superseded* and never used (e.g. a "$10"
+  finding corrected to "$20"). The reviewer sees the content of the submitted outputs and their
+  evidence ids. Only verified findings feed recommendation synthesis (from any node of the same
+  business tree); on the Findings page you can include an unverified finding (or exclude a verified
+  one) with the "Use in recommendations" toggle. Likewise only verified recommendations and personas
+  go to the persona panel ("Use in persona panel" toggle on the Strategy and Personas pages);
+  Strategy flags unverified recommendations with the last reviewer's objections and hides failed
+  ones unless you include them.
 - **Evidence rule.** Every finding cites at least one stored artifact: screenshots per flow step,
   archived pages, documents or uploads. Recommendations cite findings, so the UI can trace
   recommendation → findings → artifacts.
@@ -167,12 +178,14 @@ Under `dataDir` (default `./data`, gitignored):
 |---|---|
 | `data/bif.db` | SQLite: workspaces, interview, tasks, runs, findings, decisions, ratings, schedules, ... |
 | `data/<workspaceId>/artifacts/` | screenshots, page snapshots, documents and uploads (content-addressed by sha256) |
-| `data/<workspaceId>/personas/<persona>.md` | compiled persona prompts |
+| `data/<workspaceId>/personas/<persona>.md` | compiled persona prompt (latest version; `<persona>.v<N>.md` keeps each version) |
 | `data/<workspaceId>/runs/<agentRunId>/` | per-run working directory (`cwd/`) and event log (`events.jsonl`) |
+| `data/<rootWorkspaceId>/calibration/<role>.md` | approved prompt calibration patches of one business tree |
 | `data/browser-profile/` | the research browser profile (`browser.profileDir`) |
 
-Approved prompt patches are written to `src/core/prompts/calibration/<role>.md`
-(override with `BIF_CALIBRATION_DIR`).
+Approved prompt patches are per business: they are merged (appended, deduplicated) into
+`data/<rootWorkspaceId>/calibration/<role>.md` of the workspace's tree root and only reach prompts
+of that business tree — another company's prompts never see them. Nothing is written under `src/`.
 
 ## Smoke test
 
