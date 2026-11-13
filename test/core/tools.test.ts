@@ -304,9 +304,16 @@ describe('tokens', () => {
     expect(tokens2.resolve(token)).toEqual(c);
     tokens2.revoke(token);
     expect(tokens2.resolve(token)).toBeNull();
+    // revocation persists: a fresh registry on a reopened store still rejects it while running
+    store2.close();
+    const store3 = openStore(dbPath);
+    opened.push(store3);
+    expect(store3.agentRuns.get(c.agentRunId)!.status).toBe('running');
+    expect(new TokenRegistry(store3).resolve(token)).toBeNull();
     // finished runs never resolve, even from a fresh registry
-    store2.agentRuns.update(c.agentRunId, { status: 'done' });
-    expect(new TokenRegistry(store2).resolve(token)).toBeNull();
+    const t2 = new TokenRegistry(store3).issue({ ...c, agentRunId: newId('arun') });
+    store3.agentRuns.update(store3.agentRuns.list({ token: t2 })[0]!.id, { status: 'done' });
+    expect(new TokenRegistry(store3).resolve(t2)).toBeNull();
   });
 });
 
@@ -388,5 +395,34 @@ describe('mcp server', () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe('persona feedback scores', () => {
+  it('are 1–5 (spec §8b): 0 and 6 rejected, 1 and 5 accepted', async () => {
+    const { handle } = setup({ extraHandlers: { submit_persona_feedback: async () => ({ ok: true, data: {} }) } });
+    const input = (v: number) => ({
+      recommendation_id: 'rec_1',
+      scores: { appeal: v, adoption: 3, willingness_to_pay: 3, friction: 3 },
+      concerns: [], reasoning: 'r', would_change_mind: 'w',
+    });
+    const c = ctx('persona');
+    expect((await handle(c, 'submit_persona_feedback', input(0))).ok).toBe(false);
+    expect((await handle(c, 'submit_persona_feedback', input(6))).ok).toBe(false);
+    expect((await handle(c, 'submit_persona_feedback', input(1))).ok).toBe(true);
+    expect((await handle(c, 'submit_persona_feedback', input(5))).ok).toBe(true);
+    const friction6 = { ...input(3), scores: { appeal: 3, adoption: 3, willingness_to_pay: 3, friction: 6 } };
+    expect((await handle(c, 'submit_persona_feedback', friction6)).ok).toBe(false);
+  });
+});
+
+describe('user request insert failure', () => {
+  it('tears down the registered waiter', async () => {
+    const s = setup();
+    const before = (s.events as unknown as { listeners: Set<unknown> }).listeners.size;
+    s.store.close(); // makes the insert throw
+    const r = await s.handle(ctx('worker'), 'request_user_action', { kind: 'other', site: 's', instructions: 'i' });
+    expect(r.ok).toBe(false);
+    expect((s.events as unknown as { listeners: Set<unknown> }).listeners.size).toBe(before);
   });
 });

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // Scripted stand-in for an agent CLI. The script is the JSON prompt (the arg after `-p`):
 // { lines?: string[], delayMs?: number, exitCode?: number, sleepForever?: boolean,
-//   ignoreSigterm?: boolean, counterFile?: string, attempts?: Array<{ lines, exitCode }> }
+//   ignoreSigterm?: boolean, counterFile?: string, attempts?: Array<{ lines, exitCode }>,
+//   stubbornChild?: boolean }
+// `stubbornChild` spawns a grandchild that ignores SIGTERM and writes its pid to child.pid.
 // With `counterFile`, invocation N (1-based) uses attempts[N-1] (last one repeats).
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
@@ -16,6 +19,13 @@ if (script.counterFile) {
   plan = { ...script, ...script.attempts[Math.min(n, script.attempts.length) - 1] };
 }
 if (plan.ignoreSigterm) process.on('SIGTERM', () => {});
+if (plan.stubbornChild) {
+  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30);"], {
+    stdio: 'ignore',
+  });
+  writeFileSync('child.pid', String(child.pid));
+  await new Promise((r) => setTimeout(r, 200)); // let the grandchild install its handler
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 for (const line of plan.lines ?? []) {

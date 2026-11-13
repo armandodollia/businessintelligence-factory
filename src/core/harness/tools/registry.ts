@@ -134,11 +134,12 @@ export const toolInputSchemas = {
   }),
   submit_persona_feedback: z.object({
     recommendation_id: id,
+    /** Spec §8b: each score is on a 1–5 scale. */
     scores: z.object({
-      appeal: z.number().min(0).max(10),
-      adoption: z.number().min(0).max(10),
-      willingness_to_pay: z.number().min(0).max(10),
-      friction: z.number().min(0).max(10),
+      appeal: z.number().min(1).max(5),
+      adoption: z.number().min(1).max(5),
+      willingness_to_pay: z.number().min(1).max(5),
+      friction: z.number().min(1).max(5),
     }),
     concerns: z.array(z.string()),
     reasoning: z.string().min(1),

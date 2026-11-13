@@ -77,7 +77,8 @@ describe('Supervisor', () => {
 
     const cwd = join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd');
     const mcp = JSON.parse(readFileSync(join(cwd, '.bif-mcp.json'), 'utf8'));
-    expect(mcp.mcpServers.bif.url).toBe(`http://127.0.0.1:4317/mcp/${run.token}`);
+    expect(run.token.startsWith('revoked:')).toBe(true); // revocation persisted
+    expect(mcp.mcpServers.bif.url).toBe(`http://127.0.0.1:4317/mcp/${run.token.slice('revoked:'.length)}`);
     expect(mcp.mcpServers.playwright).toBeDefined();
     const argv = JSON.parse(readFileSync(join(cwd, 'argv.json'), 'utf8')) as string[];
     expect(argv).toContain('--strict-mcp-config');
@@ -238,5 +239,86 @@ describe('Supervisor', () => {
     const res = await sup.run(cli({ lines: [] }));
     expect(res.status).toBe('failed');
     expect(res.events.some((e) => e.t === 'error')).toBe(true);
+  });
+});
+
+describe('Supervisor fix round 1', () => {
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it('internal error after token issue → failed run, revoked token, no zombie', async () => {
+    const { dir, store, config, tokens, events, seen } = setup();
+    const sup = new Supervisor({ store, config, tokens, events, dataDir: dir, mcpBaseUrl: 'http://x' }); // no handle
+    const res = await sup.run({ ctx: baseCtx, prompt: 'p', systemPrompt: 's', needsBrowser: false, fake: async () => {} });
+    expect(res).toMatchObject({ status: 'failed', exitCode: 1, reason: expect.stringMatching(/supervisor error/) });
+    expect(res.events.slice(-2)).toEqual([
+      { t: 'error', message: expect.stringMatching(/deps.handle/), rateLimited: false },
+      { t: 'done', exitCode: 1 },
+    ]);
+    const run = store.agentRuns.get(res.agentRunId)!;
+    expect(run.status).toBe('failed');
+    expect(tokens.resolve(run.token)).toBeNull();
+    expect(new TokenRegistry(store).resolve(run.token)).toBeNull();
+    expect(seen).toContainEqual(expect.objectContaining({ type: 'run_status', status: 'failed', agentRunId: res.agentRunId }));
+    expect(store.agentRuns.list({ status: 'running' })).toHaveLength(0);
+  });
+
+  it('cancel while queued → run never starts', async () => {
+    const { store, sup } = setup((c) => (c.limits.maxParallelWorkers = 1));
+    let release!: () => void;
+    const blocker = sup.run({
+      ctx: baseCtx, prompt: 'p', systemPrompt: 's', needsBrowser: false,
+      fake: () => new Promise<void>((r) => (release = r)),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const ac = new AbortController();
+    let started = false;
+    const queued = sup.run({
+      ctx: baseCtx, prompt: 'p', systemPrompt: 's', needsBrowser: false, signal: ac.signal,
+      fake: async () => {
+        started = true;
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    await expect(queued).rejects.toThrow(/abort|cancel/i);
+    release();
+    await blocker;
+    expect(started).toBe(false);
+    expect(store.agentRuns.list()).toHaveLength(1);
+
+    // already-aborted signal: CLI mode never spawns either
+    const pre = new AbortController();
+    pre.abort();
+    await expect(sup.run(cli({ lines: [] }, { signal: pre.signal }))).rejects.toThrow(/abort|cancel/i);
+    await expect(
+      sup.run({ ctx: { ...baseCtx, role: 'orchestrator' }, prompt: 'p', systemPrompt: 's', needsBrowser: false, signal: pre.signal, fake: async () => {} }),
+    ).rejects.toThrow(/abort|cancel/i);
+    expect(store.agentRuns.list()).toHaveLength(1);
+  });
+
+  it('SIGKILLs the process group after the grace period even if the CLI exits on SIGTERM', async () => {
+    const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = 300));
+    const res = await sup.run(cli({ lines: [CLAUDE_FIXTURE[0]!], sleepForever: true, stubbornChild: true }));
+    expect(res).toMatchObject({ status: 'failed', reason: expect.stringMatching(/idle/) });
+    const childPid = Number(readFileSync(join(dir, 'ws_a', 'runs', res.agentRunId, 'cwd', 'child.pid'), 'utf8'));
+    expect(alive(childPid)).toBe(true); // parent died on SIGTERM; grandchild ignored it
+    await new Promise((r) => setTimeout(r, 400)); // killGraceMs is 150
+    expect(alive(childPid)).toBe(false);
+  });
+
+  it('idle-killed runs are not rate-limit retried', async () => {
+    const { dir, sup } = setup((c) => (c.limits.idleTimeoutMs = 200));
+    const counterFile = join(dir, 'count');
+    const rejected = JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected' } });
+    const res = await sup.run(cli({ counterFile, attempts: [{ lines: [rejected], sleepForever: true }] }));
+    expect(res).toMatchObject({ status: 'failed', attempts: 1, reason: expect.stringMatching(/idle/) });
+    expect(readFileSync(counterFile, 'utf8')).toBe('1');
   });
 });

@@ -3,11 +3,11 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { BifConfig } from '../config/schema.js';
-import type { EventBus } from '../events.js';
+import { AbortError, type EventBus } from '../events.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { AgentRun, Role } from '../types.js';
-import type { FakeScript, RunEvent, ToolClient } from './adapter.js';
+import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
 import { Semaphore } from './semaphore.js';
 import type { RunContext, TokenRegistry } from './tokens.js';
@@ -43,7 +43,10 @@ export type RunOptions = {
   needsBrowser: boolean;
   /** Run in-process with this script instead of spawning the provider CLI. */
   fake?: FakeScript;
-  /** Aborting kills the run (status `failed`). */
+  /**
+   * Aborting kills a started run (status `failed`). If it aborts before the run starts (e.g.
+   * while queued on a semaphore), the run never starts and `run()` rejects with `AbortError`.
+   */
   signal?: AbortSignal;
 };
 
@@ -101,14 +104,19 @@ export class Supervisor {
     this.killGraceMs = deps.killGraceMs ?? 5000;
   }
 
+  /**
+   * Runs one agent. Resolves (never rejects) once a run has started, with `failed` on any error.
+   * Rejects only before start: `AbortError` when cancelled while queued, or a config error.
+   */
   async run(opts: RunOptions): Promise<RunOutcome> {
     if (opts.needsBrowser && !this.browsers) {
       throw new Error('this run needs a browser but limits.maxBrowserRuns is 0');
     }
     const releases: Array<() => void> = [];
     try {
-      if (LIMITED_ROLES.has(opts.ctx.role)) releases.push(await this.workers.acquire());
-      if (opts.needsBrowser) releases.push(await this.browsers!.acquire());
+      if (LIMITED_ROLES.has(opts.ctx.role)) releases.push(await this.workers.acquire(opts.signal));
+      if (opts.needsBrowser) releases.push(await this.browsers!.acquire(opts.signal));
+      if (opts.signal?.aborted) throw new AbortError('run cancelled before start');
       return await this.execute(opts);
     } finally {
       for (const r of releases.reverse()) r();
@@ -119,13 +127,57 @@ export class Supervisor {
     const { store, events, tokens, dataDir } = this.deps;
     const ctx: RunContext = { ...opts.ctx, agentRunId: newId('arun') };
     const token = tokens.issue(ctx);
+    const all: RunEvent[] = [];
+    let attempt = 0;
+    try {
+      return await this.executeIssued(ctx, token, opts, all, (n) => (attempt = n));
+    } catch (err) {
+      // Never leave a zombie run: record the failure and close the run out.
+      const message = `supervisor error: ${(err as Error).message}`;
+      const closing: RunEvent[] = [
+        { t: 'error', message, rateLimited: false },
+        { t: 'done', exitCode: 1 },
+      ];
+      for (const e of closing) {
+        all.push(e);
+        try {
+          const path = join(dataDir, ctx.workspaceId, 'runs', ctx.agentRunId, 'events.jsonl');
+          mkdirSync(dirname(path), { recursive: true });
+          appendFileSync(path, JSON.stringify(e) + '\n');
+        } catch {
+          // best effort
+        }
+        const bus: Parameters<EventBus['emit']>[0] = {
+          type: 'run_event', workspaceId: ctx.workspaceId, agentRunId: ctx.agentRunId, event: e,
+        };
+        if (ctx.taskId !== undefined) bus.taskId = ctx.taskId;
+        events.emit(bus);
+      }
+      tokens.revoke(token);
+      try {
+        store.agentRuns.update(ctx.agentRunId, { status: 'failed', exitCode: 1, endedAt: new Date().toISOString() });
+      } catch {
+        // store unavailable; the bus event below still reports the failure
+      }
+      this.emitStatus(ctx, 'failed', 1, message);
+      return { agentRunId: ctx.agentRunId, exitCode: 1, events: all, status: 'failed', reason: message, attempts: Math.max(attempt, 1) };
+    }
+  }
+
+  private async executeIssued(
+    ctx: RunContext,
+    token: string,
+    opts: RunOptions,
+    all: RunEvent[],
+    setAttempt: (n: number) => void,
+  ): Promise<RunOutcome> {
+    const { store, events, tokens, dataDir } = this.deps;
     const runDir = join(dataDir, ctx.workspaceId, 'runs', ctx.agentRunId);
     const cwd = join(runDir, 'cwd');
     mkdirSync(cwd, { recursive: true });
     const eventsPath = join(runDir, 'events.jsonl');
     writeFileSync(eventsPath, '');
 
-    const all: RunEvent[] = [];
     const record = (e: RunEvent) => {
       all.push(e);
       appendFileSync(eventsPath, JSON.stringify(e) + '\n');
@@ -144,10 +196,12 @@ export class Supervisor {
     let result: AttemptResult;
     for (;;) {
       attempt++;
+      setAttempt(attempt);
       result = opts.fake
         ? await this.attemptFake(ctx, opts, record)
         : await this.attemptCli(ctx, token, cwd, runDir, opts, record);
-      if (!result.rateLimited || result.exitCode === 0 || opts.signal?.aborted) break;
+      // Runs killed by the watchdog or an abort (result.reason set) are never retried.
+      if (!result.rateLimited || result.exitCode === 0 || result.reason || opts.signal?.aborted) break;
       if (attempt >= this.backoff.maxAttempts) {
         result.reason = `rate limited; gave up after ${attempt} attempts`;
         break;
@@ -236,6 +290,7 @@ export class Supervisor {
     const dog = this.watchdog(ctx, () => stop(`idle timeout: no activity for ${this.deps.config.limits.idleTimeoutMs} ms`));
     const onAbort = () => stop('aborted');
     opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts.signal?.aborted) onAbort();
 
     const client: ToolClient = {
       call: async (name, input) => {
@@ -333,22 +388,29 @@ export class Supervisor {
           // already gone
         }
       };
+      // SIGTERM the whole group, then SIGKILL it after the grace period no matter what — even if
+      // the CLI itself already exited — so descendants that ignore SIGTERM die too.
+      const terminateGroup = () => {
+        signalGroup('SIGTERM');
+        if (killTimer) return;
+        killTimer = setTimeout(() => signalGroup('SIGKILL'), this.killGraceMs);
+        killTimer.unref();
+      };
       const kill = (why: string) => {
         if (reason || settled) return;
         reason = why;
-        signalGroup('SIGTERM');
-        killTimer = setTimeout(() => signalGroup('SIGKILL'), this.killGraceMs);
+        terminateGroup();
       };
 
       const dog = this.watchdog(ctx, () => kill(`idle timeout: no output for ${config.limits.idleTimeoutMs} ms`));
       const onAbort = () => kill('aborted');
       opts.signal?.addEventListener('abort', onAbort, { once: true });
+      if (opts.signal?.aborted) onAbort();
 
       const finish = (exitCode: number, extraError?: string) => {
         if (settled) return;
         settled = true;
         dog.stop();
-        if (killTimer) clearTimeout(killTimer);
         opts.signal?.removeEventListener('abort', onAbort);
         if (extraError) emit({ t: 'error', message: extraError, rateLimited: false });
         if (reason) emit({ t: 'error', message: reason, rateLimited: false });
@@ -377,7 +439,7 @@ export class Supervisor {
         dog.touch();
         appendFileSync(stderrLog, line + '\n');
         // stderr is never JSON events; only scan it for rate-limit text.
-        if (/rate[ _-]?limit|\b429\b|usage limit|too many requests/i.test(line)) {
+        if (isRateLimitText(line)) {
           emit({ t: 'error', message: line.slice(0, 2000), rateLimited: true });
         }
       });
@@ -397,7 +459,7 @@ export class Supervisor {
       child.on('exit', (code, signal) => {
         exitInfo = { code, signal };
         // Kill leftovers in the group (e.g. MCP servers the CLI started).
-        signalGroup('SIGTERM');
+        terminateGroup();
         maybeFinish();
         // stdout may be held open by a grandchild; don't wait on it forever.
         setTimeout(() => {

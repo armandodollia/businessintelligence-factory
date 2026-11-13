@@ -115,8 +115,11 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
   ): Promise<ToolResult> {
     if (opts.signal?.aborted) return fail('call cancelled');
     const id = newId('ureq');
-    // Register the waiter before the row exists so a fast resolve cannot be missed.
-    const waiter = events.waitFor((e) => e.type === 'user_request_resolved' && e.request.id === id, opts.signal);
+    // Register the waiter before the row exists so a fast resolve cannot be missed. `local`
+    // tears the waiter down if the insert fails.
+    const local = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([opts.signal, local.signal]) : local.signal;
+    const waiter = events.waitFor((e) => e.type === 'user_request_resolved' && e.request.id === id, signal);
     waiter.catch(() => {});
     const request: UserRequest = {
       id,
@@ -131,10 +134,15 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     };
     const task = taskOf(ctx);
     const prevStatus = task?.status;
-    store.transaction(() => {
-      store.userRequests.insert(request);
-      if (task && task.status !== 'waiting_user') store.tasks.update(task.id, { status: 'waiting_user' });
-    });
+    try {
+      store.transaction(() => {
+        store.userRequests.insert(request);
+        if (task && task.status !== 'waiting_user') store.tasks.update(task.id, { status: 'waiting_user' });
+      });
+    } catch (err) {
+      local.abort();
+      throw err;
+    }
     events.emit({ type: 'user_request', workspaceId: ctx.workspaceId, request });
     try {
       const e = await waiter;

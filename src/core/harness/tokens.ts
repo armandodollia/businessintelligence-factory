@@ -51,7 +51,7 @@ export class TokenRegistry {
 
   /** The run's context, or null for unknown / revoked tokens and runs no longer `running`. */
   resolve(token: string): RunContext | null {
-    if (!token || this.revoked.has(token)) return null;
+    if (!token || token.startsWith('revoked:') || this.revoked.has(token)) return null;
     const run = this.store.agentRuns.list({ token })[0];
     if (!run || run.status !== 'running') return null;
     const cached = this.live.get(token);
@@ -68,8 +68,15 @@ export class TokenRegistry {
     return { ...ctx };
   }
 
+  /**
+   * Revokes the token for good: the AgentRun row's token is rewritten to `revoked:<token>`, so a
+   * fresh registry (e.g. after a restart) cannot resolve it even if the run is still `running`.
+   */
   revoke(token: string): void {
     this.live.delete(token);
     this.revoked.add(token);
+    if (!token || token.startsWith('revoked:')) return;
+    const run = this.store.agentRuns.list({ token })[0];
+    if (run) this.store.agentRuns.update(run.id, { token: `revoked:${token}` });
   }
 }
