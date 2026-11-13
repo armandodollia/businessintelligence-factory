@@ -592,3 +592,37 @@ Smaller decisions taken while building KS-0 (none changes §3, §9 or §12).
 - **Upload authority:** `scoring/export.ts` exports `internalUploadIds` and
   `evidenceIncludesUpload` (delimited block); the backfill and the tests use them, so the flag
   and the export's expansion agree by construction.
+
+## Design-thread rulings after KS-0 (2026-11-13)
+
+Binding for the packages named; recorded by the orchestrator from the design thread.
+
+- **§12 upload flag (KS-2):** a confirm citing an upload sets `upload_derived` at
+  record time even if the task later fails; the flag never resets (no reset path in
+  v1). KS-2 also records *why* the flag was set (the causing observation or evidence
+  id) so the UI and the export report can explain an exclusion.
+- **`similarityFloor` (KS-2):** bm25 is unbounded and corpus-dependent, so it only
+  selects the top candidates. The 0.5 floor applies to a bounded measure on
+  normalized claims (token-set overlap / Jaccard is enough); document the measure
+  next to the config key.
+- **KS-1 (from KS-1a notes):**
+  - Class-hidden HTML is an accepted known limit; the fence plus the
+    "evidence is untrusted" prompt rule must hold on every path that serves text,
+    search snippets included.
+  - Identity-secret redaction and fence-marker stripping happen at index/serve time.
+  - `artifact_texts.error` is derived text: carries the artifact's `upload_derived`
+    flag, is returned only through the artifact's own scope checks, and is
+    length-capped when served.
+  - A `too_large` artifact with partial blocks is indexed; `expand` and
+    `read_artifact` say the document was cut at the cap.
+- **Wave-1 hooks:**
+  1. `FEEDBACK_KINDS` / `FeedbackTargetType` (`src/core/feedback/events.ts`) gain kinds
+     `entity_merge`, `entity_rename`, `fact_scope_change`, `fact_retract`,
+     `fact_replacement_accept`, `artifact_prune` and target types `entity`,
+     `artifact` (facts use `finding`). Code only, no migration (no CHECK on kind).
+     Added by whichever of KS-2/KS-3/KS-7 first needs them.
+  2. KS-7 human actions go through `src/core/feedback/actions.ts` from the start
+     (supersedes the "record a system decision until KS-6" wording above).
+  3. `promptStoreGaps` (`src/core/prompts/store.ts`) lists columns by hand: KS-4 adds
+     `retrieval_events.prompt_version`; KS-5 ensures `prompt_context` retrieval rows
+     carry the same prompt hash the run records.
