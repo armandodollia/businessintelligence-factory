@@ -5,6 +5,7 @@ import { AbortError } from '../events.js';
 import type { RunOutcome } from '../harness/supervisor.js';
 import { getRunOutputs, type ReviewIssue } from '../harness/tools/handlers.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
+import { calibrationScope } from '../scoring/calibration.js';
 import type { Role, Task, TaskType } from '../types.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
@@ -140,7 +141,7 @@ async function workerStep(
   const { store, config } = deps;
   const initial = store.tasks.get(taskId)!;
   const role = roleForTask(initial);
-  const system = workerSystemPrompt(config, role, initial.needsBrowser, initial.type);
+  const system = workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config.dataDir, initial.workspaceId));
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
@@ -194,7 +195,7 @@ async function reviewStep(
 ): Promise<{ valid: boolean; score: number; issues: ReviewIssue[] }> {
   const { store, config } = deps;
   const task = store.tasks.get(taskId)!;
-  const system = reviewerSystemPrompt(config);
+  const system = reviewerSystemPrompt(config, calibrationScope(store, config.dataDir, task.workspaceId));
   const version = promptVersion(system);
   const model = reviewerFor(task.model, config);
   const res = await runAgent(deps, {

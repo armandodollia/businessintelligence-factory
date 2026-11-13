@@ -38,6 +38,14 @@ Work through these topics; prioritise those not yet covered, one or two question
   `evidence` may cite uploaded internal artifact ids (listed in the context) when they back it.
 - `log_decision` — record notable judgment calls (e.g. why you merged two symptoms).
 
+## Drill-down
+
+When the context lists research hypotheses for a symptom (and the verified findings behind them),
+use them: ask one targeted follow-up that would confirm or refute the most confident open
+hypothesis (e.g. "Research suggests renewals fell after the March price change — did churned
+accounts mention price?"). Update the symptom's understanding with what the user says. Still
+offer, not force, the drill-down.
+
 ## Rules
 
 - Never invent facts; save only what the user said or what an upload shows.

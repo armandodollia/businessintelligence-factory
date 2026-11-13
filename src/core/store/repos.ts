@@ -3,6 +3,7 @@ import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import type {
   AgentRun,
   Artifact,
+  Competitor,
   Decision,
   Finding,
   Identity,
@@ -14,6 +15,7 @@ import type {
   ResearchRun,
   Schedule,
   Symptom,
+  SymptomHypothesis,
   Task,
   UnitProposal,
   UserRequest,
@@ -333,6 +335,22 @@ export const specs = {
       createdAt: 'text',
     },
   } satisfies TableSpec<UnitProposal>,
+  competitors: {
+    table: 'competitors',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', name: 'text', site: 'text', threat: 'int', directness: 'int', comparison: 'json',
+      evidence: 'json', taskId: 'text', createdAt: 'text', updatedAt: 'text',
+    },
+  } satisfies TableSpec<Competitor>,
+  symptomHypotheses: {
+    table: 'symptom_hypotheses',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', symptomId: 'text', hypothesis: 'text', confidence: 'real', evidence: 'json',
+      taskId: 'text', createdAt: 'text',
+    },
+  } satisfies TableSpec<SymptomHypothesis>,
 } as const;
 
 export function createRepos(db: DatabaseSync) {
@@ -354,6 +372,8 @@ export function createRepos(db: DatabaseSync) {
     profiles: new Repo<Profile, 'workspaceId'>(db, specs.profiles),
     identities: new Repo<Identity, 'id'>(db, specs.identities),
     unitProposals: new Repo<UnitProposal, 'id'>(db, specs.unitProposals),
+    competitors: new Repo<Competitor, 'id'>(db, specs.competitors),
+    symptomHypotheses: new Repo<SymptomHypothesis, 'id'>(db, specs.symptomHypotheses),
   };
 }
 

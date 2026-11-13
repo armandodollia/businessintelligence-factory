@@ -1,3 +1,4 @@
+import { competitorValue } from '../market/competitors.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Rating, Role } from '../types.js';
@@ -23,7 +24,8 @@ const scalar = (v: unknown): number | string | null =>
  * title, and the agent role that produced the value. Undefined when the target does not exist.
  *
  * Target ids: persona_feedback = `<recommendationId>:<personaId>`; persona = persona id
- * (criterion = profile field, value = its confidence); decision = decision id.
+ * (criterion = profile field, value = its confidence); decision = decision id; competitor =
+ * competitor id (criterion = threat / directness / comparison area).
  */
 export function resolveTarget(
   store: Store,
@@ -71,12 +73,9 @@ export function resolveTarget(
       return { agentValue: scalar(p[criterion]), title: String(p.what ?? p.tool ?? d.kind), role: d.role };
     }
     case 'competitor': {
-      // No competitor table: a competitor exists when ≥ 1 finding has it as subject (targetId =
-      // subject). Value from the latest such finding carrying the criterion, else null.
-      const all = store.findings.list({ workspaceId, subject: targetId });
-      if (!all.length) return undefined;
-      const f = all.filter((x) => x.criteria[criterion] !== undefined).at(-1);
-      return { agentValue: f ? scalar(f.criteria[criterion]) : null, title: targetId, role: 'worker' };
+      // Competitors table (save_competitor, spec §9); target id = competitor id.
+      const c = own(store.competitors.get(targetId));
+      return c && { agentValue: competitorValue(c, criterion) ?? null, title: c.name, role: 'worker' };
     }
   }
 }

@@ -10,6 +10,7 @@ import type {
   PromptPatch,
   ScoringWeights,
   CalibrationReport,
+  CompetitorView,
   CreateWorkspaceInput,
   Decision,
   Finding,
@@ -122,6 +123,7 @@ export const api = {
   setFindingInclude: (id: string, include: boolean | null) => post<Finding>(`/api/findings/${enc(id)}/include`, { include }),
   listSymptoms: (id: string) => get<Symptom[]>(`${ws(id)}/symptoms`),
   listPersonas: (id: string) => get<PersonaNode[]>(`${ws(id)}/personas`),
+  listCompetitors: (id: string) => get<CompetitorView[]>(`${ws(id)}/competitors`),
   listRecommendations: (id: string) => get<Recommendation[]>(`${ws(id)}/recommendations`),
   listDecisions: (id: string, kind?: Decision['kind']) =>
     get<Decision[]>(`${ws(id)}/decisions${kind ? `?kind=${enc(kind)}` : ''}`),

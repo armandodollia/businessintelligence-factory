@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { ToolInput } from '../harness/tools/registry.js';
 import { loadPrompt, promptVersion, renderTemplate, withCalibration } from '../prompts/index.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type ResearchDeps } from '../research/deps.js';
+import { calibrationScope } from '../scoring/calibration.js';
 import { PERSONA_FEEDBACK_KEYS } from '../scoring/criteria.js';
 import type { Decision, Persona, PersonaFeedback, Recommendation } from '../types.js';
 import { scopeOf } from '../workspace/tree.js';
@@ -185,8 +186,8 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
 
   const jobs: Array<Promise<void>> = [];
   for (const persona of personas) {
-    // Approved persona calibration (calibration/persona.md) goes after every persona's agent.md.
-    const systemPrompt = withCalibration(agentMdOf(deps, persona), 'persona');
+    // This business's approved persona calibration (calibration/persona.md) goes after every persona's agent.md.
+    const systemPrompt = withCalibration(agentMdOf(deps, persona), 'persona', calibrationScope(store, config.dataDir, workspaceId));
     for (const rec of recs) jobs.push(one(rec, persona, systemPrompt));
   }
   const results = await Promise.allSettled(jobs);

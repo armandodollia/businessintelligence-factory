@@ -5,7 +5,9 @@ import type { ExtraToolHandler, ToolResult } from '../harness/tools/handlers.js'
 import { findReplay, titleKey } from '../harness/tools/idempotency.js';
 import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import { listUploads } from '../internal/uploads.js';
+import { drillDown } from './hypotheses.js';
 import { loadPrompt } from '../prompts/index.js';
+import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Criteria, Decision, InterviewTurn, Symptom, Workspace } from '../types.js';
@@ -95,6 +97,7 @@ export function buildInterviewPrompt(ws: Workspace, store: Store): string {
       ? symptoms.map((s) => `- [${s.kind}] ${s.title} — ${JSON.stringify(s.criteria)} (id ${s.id})`)
       : ['(none yet)']),
     '',
+    ...drillDownSection(store, ws.id, symptoms),
     '## Internal uploads (ids + titles; contents not included)',
     ...(uploads.length ? uploads.map((u) => `- ${u.id}: ${u.title}`) : ['(none)']),
     '',
@@ -104,6 +107,39 @@ export function buildInterviewPrompt(ws: Workspace, store: Store): string {
     'Reply to the latest user message with your next interviewer turn. Save what you learned with the tools first.',
   ];
   return lines.join('\n');
+}
+
+const MAX_VERIFIED_FINDINGS = 30;
+const clip = (s: string, n = 200) => (s.length > n ? `${s.slice(0, n)}…` : s);
+
+/**
+ * Drill-down context (spec §8): research hypotheses per symptom (with the verified findings they
+ * cite) and the titles of verified research findings, so the interviewer can ask targeted
+ * follow-ups. Empty when research produced neither.
+ */
+function drillDownSection(store: Store, workspaceId: string, symptoms: Symptom[]): string[] {
+  const byId = new Map(symptoms.map((s) => [s.id, s]));
+  const hyps = drillDown(store, workspaceId);
+  const verified = store.findings.list({ workspaceId, status: 'verified' });
+  const lines: string[] = [];
+  if (hyps.size) {
+    lines.push('## Research hypotheses per symptom (ask targeted follow-ups to confirm or refute them)');
+    for (const [symptomId, items] of hyps) {
+      const s = byId.get(symptomId);
+      lines.push(`- Symptom "${s?.title ?? symptomId}" (id ${symptomId}):`);
+      for (const { hypothesis: h, verifiedFindings } of items) {
+        lines.push(`  - Hypothesis (${h.confidence}% confidence): ${clip(h.hypothesis)}`);
+        for (const f of verifiedFindings) lines.push(`    - verified finding: ${f.subject}: ${clip(f.claim, 160)}`);
+      }
+    }
+    lines.push('');
+  }
+  if (verified.length) {
+    lines.push('## Verified research findings (titles)');
+    for (const f of verified.slice(-MAX_VERIFIED_FINDINGS)) lines.push(`- ${f.subject}: ${clip(f.claim, 160)}`);
+    lines.push('');
+  }
+  return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +162,7 @@ export async function sendInterviewMessage(workspaceId: string, text: string, de
   if (!text.trim()) throw new Error('interview message is empty');
   insertTurn(store, workspaceId, 'user', text);
 
-  const prompt = loadPrompt('interviewer');
+  const prompt = loadPrompt('interviewer', calibrationScope(store, config.dataDir, workspaceId));
   let fakeReply: string | undefined;
   const opts: RunOptions = {
     ctx: { workspaceId, role: 'interviewer', model: config.roles.interviewer, promptVersion: prompt.version },

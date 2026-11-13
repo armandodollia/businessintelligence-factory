@@ -57,12 +57,26 @@ function respond(path: string): unknown {
   if (path.endsWith('/interview')) return { turns: [], coverage: { basics: false } };
   if (path.endsWith('/rollup')) return { symptoms: [], recommendations: [], findings: [] };
   if (path.endsWith('/tree')) return [{ id: 'ws_1', name: 'Acme', sector: 'saas', createdAt: '' }];
-  if (path.endsWith('/calibration')) return { byCriterion: [] };
+  if (path.endsWith('/calibration')) {
+    return {
+      byCriterion: [],
+      byRoleTask: [{ role: 'worker', taskType: 'flow_walkthrough', targetType: 'competitor', criterion: 'pricing', n: 1, agreeRate: 0, meanDelta: 0.5 }],
+    };
+  }
+  if (path.endsWith('/competitors')) {
+    return [
+      {
+        id: 'cmp_1', workspaceId: 'ws_1', name: 'Globex', site: 'globex.com', threat: 4, directness: 5,
+        comparison: { pricing: 2, onboarding: 4, ux: 3, features: 5 }, evidence: [], createdAt: '', updatedAt: '',
+        criteria: { threat: 4, directness: 5, pricing: 2, onboarding: 4, ux: 3, features: 5 },
+      },
+    ];
+  }
   if (path === '/api/config') return { scoring: { personaWeight: 0, weights: {} } };
   if (path.endsWith('/profile')) return { workspaceId: 'ws_1', data: {} };
   if (path.endsWith('/findings')) {
     return [
-      { id: 'fnd_v', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 'Rival', claim: 'Verified claim', criteria: {}, evidence: [], status: 'verified', createdAt: '' },
+      { id: 'fnd_v', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 'Rival', claim: 'Verified claim', criteria: { relevance: 4, threat: 5 }, evidence: [], status: 'verified', createdAt: '' },
       { id: 'fnd_u', workspaceId: 'ws_1', runId: 'r', taskId: 't', subject: 'Rival', claim: 'Unverified claim', criteria: {}, evidence: [], status: 'unverified', createdAt: '' },
     ];
   }
@@ -93,7 +107,7 @@ afterEach(() => {
   window.location.hash = '';
 });
 
-const PAGES = ['map', 'interview', 'personas', 'research', 'findings', 'strategy', 'review', 'decisions', 'schedule'];
+const PAGES = ['map', 'interview', 'personas', 'research', 'findings', 'competitors', 'strategy', 'review', 'decisions', 'schedule'];
 
 describe('web views', () => {
   it.each(PAGES)('renders workspace page %s with pending requests banner', async (page) => {
@@ -139,6 +153,32 @@ describe('web views', () => {
     expect(verified.checked).toBe(true);
     expect(unverified.checked).toBe(false);
     expect(screen.getByText(/excluded: not verified/)).toBeTruthy();
+  });
+
+  it('competitors page rates each competitor criterion (final review C4)', async () => {
+    window.location.hash = '#/w/ws_1/competitors';
+    render(<App />);
+    expect(await screen.findByText('Globex')).toBeTruthy();
+    for (const k of ['threat', 'directness', 'pricing', 'onboarding', 'ux', 'features']) expect(screen.getByText(k)).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Agree' })).toHaveLength(6);
+    await act(async () => {
+      screen.getAllByRole('button', { name: 'Disagree' })[2]!.click();
+    });
+    expect(screen.getByLabelText('Your pricing')).toBeTruthy();
+  });
+
+  it('findings offer finding criteria only, never competitor keys', async () => {
+    window.location.hash = '#/w/ws_1/findings';
+    render(<App />);
+    expect(await screen.findByText('relevance')).toBeTruthy();
+    expect(screen.queryByText('threat')).toBeNull();
+  });
+
+  it('decision log shows calibration per role and task type', async () => {
+    window.location.hash = '#/w/ws_1/decisions';
+    render(<App />);
+    expect(await screen.findByText('flow_walkthrough')).toBeTruthy();
+    expect(screen.getByRole('columnheader', { name: 'Task type' })).toBeTruthy();
   });
 
   it('decision log rates a decision confidence inline', async () => {

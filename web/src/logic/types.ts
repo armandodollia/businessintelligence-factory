@@ -5,6 +5,7 @@
  */
 import type {
   Artifact,
+  Competitor,
   Criteria,
   Finding,
   InterviewTurn,
@@ -21,6 +22,7 @@ import type { BifConfig } from '../../../src/core/config/schema.js';
 export type {
   AgentRun,
   Artifact,
+  Competitor,
   Criteria,
   Decision,
   Finding,
@@ -117,15 +119,31 @@ export interface ReviewQueueItem {
   unrated: string[];
 }
 
-export interface CalibrationReport {
-  byCriterion: Array<{
-    targetType: RatingTargetType;
-    criterion: string;
-    n: number;
-    agreeRate: number;
-    meanDelta: number;
-  }>;
+export interface CalibrationRow {
+  targetType: RatingTargetType;
+  criterion: string;
+  n: number;
+  agreeRate: number;
+  meanDelta: number;
 }
+
+export interface CalibrationReport {
+  byCriterion: CalibrationRow[];
+  /** Same, per role and task type that produced the value (spec §10). */
+  byRoleTask?: Array<CalibrationRow & { role: string; taskType?: string }>;
+}
+
+/** `GET .../competitors`: a rated competitor (spec §9) with its ratable criteria. */
+export type CompetitorView = Competitor & { criteria: Criteria };
+
+/**
+ * Ratable finding criteria (mirrors core `CRITERIA.finding`). Competitor keys (threat, pricing,
+ * ...) belong on competitors, never on findings.
+ */
+export const FINDING_CRITERIA = ['relevance', 'reliability', 'novelty'] as const;
+
+/** Ratable competitor criteria (mirrors core `CRITERIA.competitor`). */
+export const COMPETITOR_CRITERIA = ['threat', 'directness', 'pricing', 'onboarding', 'ux', 'features'] as const;
 
 export type PersonaNode = Persona & { audience?: Audience };
 
@@ -201,7 +219,8 @@ export interface ScoringWeights {
   decisionId?: string;
 }
 
-export type ChangedArtifact = { flow: string; step: number; prev: string; next: string };
+/** `subject`: competitor / company the flow belongs to (absent on diffs recorded before final review C). */
+export type ChangedArtifact = { subject?: string; flow: string; step: number; prev: string; next: string };
 
 /** Payload of a scheduler "what changed" Decision (`GET .../changes`). */
 export interface WhatChangedPayload {

@@ -1,3 +1,4 @@
+import { competitorCriteria } from '../market/competitors.js';
 import type { Store } from '../store/db.js';
 import type { Criteria, Rating } from '../types.js';
 import { criterionDef, type TargetType } from './criteria.js';
@@ -15,7 +16,8 @@ export type ReviewQueueItem = {
 /**
  * Items of a workspace that still have at least one agent value the user has not rated: findings,
  * symptoms/strengths, recommendations (criteria + computed `priority`), persona feedback (target id
- * `<recommendationId>:<personaId>`, simulated) and persona profiles (field confidence). Only keys
+ * `<recommendationId>:<personaId>`, simulated), competitors (threat, directness, comparison areas)
+ * and persona profiles (field confidence). Only keys
  * known to `CRITERIA` for the target type are listed, so every queued criterion is ratable.
  */
 export function reviewQueue(workspaceId: string, deps: { store: Store }): ReviewQueueItem[] {
@@ -39,6 +41,7 @@ export function reviewQueue(workspaceId: string, deps: { store: Store }): Review
       push('persona_feedback', `${r.id}:${fb.personaId}`, `${r.title} — persona ${fb.personaId} (simulated)`, fb.scores);
     }
   }
+  for (const c of store.competitors.list({ workspaceId })) push('competitor', c.id, c.name, competitorCriteria(c));
   for (const p of store.personas.list({ workspaceId })) {
     push('persona', p.id, p.segment, Object.fromEntries(Object.entries(p.profile).map(([k, f]) => [k, f.confidence])));
   }

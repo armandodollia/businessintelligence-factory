@@ -1,15 +1,15 @@
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { FakeScript } from '../../src/core/harness/adapter.js';
 import type { RunContext } from '../../src/core/harness/tokens.js';
 import { runPersonaPanel } from '../../src/core/market/panel.js';
 import { marketToolHandlers } from '../../src/core/market/personas.js';
-import { promptTemplate } from '../../src/core/prompts/index.js';
+import { loadPrompt, PROMPTS_DIR, promptTemplate } from '../../src/core/prompts/index.js';
 import { runTaskWithReview } from '../../src/core/research/reviewLoop.js';
-import { workerSystemPrompt } from '../../src/core/research/systemPrompts.js';
-import { applyPromptPatch } from '../../src/core/scoring/calibration.js';
+import { reviewerSystemPrompt, workerSystemPrompt } from '../../src/core/research/systemPrompts.js';
+import { applyPromptPatch, calibrationScope } from '../../src/core/scoring/calibration.js';
 import { PERSONA_FIELDS } from '../../src/core/scoring/criteria.js';
 import { exportTrainingData } from '../../src/core/scoring/export.js';
 import { rateCriterion } from '../../src/core/scoring/ratings.js';
@@ -19,16 +19,11 @@ import type { Decision, Rating, Recommendation } from '../../src/core/types.js';
 import { addTask, researchSetup, review, submitWork } from './helpers/research.js';
 
 const opened: Store[] = [];
-let prevCalDir: string | undefined;
-beforeEach(() => {
-  prevCalDir = process.env.BIF_CALIBRATION_DIR;
-  process.env.BIF_CALIBRATION_DIR = mkdtempSync(join(tmpdir(), 'bif-cal-'));
-});
 afterEach(() => {
   for (const s of opened.splice(0)) s.close();
-  if (prevCalDir === undefined) delete process.env.BIF_CALIBRATION_DIR;
-  else process.env.BIF_CALIBRATION_DIR = prevCalDir;
 });
+
+const scopeOf = (t: { dir: string }, rootWorkspaceId = 'ws_a') => ({ dataDir: t.dir, rootWorkspaceId });
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'bif-calwire-'));
@@ -161,7 +156,7 @@ describe('calibration reaches loaded prompts', () => {
     await runPersonaPanel('ws_a', t.deps);
     const before = new Set(t.store.agentRuns.list({ workspaceId: 'ws_a', role: 'persona' }).map((r) => r.promptVersion));
     expect(before.size).toBeGreaterThan(0);
-    applyPromptPatch({ role: 'persona', examples: [], patchText: '## Calibration examples\n\n1. appeal: you said 5; the user says 2.' });
+    applyPromptPatch({ role: 'persona', examples: [], patchText: '## Calibration examples\n\n1. appeal: you said 5; the user says 2.' }, scopeOf(t));
     t.requests.length = 0;
     await runPersonaPanel('ws_a', t.deps);
     const reqs = t.requests.filter((r) => r.role === 'persona');
@@ -174,14 +169,14 @@ describe('calibration reaches loaded prompts', () => {
 
   it('synthesizer: worker system prompt gets calibration/synthesizer.md (not the worker one) and runs record a new version', async () => {
     const t = setup();
-    const base = workerSystemPrompt(t.config, 'synthesizer');
-    applyPromptPatch({ role: 'synthesizer', examples: [], patchText: '## Calibration examples\n\n1. upside: you said 5; the user says 3.' });
-    applyPromptPatch({ role: 'worker', examples: [], patchText: '## Calibration examples\n\n1. relevance: WORKER-ONLY.' });
-    const synth = workerSystemPrompt(t.config, 'synthesizer');
+    const base = workerSystemPrompt(t.config, 'synthesizer', false, undefined, scopeOf(t));
+    applyPromptPatch({ role: 'synthesizer', examples: [], patchText: '## Calibration examples\n\n1. upside: you said 5; the user says 3.' }, scopeOf(t));
+    applyPromptPatch({ role: 'worker', examples: [], patchText: '## Calibration examples\n\n1. relevance: WORKER-ONLY.' }, scopeOf(t));
+    const synth = workerSystemPrompt(t.config, 'synthesizer', false, undefined, scopeOf(t));
     expect(synth).not.toBe(base);
     expect(synth).toContain('you said 5; the user says 3');
     expect(synth).not.toContain('WORKER-ONLY');
-    expect(workerSystemPrompt(t.config, 'worker')).toContain('WORKER-ONLY');
+    expect(workerSystemPrompt(t.config, 'worker', false, undefined, scopeOf(t))).toContain('WORKER-ONLY');
 
     // A real synthesize task run records the calibrated prompt's version.
     const task = addTask(t.store, { phase: 'synthesis', type: 'synthesize_recommendations' });
@@ -210,5 +205,72 @@ describe('persona_profile instructions reach workers', () => {
     await runTaskWithReview(task, t.deps);
     const work = t.requests.find((r) => r.kind === 'work')!;
     expect(work.systemPrompt).toContain(promptTemplate('persona_profile').split('\n')[0]!);
+  });
+});
+
+describe('calibration isolation per business tree (final review C1)', () => {
+  const patchA = '## Calibration examples (approved by the user)\n\n1. finding "A churn" — `relevance`: you said 5; the user says 2. COMPANY-A-ONLY\n';
+
+  it('company A patch never reaches company B prompts; A descendants share it', async () => {
+    const t = setup();
+    t.store.workspaces.insert({ id: 'ws_b', name: 'Beta', sector: 'retail', createdAt: 'now' });
+    t.store.workspaces.insert({ id: 'ws_a_child', name: 'Acme EU', sector: 'saas', createdAt: 'now', parentWorkspaceId: 'ws_a' });
+    for (const role of ['worker', 'reviewer', 'synthesizer', 'orchestrator', 'interviewer', 'persona'] as const) {
+      applyPromptPatch({ role, examples: [], patchText: patchA }, calibrationScope(t.store, t.dir, 'ws_a_child'));
+    }
+    // Stored under the tree root, inside the data dir — never under src/.
+    expect(existsSync(join(t.dir, 'ws_a', 'calibration', 'worker.md'))).toBe(true);
+    expect(existsSync(join(PROMPTS_DIR, 'calibration', 'worker.md'))).toBe(false);
+
+    const a = calibrationScope(t.store, t.dir, 'ws_a');
+    const b = calibrationScope(t.store, t.dir, 'ws_b');
+    expect(workerSystemPrompt(t.config, 'worker', false, undefined, a)).toContain('COMPANY-A-ONLY');
+    expect(workerSystemPrompt(t.config, 'worker', false, undefined, b)).not.toContain('COMPANY-A-ONLY');
+    expect(reviewerSystemPrompt(t.config, b)).not.toContain('COMPANY-A-ONLY');
+    expect(loadPrompt('interviewer', b).text).not.toContain('COMPANY-A-ONLY');
+    expect(loadPrompt('interviewer', calibrationScope(t.store, t.dir, 'ws_a_child')).text).toContain('COMPANY-A-ONLY');
+
+    // Real runs: a task in B sees no A calibration; a task in A does.
+    t.state.pick = (req) => (req.kind === 'review' ? review(9) : submitWork());
+    await runTaskWithReview(addTask(t.store, { workspaceId: 'ws_b' }), t.deps);
+    await runTaskWithReview(addTask(t.store, { workspaceId: 'ws_a' }), t.deps);
+    const bReqs = t.requests.filter((r) => r.workspaceId === 'ws_b');
+    const aReqs = t.requests.filter((r) => r.workspaceId === 'ws_a');
+    expect(bReqs.length).toBeGreaterThan(1);
+    for (const r of bReqs) expect(r.systemPrompt).not.toContain('COMPANY-A-ONLY');
+    for (const r of aReqs) expect(r.systemPrompt).toContain('COMPANY-A-ONLY');
+  });
+
+  it('applying merges (append + dedupe) instead of overwriting', () => {
+    const t = setup();
+    const s = calibrationScope(t.store, t.dir, 'ws_a');
+    const head = '## Calibration examples (approved by the user)\n\n';
+    applyPromptPatch({ role: 'worker', examples: [], patchText: `${head}1. finding "X" — \`relevance\`: you said 5; the user says 2.\n2. finding "Y" — \`novelty\`: you said 4; the user says 1.\n` }, s);
+    const { text } = applyPromptPatch(
+      { role: 'worker', examples: [], patchText: `${head}1. finding "Y" — \`novelty\`: you said 4; the user says 3.\n2. finding "Z" — \`reliability\`: you said 1; the user says 4.\n` },
+      s,
+    );
+    expect(text.match(/Calibration examples/g)).toHaveLength(1);
+    expect(text).toContain('1. finding "X" — `relevance`: you said 5; the user says 2.');
+    // Same item + criterion: the newer correction replaces the older one (moved to the end).
+    expect(text).not.toContain('the user says 1.');
+    expect(text).toContain('2. finding "Y" — `novelty`: you said 4; the user says 3.');
+    expect(text).toContain('3. finding "Z"');
+    // Re-applying an example already present changes nothing.
+    expect(applyPromptPatch({ role: 'worker', examples: [], patchText: `${head}1. finding "Z" — \`reliability\`: you said 1; the user says 4.\n` }, s).text).toBe(text);
+  });
+});
+
+describe('competitor / hypothesis instructions reach workers', () => {
+  it('discover_competitors and flow_walkthrough get competitors.md; symptom_hypotheses gets hypotheses.md', () => {
+    const t = setup();
+    const comp = promptTemplate('competitors').split('\n')[0]!;
+    const hyp = promptTemplate('hypotheses').split('\n')[0]!;
+    expect(workerSystemPrompt(t.config, 'worker', false, 'discover_competitors')).toContain(comp);
+    expect(workerSystemPrompt(t.config, 'worker', false, 'flow_walkthrough')).toContain(comp);
+    expect(workerSystemPrompt(t.config, 'worker', false, 'news_scan')).not.toContain(comp);
+    expect(workerSystemPrompt(t.config, 'worker', false, 'symptom_hypotheses')).toContain(hyp);
+    expect(promptTemplate('competitors')).toContain('save_competitor');
+    expect(promptTemplate('hypotheses')).toContain('save_hypothesis');
   });
 });

@@ -12,11 +12,12 @@ import { isPipelineLocked } from '../core/research/lock.js';
 import { resolveUserRequest } from '../core/harness/tools/handlers.js';
 import { uploadInternal } from '../core/internal/uploads.js';
 import { interviewCoverage, sendInterviewMessage, type InterviewerFake } from '../core/interview/interview.js';
+import { competitorCriteria } from '../core/market/competitors.js';
 import type { ResearchDeps } from '../core/research/deps.js';
 import { currentResearchRun, runPipeline } from '../core/research/orchestrator.js';
 import { ALL_PHASES } from '../core/research/phases.js';
 import { validateCron } from '../core/scheduler/scheduler.js';
-import { applyPromptPatch, calibrationReport, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
+import { applyPromptPatch, calibrationReport, calibrationScope, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
 import { RECOMMENDATION_KEYS } from '../core/scoring/criteria.js';
 import { exportTrainingData } from '../core/scoring/export.js';
 import { scoreRecommendations } from '../core/scoring/priority.js';
@@ -290,9 +291,16 @@ export function createApp(deps: AppDeps): Hono {
     coverage: interviewCoverage(id, { store }),
   });
   app.get('/api/workspaces/:id/interview', (c) => c.json(interviewState(workspace(c.req.param('id')).id)));
+  /** Workspaces with an interview turn in flight: one turn at a time per workspace (409 otherwise). */
+  const interviewBusy = new Set<string>();
   app.post('/api/workspaces/:id/interview', async (c) => {
     const id = workspace(c.req.param('id')).id;
     const { text } = await body(c, schemas.interview);
+    // Checked and taken synchronously (no await in between), so concurrent requests cannot both pass.
+    if (interviewBusy.has(id)) {
+      throw new HttpError(409, 'an interview turn is already in progress for this workspace; wait for the reply', interviewState(id));
+    }
+    interviewBusy.add(id);
     let turn;
     try {
       turn = await sendInterviewMessage(id, text, {
@@ -303,6 +311,8 @@ export function createApp(deps: AppDeps): Hono {
       });
     } catch (e) {
       throw new HttpError(502, (e as Error).message, interviewState(id));
+    } finally {
+      interviewBusy.delete(id);
     }
     return c.json({ turn, ...interviewState(id) });
   });
@@ -383,6 +393,12 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(setIncludeInSynthesis(store, id, include));
   });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
+  /** Rated competitors (spec §9), each with its ratable `criteria` (threat, directness, comparison areas). */
+  app.get('/api/workspaces/:id/competitors', (c) =>
+    c.json(store.competitors.list({ workspaceId: workspace(c.req.param('id')).id }).map((x) => ({ ...x, criteria: competitorCriteria(x) }))),
+  );
+  /** Research hypotheses per interview symptom (spec §8 drill-down). */
+  app.get('/api/workspaces/:id/hypotheses', (c) => c.json(store.symptomHypotheses.list({ workspaceId: workspace(c.req.param('id')).id })));
   app.get('/api/workspaces/:id/personas', (c) => c.json(store.personas.list({ workspaceId: workspace(c.req.param('id')).id })));
   app.get('/api/workspaces/:id/recommendations', (c) =>
     c.json(store.recommendations.list({ workspaceId: workspace(c.req.param('id')).id }).sort((a, b) => b.priority - a.priority)),
@@ -484,11 +500,17 @@ export function createApp(deps: AppDeps): Hono {
     const { role } = await body(c, schemas.promptPatchRole);
     return c.json(proposePromptPatch(id, role, { store }));
   });
-  /** User approval: writes the (possibly edited) patch as the role's prompt appendix. */
+  /**
+   * User approval: merges the (possibly edited) patch into the role's prompt appendix of this
+   * workspace's business tree (`<dataDir>/<root>/calibration/<role>.md`; other businesses unaffected).
+   */
   app.post('/api/workspaces/:id/calibration/prompt-patch/apply', async (c) => {
     const id = workspace(c.req.param('id')).id;
     const patch = await body(c, schemas.applyPromptPatch);
-    const { path } = applyPromptPatch({ role: patch.role, patchText: patch.patchText, examples: (patch.examples ?? []) as never });
+    const { path } = applyPromptPatch(
+      { role: patch.role, patchText: patch.patchText, examples: (patch.examples ?? []) as never },
+      calibrationScope(store, config.dataDir, id),
+    );
     const decision = recordSystemDecision(
       { store, events },
       { workspaceId: id, actor: 'user', payload: { tool: 'apply_prompt_patch', role: patch.role, patchText: patch.patchText, path } },
