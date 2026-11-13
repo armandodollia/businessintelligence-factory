@@ -131,8 +131,15 @@ function narrowed(store: Store, scope: KnowledgeScope, workspaceId: string | und
 
 function cardOutput(card: Card, budget: number, key: string, cursor: string | undefined, query: string, scopeLabel: string): ReadOutput {
   const lines = card.lines.map((l) => l.text);
-  // A line too long for the page comes back as { text, cut: true } (KS-8: never skipped).
-  const page = pageOf<string | { text: string; cut: true }>(lines, card.header, budget, { key, itemsKey: 'lines', ...(cursor ? { cursor } : {}) });
+  // A line too big for a whole page comes back as { text, cut: true, full } (never skipped). It is
+  // recovered by the id it names when it names one, else by the card's own id (relation lines).
+  const h = card.header as { entity?: { id?: unknown }; node?: { id?: unknown }; workspace_id?: unknown; id?: unknown };
+  const cardId = [h.entity?.id, h.node?.id, h.workspace_id, h.id].find((v): v is string => typeof v === 'string' && v.length > 0);
+  const idOf = (_line: unknown, i: number) => {
+    const refs = card.lines[i]?.refs ?? [];
+    return refs.length === 1 ? refs[0]!.id : cardId;
+  };
+  const page = pageOf<string | { text: string; cut: true }>(lines, card.header, budget, { key, itemsKey: 'lines', idOf, ...(cursor ? { cursor } : {}) });
   const shown = card.lines.slice(page.offset, page.offset + page.items.length);
   const out: ReadOutput = {
     data: { ...card.header, lines: page.items },
@@ -176,6 +183,12 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   if (usableOnly(caller.role) && (input.include_unverified || input.include_history)) {
     roleNotes.push(`include_unverified / include_history are ignored for role ${caller.role}: usable facts only`);
   }
+  // Final-gate ruling: every page of the request carries the role notes, so pages are fitted to what
+  // they leave (a nearly full page must never overflow into "nothing fits" and repeat its cursor).
+  // Exact upper bound of what merging them into the response's `notes` adds: each note's JSON and a
+  // comma, plus `,"notes":[]` when the page had no notes of its own.
+  const noteChars = roleNotes.reduce((n, x) => n + JSON.stringify(x).length + 1, 0) + ',"notes":[]'.length;
+  const pageBudget = roleNotes.length ? Math.max(1, budget - Math.ceil(noteChars / 4)) : budget;
 
   // Reviewer / escalation: only ids of the task's review slice (design §9). Same "not found" text.
   if (deps.slice) {
@@ -203,7 +216,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
           ...(input.since ? { since: input.since } : {}),
           ...(input.limit !== undefined ? { limit: input.limit } : {}),
           ...(cursor ? { cursor } : {}),
-        }, budget, { tool, ws: caller.workspaceId, role: caller.role, ...rest });
+        }, pageBudget, { tool, ws: caller.workspaceId, role: caller.role, ...rest });
         break;
       }
       case 'get_card':
@@ -214,21 +227,21 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
         if (input.entity_id && tool === 'get_card') {
           assertEntityReadable(env, input.entity_id);
           const card = entityCard(env, scope, mode, input.entity_id);
-          out = cardOutput(card, budget, key, cursor, `entity ${input.entity_id}`, mode);
+          out = cardOutput(card, pageBudget, key, cursor, `entity ${input.entity_id}`, mode);
         } else {
           const view = narrowed(store, scope, input.workspace_id ?? caller.workspaceId);
           if (!readableById(scope, mode, scope.nodeIds.includes(view.workspaceId))) throw notFound('workspace', view.workspaceId);
-          out = cardOutput(nodeCard(env, view, mode), budget, key, cursor, `node ${view.workspaceId}`,
+          out = cardOutput(nodeCard(env, view, mode), pageBudget, key, cursor, `node ${view.workspaceId}`,
             view.workspaceId === caller.workspaceId ? mode : `${mode}:${view.workspaceId}`);
         }
         break;
       }
       case 'expand':
-        out = runExpand(env, { id: input.id ?? '', ...(input.around !== undefined ? { around: input.around } : {}), ...(cursor ? { cursor } : {}) }, budget, key);
+        out = runExpand(env, { id: input.id ?? '', ...(input.around !== undefined ? { around: input.around } : {}), ...(cursor ? { cursor } : {}) }, pageBudget, key);
         break;
       case 'read_artifact': {
         if (!deps.files) throw new Error('read_artifact needs the artifact store');
-        out = runReadArtifact(env, deps.files, { artifactId: input.artifact_id ?? '', ...(input.mode ? { mode: input.mode } : {}), ...(cursor ? { cursor } : {}) }, budget, key);
+        out = runReadArtifact(env, deps.files, { artifactId: input.artifact_id ?? '', ...(input.mode ? { mode: input.mode } : {}), ...(cursor ? { cursor } : {}) }, pageBudget, key);
         break;
       }
       case 'list_changes': {

@@ -440,8 +440,11 @@ As built (KS-8 ruling after the real-CLI smoke): `cursor` never skips content. T
 (`read_artifact` text / raw, `expand` on a chunk or with neighbours) page by position: a passage that
 does not fit is served up to the budget and marked `cut: true`, and the next cursor continues from
 exactly that character (no placeholder, no `retry_cursor`). In lists (hits, card lines, changes,
-expanded items) an item larger than the page is shortened and marked `cut: true`; `expand` of its id
-gives the full text. The header of `expand` / `read_artifact` goes on the first page only (a page
+expanded items; final-gate ruling): an item that does not fit the rest of a page ends the page and the
+cursor points at it, so it opens the next page whole; only an item too big for a whole page on its own
+is shortened and served alone — text fields cut first; list entries dropped only if that is not enough,
+counted per field in `omitted_entries`; marked `cut: true` with `full: "expand <id> for the full item"`.
+The role notes a page carries count against its budget, so a page never overflows into "nothing fits". The header of `expand` / `read_artifact` goes on the first page only (a page
 too small for it gets a shortened header, `header_cut: true`); later pages carry the id, the items
 and the envelope. Agents are told: follow `cursor` until it is absent and you have read everything.
 

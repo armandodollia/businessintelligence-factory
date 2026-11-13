@@ -498,7 +498,8 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
   const elsewhere = mode === 'node' && !input.cursor ? elsewhereNote(c, kinds, terms, relaxed ? 'OR' : 'AND') : undefined;
   if (elsewhere) {
     const withNote = pageWith([...notes, elsewhere]);
-    if (withNote.items.length === page.items.length && withNote.truncated === page.truncated) {
+    // Identical page (final-gate ruling): the note never costs a hit nor shortens one further.
+    if (JSON.stringify(withNote.items) === JSON.stringify(page.items) && withNote.truncated === page.truncated) {
       page = withNote;
       notes.push(elsewhere);
     }

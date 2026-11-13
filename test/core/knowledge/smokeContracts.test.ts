@@ -229,12 +229,13 @@ describe('lists never skip an item (KS-8 ruling)', () => {
     const c = t.ctx('ws_a');
     const pages = await follow(t, c, 'get_card', { entity_id: e.id, max_tokens: 100 });
     for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(100);
-    const lines = pages.flatMap((p) => (p.lines as Array<string | { text: string; cut?: boolean }>) ?? []);
-    const text = (l: string | { text: string }) => (typeof l === 'string' ? l : l.text);
+    const lines = pages.flatMap((p) => (p.lines as Array<string | { text: string; cut?: boolean; full?: string }>) ?? []);
+    // A line names its fact in its text, or (shortened) in `full`: "expand <id> for the full item".
+    const text = (l: string | { text: string; full?: string }) => (typeof l === 'string' ? l : `${l.text} ${l.full ?? ''}`);
     for (const f of facts) expect(lines.some((l) => text(l).includes(f.id)), f.id).toBe(true);
-    const cut = lines.find((l): l is { text: string; cut: true } => typeof l !== 'string' && l.cut === true && /\[fnd_/.test(l.text));
+    const cut = lines.find((l): l is { text: string; cut: true; full: string } => typeof l !== 'string' && l.cut === true && /^expand fnd_/.test(l.full ?? ''));
     expect(cut).toBeDefined();
-    const id = /\[(fnd_[A-Za-z0-9]+)\]/.exec(cut!.text)![1]!;
+    const id = /^expand (fnd_[A-Za-z0-9]+) for the full item$/.exec(cut!.full)![1]!;
     const full = await t.call<{ claim: string }>(c, 'expand', { id });
     expect(full.claim).toMatch(/end of claim \d$/);
   });
@@ -275,7 +276,7 @@ describe('read tool descriptions (KS-8 ruling)', () => {
     expect(TOOL_DESCRIPTIONS.read_artifact).toMatch(/follow `cursor` until it is absent and you have read everything/);
     expect(TOOL_DESCRIPTIONS.read_artifact).not.toMatch(/retry_cursor|larger max_tokens/);
     expect(TOOL_DESCRIPTIONS.expand).toMatch(/follow `cursor` until it is absent/);
-    expect(TOOL_DESCRIPTIONS.search).toMatch(/`cut: true`.*expand/);
+    expect(TOOL_DESCRIPTIONS.search).toMatch(/an item marked `cut` is shortened, and `expand` on its id returns it in full/);
   });
 });
 

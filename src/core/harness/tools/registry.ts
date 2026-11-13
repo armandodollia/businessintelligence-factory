@@ -529,12 +529,11 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   search:
     'Search the knowledge store of this business: facts, passages of saved documents, artifacts, entities, records. Default ' +
     'scope: this part of the business, its sub-units and its parents; scope "tree" for the whole business. Returns short ' +
-    'labelled hits with ids (no bodies): expand an id for more. Paged: follow `cursor` until it is absent and you have read ' +
-    'everything; a hit marked `cut: true` was shortened: expand its id for the full text.',
+    'labelled hits with ids (no bodies): expand an id for more. Paged: follow `cursor` until it is absent; an item marked `cut` is shortened, and `expand` on its id returns it in full.',
   get_card:
     'Computed card of an entity (entity_id: typed record, top current facts with ids, recent changes, relations, flows) or of a ' +
-    'node (workspace_id). Built from reviewed records only, within your scope and a token budget. Paged: follow `cursor` until ' +
-    'it is absent; a line marked `cut: true` was shortened: expand its id for the full text.',
+    'node (workspace_id). Built from reviewed records only, within your scope and a token budget. Paged: ' +
+    'follow `cursor` until it is absent; an item marked `cut` is shortened, and `expand` on its id returns it in full.',
   expand:
     'Details of one id: a fact (claim, evidence with quotes and captions, versions, relations), an artifact (description, ' +
     'captures, outline), a passage (its text; `around` adds neighbours), an entity (fuller card) or a record. Evidence text is ' +
@@ -542,7 +541,7 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'everything (`cut: true` on a passage = it continues on the next page; on any other item = shortened, expand its id).',
   list_changes:
     'What changed since a date (default 30 days) or in a research run: new, replaced (old → new) and retracted facts, facts ' +
-    'that became stale (due for re-check), and changed pages that current facts cite.',
+    'that became stale (due for re-check), and changed pages that current facts cite. Paged: follow `cursor` until it is absent; an item marked `cut` is shortened, and `expand` on its id returns it in full.',
   propose_business_unit:
     'Propose a child business unit (division, product, team, internal platform) for the user to accept or reject.',
   save_competitor:

@@ -241,8 +241,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   facts, relations, neighbours) follows the same node scope unless `scope: "tree"` is passed. Every
   response fits a token budget per role (`knowledge.budgets`, capped by `hardMaxTokens`) and continues
   with a `cursor` that never skips anything: a text page that ends mid-passage says `cut: true` and the
-  next page continues from that character; a list item too large for a page is shortened (`cut: true`;
-  `expand` gives it whole). Evidence text is redacted and served inside `<<<EVIDENCE … >>>` fences as
+  next page continues from that character. A list item that does not fit the rest of a page starts the
+  next page; only one too big for a whole page is shortened (`cut: true`, dropped list entries counted
+  in `omitted_entries`, `full: "expand <id> for the full item"`). Evidence text is redacted and served inside `<<<EVIDENCE … >>>` fences as
   untrusted data. Reviewers (and
   escalation agents) can only `expand` / `read_artifact` the ids of their task's review slice.
   Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,

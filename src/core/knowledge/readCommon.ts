@@ -18,7 +18,7 @@ import { encodeCursor, decodeCursor, estimateTokens, fitToBudget } from './budge
 import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { artifactVisible, canonicalArtifactId, capText } from './texts.js';
-import { FENCE_CLOSE, FENCE_OPEN } from './trust.js';
+import { CONTENT_TRUST, FENCE_CLOSE, FENCE_OPEN } from './trust.js';
 import type { Entity, EntityKind, Relation, RelationSourceKind, RelationType } from '../types.js';
 import { getEntity } from './entities.js';
 import { SOURCE_TABLES, sourceUsableSql, sourceVisibleSql } from './usable.js';
@@ -171,17 +171,30 @@ export type ItemPage<T> = {
   stalled?: boolean;
 };
 
+/** The id a list item is recovered by with `expand`: its `id`, a replacement's new version, its artifact, or the first `[id]` of a line. */
+export function itemExpandId(item: unknown): string | undefined {
+  if (typeof item === 'string') return /\[([a-z]+_[A-Za-z0-9]+)\]/.exec(item)?.[1];
+  if (!item || typeof item !== 'object') return undefined;
+  const o = item as Record<string, unknown>;
+  const to = o.to as { id?: unknown } | undefined;
+  for (const v of [o.id, to?.id, o.chunk_id, o.artifact_id]) if (typeof v === 'string' && v) return v;
+  return undefined;
+}
+
 /**
  * One page of `items` for a response whose fixed part is `header`; the whole JSON stays within `budget`.
- * Never skips an item (KS-8 ruling): when the next item alone is larger than the page, it is shortened
- * to fit (`shortenItem`, marked `cut: true`; `expand` of its id gives the full text) and the cursor
- * moves past it.
+ * Never skips an item (final-gate ruling, binding):
+ * - an item that does not fit the rest of the page ends the page, and the cursor points AT it — an item
+ *   is never shortened because the page is nearly full;
+ * - only an item too big for a whole page on its own (an empty page of this request: the same header,
+ *   notes and envelope every page of it carries) is shortened (`shortenItem`: `cut: true`, dropped list
+ *   entries counted, "expand <id> for the full item") and served alone; the cursor then moves past it.
  */
 export function pageOf<T>(
   items: readonly T[],
   header: Record<string, unknown>,
   budget: number,
-  opts: { key: string; cursor?: string; notes?: readonly string[]; itemsKey?: string },
+  opts: { key: string; cursor?: string; notes?: readonly string[]; itemsKey?: string; idOf?: (item: T, index: number) => string | undefined },
 ): ItemPage<T> {
   const offset = opts.cursor ? Math.min(decodeCursor(opts.cursor, opts.key), items.length) : 0;
   const overhead =
@@ -192,8 +205,21 @@ export function pageOf<T>(
   const startCursor = encodeCursor({ key: opts.key, offset });
   const fit = fitToBudget(rest, (x) => JSON.stringify(x), budget, overhead);
   if (!fit.items.length && rest.length) {
-    const room = budget - overhead;
-    const short = shortenItem(rest[0], (x) => estimateTokens(`${JSON.stringify(x)}\n`) <= room) as T | undefined;
+    // The next item alone, measured on the page it would be served on (the envelope as the dispatcher
+    // writes it: this cursor, `more`, the notes). Whole when it fits; shortened only when it does not.
+    const cursor = rest.length > 1 ? encodeCursor({ key: opts.key, offset: offset + 1 }) : undefined;
+    const alone = (x: unknown) =>
+      estimateTokens(JSON.stringify({
+        ...header, [opts.itemsKey ?? 'items']: [x], tokens: budget, truncated: true, more: rest.length - 1,
+        ...(cursor ? { cursor } : {}), content_trust: CONTENT_TRUST, ...(opts.notes?.length ? { notes: opts.notes } : {}),
+      })) <= budget;
+    if (alone(rest[0])) {
+      const page: ItemPage<T> = { items: [rest[0]!], truncated: rest.length > 1, more: rest.length - 1, offset, startCursor, remaining: rest.length };
+      if (cursor) page.cursor = cursor;
+      return page;
+    }
+    const id = opts.idOf ? opts.idOf(rest[0]!, offset) : itemExpandId(rest[0]);
+    const short = shortenItem(rest[0], alone, id ? { id } : {}) as T | undefined;
     if (short === undefined) return { items: [], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length, stalled: true };
     const page: ItemPage<T> = { items: [short], truncated: true, more: rest.length - 1, offset, startCursor, remaining: rest.length };
     if (rest.length > 1) page.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
@@ -227,13 +253,35 @@ export function cutServedText(s: string, max: number): string {
 }
 
 /**
- * The item shortened so that `fits` holds, marked `cut: true` (a string becomes `{ text, cut: true }`):
- * every text field longer than a common cap is cut to it (`cutServedText`), and when that is not
- * enough every list field keeps only its first entries; the largest caps that fit win. Ids, kinds,
- * states and dates are kept whole. `undefined` when even the barest form does not fit.
+ * The item shortened so that `fits` holds, marked `cut: true` (a string becomes `{ text, cut: true }`).
+ * Text first: every text field longer than a common cap is cut to it (`cutServedText`), lists kept
+ * whole. Only when that is not enough does every list field keep just its first entries; then
+ * `omitted_entries` counts the dropped entries per field path (`quotes`, `nested.notes`), so no entry
+ * disappears without a count. With `opts.id` the item says `full: "expand <id> for the full item"`.
+ * The largest caps that fit win. Ids, kinds, states and dates are kept whole. `undefined` when even the
+ * barest form does not fit.
  */
-export function shortenItem(item: unknown, fits: (x: unknown) => boolean): unknown {
-  const wrap = (x: unknown) => (typeof item === 'string' || typeof x !== 'object' || x === null ? { text: x, cut: true } : { ...(x as object), cut: true });
+export function shortenItem(item: unknown, fits: (x: unknown) => boolean, opts: { id?: string } = {}): unknown {
+  const full = opts.id ? { full: `expand ${opts.id} for the full item` } : {};
+  const omittedOf = (m: number): Record<string, number> => {
+    const out: Record<string, number> = {};
+    const walk = (v: unknown, path: string, key?: string): void => {
+      if (key !== undefined && KEEP_WHOLE.test(key)) return;
+      if (Array.isArray(v)) {
+        if (v.length > m) out[path] = (out[path] ?? 0) + v.length - m;
+        v.slice(0, m).forEach((x) => walk(x, path));
+      } else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k, k);
+    };
+    walk(item, '');
+    return out;
+  };
+  const wrap = (x: unknown, m: number) => {
+    const omitted = omittedOf(m);
+    const counts = Object.keys(omitted).length ? { omitted_entries: omitted } : {};
+    return typeof item === 'string' || typeof x !== 'object' || x === null
+      ? { text: x, cut: true, ...full }
+      : { ...(x as object), cut: true, ...counts, ...full };
+  };
   let longest = 0;
   let longestList = 0;
   const scan = (v: unknown, key?: string): void => {
@@ -252,7 +300,7 @@ export function shortenItem(item: unknown, fits: (x: unknown) => boolean): unkno
     if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, capped(x, n, m, k)]));
     return v;
   };
-  const ok = (n: number, m: number) => fits(wrap(capped(item, n, m)));
+  const ok = (n: number, m: number) => fits(wrap(capped(item, n, m), m));
   /** Largest value in [lo, hi] for which `test` holds (monotone), or `undefined`. */
   const largest = (lo: number, hi: number, test: (x: number) => boolean): number | undefined => {
     if (!test(lo)) return undefined;
@@ -265,12 +313,28 @@ export function shortenItem(item: unknown, fits: (x: unknown) => boolean): unkno
   };
   // Prefer whole lists with shorter text; else fewer list entries with at least a snippet of text each.
   const n = largest(0, longest, (x) => ok(x, longestList));
-  if (n !== undefined) return wrap(capped(item, n, longestList));
+  if (n !== undefined) return wrap(capped(item, n, longestList), longestList);
   for (const floor of [Math.min(80, longest), 0]) {
     const m = largest(0, longestList, (x) => ok(floor, x));
     if (m === undefined) continue;
     const best = largest(floor, longest, (x) => ok(x, m))!;
-    return wrap(capped(item, best, m));
+    return wrap(capped(item, best, m), m);
+  }
+  // Last resort (an item no cap makes fit): its identity only — kind, id and the pointer to the full
+  // item — with every array entry it held counted in `omitted_entries` (no entry disappears uncounted).
+  if (item && typeof item === 'object' && !Array.isArray(item) && opts.id) {
+    const o = item as Record<string, unknown>;
+    const bare: Record<string, unknown> = {};
+    for (const k of ['kind', 'type', 'change', 'id']) if (typeof o[k] === 'string') bare[k] = o[k];
+    const counts: Record<string, number> = {};
+    const walk = (v: unknown, path: string): void => {
+      if (Array.isArray(v)) {
+        if (v.length) counts[path] = (counts[path] ?? 0) + v.length;
+      } else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k);
+    };
+    walk(o, '');
+    const minimal = { ...bare, cut: true, ...(Object.keys(counts).length ? { omitted_entries: counts } : {}), ...full };
+    if (fits(minimal)) return minimal;
   }
   return undefined;
 }
