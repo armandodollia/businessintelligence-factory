@@ -54,8 +54,8 @@ query with no AND match that falls back to OR) × 5 runs after a warm-up pass; n
 
 | Scope | p50 | p95 | max |
 |---|---|---|---|
-| node (default; includes the "more matches elsewhere" note) | 74 ms | 88 ms | 110 ms |
-| tree | 23 ms | 28 ms | 34 ms |
+| node (default; includes the capped "more matches elsewhere" note) | 57 ms | 62 ms | 73 ms |
+| tree | 24 ms | 30 ms | 35 ms |
 
 The first measurement on the merged branch was node p50 1,089 ms / p95 1,442 ms and tree p50 378 ms /
 p95 432 ms. Two fixes, with no change in behaviour (KS-8 commit "perf(search)"):
@@ -68,8 +68,12 @@ p95 432 ms. Two fixes, with no change in behaviour (KS-8 commit "perf(search)"):
   about 550 hits per call (the page plus the two 250-row pools of the "elsewhere" note), so it is now
   computed once per entity per call.
 
-What remains in node scope is mostly the "elsewhere" note, which builds the tree and node pools as full
-hits. It could count ids only, if this matters later.
+After those two fixes node scope measured p50 74 ms / p95 88 ms / max 110 ms, mostly the "elsewhere"
+note, which built 250-row tree and node pools per kind. Final-gate follow-up: the count is capped at
+`ELSEWHERE_COUNT_CAP` = 50 per kind (`src/core/knowledge/search.ts`; the note says `50+` beyond it,
+and `+` whenever the 100-row pool was full, so the count is a lower bound). Facts, artifacts and
+records are judged by their scope rank, with no second query; only passages and entities still compare
+with a node-scoped pool. The table above is the re-measure after the cap (same method, same seed).
 
 **Store size on disk** for that store: SQLite database 28.7 MB after a WAL checkpoint (text, chunks,
 FTS indexes, 1,000 facts, scopes); stored files 18.1 MB; 46.8 MB in total. That is about 2.8 KB of

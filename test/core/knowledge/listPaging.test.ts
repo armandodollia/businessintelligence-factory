@@ -258,3 +258,20 @@ describe('expand of a non-text item shortens its header like text reads (Opus fi
     }
   });
 });
+
+describe('the "elsewhere" count is capped (final-gate follow-up)', () => {
+  it(`counts matches outside node scope up to ELSEWHERE_COUNT_CAP and then says "<cap>+"`, async () => {
+    const { ELSEWHERE_COUNT_CAP } = await import('../../../src/core/knowledge/search.js');
+    expect(ELSEWHERE_COUNT_CAP).toBe(50);
+    const t = ks4(opened);
+    // Caller: Payments (ws_c); Labs (ws_d) is its sibling, outside node scope.
+    t.fact('ws_c', 'Zephyr pricing here');
+    for (let i = 0; i < 3; i++) t.fact('ws_d', `Zephyr pricing in labs ${i}`);
+    const c = t.ctx('ws_c');
+    const few = await t.call<Page>(c, 'search', { query: 'zephyr pricing', kinds: ['fact'] });
+    expect(few.notes!.join(' ')).toMatch(/elsewhere in the business \(outside node scope\): fact 3;/);
+    for (let i = 3; i < 80; i++) t.fact('ws_d', `Zephyr pricing in labs ${i}`);
+    const many = await t.call<Page>(c, 'search', { query: 'zephyr pricing', kinds: ['fact'] });
+    expect(many.notes!.join(' ')).toMatch(/fact 50\+;/);
+  });
+});

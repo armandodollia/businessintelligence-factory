@@ -402,9 +402,10 @@ Write tools:
 
 A node-scoped `search` (first page) adds one note when the same query matches more items elsewhere in
 the tree: `more matches elsewhere in the business (outside node scope): fact 2, entity 1; repeat
-with scope "tree" to see them` — counts only, per kind (up to the search pool, `+` when full), no
-text and no ids; the retrieval row is unchanged; the note is left out when it would cost a hit of the
-page, so the response budget always holds (decision 14).
+with scope "tree" to see them` — counts only, per kind, capped at `ELSEWHERE_COUNT_CAP` = 50 (`50+`;
+`+` also when the 100-row pool was full, so the count is a lower bound), no text and no ids; the
+retrieval row is unchanged; the note is added only when the page's items are identical with and
+without it (it never costs or shortens a hit), so the response budget always holds (decision 14).
 
 Search query handling: the agent's text is never passed to `MATCH` raw. It is
 tokenized, each token quoted, joined with AND; quoted phrases are kept. Zero hits →
@@ -605,8 +606,9 @@ than home) records a `Decision` with refs, like `save_finding` does today.
 - Latency: FTS5 queries are milliseconds at this scale; extraction is tens of
   milliseconds for HTML and seconds for large PDFs (queued, not blocking the save).
   Measured at KS-8 (10,000 passages, 1,000 facts, worst-case vocabulary; `scripts/measure-knowledge.ts`,
-  `docs/superpowers/verify-log.md`): `search` p50 / p95 = 74 / 88 ms in node scope (the "elsewhere" note
-  included) and 23 / 28 ms tree-wide; a 29 MB database plus 18 MB of stored files.
+  `docs/superpowers/verify-log.md`): `search` p50 / p95 = 57 / 62 ms in node scope (the "elsewhere" note
+  included, its count capped at `ELSEWHERE_COUNT_CAP` = 50 per kind, shown as `50+`) and 24 / 30 ms
+  tree-wide; a 29 MB database plus 18 MB of stored files.
 - Later, without changing tools: a vector ranking signal for `search`; OCR for
   image-only PDFs and uploaded screenshots; a merge-proposer agent.
 

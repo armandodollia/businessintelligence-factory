@@ -523,19 +523,34 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
 }
 
 /**
- * "Elsewhere" line of a node-scoped search: per kind, how many matches the same query has in the whole
- * tree beyond node scope (up to the search pool per kind, `+` when the pool is full). Counts only.
- * `undefined` when there are none.
+ * Cap of the "elsewhere" count per kind (final-gate follow-up): counting stops here and the note says
+ * `<cap>+`, so the note's cost is bounded whatever the size of the tree.
+ */
+export const ELSEWHERE_COUNT_CAP = 50;
+/** Rows looked at per kind for the count: twice the cap, so near items in the pool rarely hide far ones. */
+const ELSEWHERE_POOL = ELSEWHERE_COUNT_CAP * 2;
+
+/**
+ * "Elsewhere" line of a node-scoped search: per kind, how many of the best tree-wide matches of the same
+ * query lie outside node scope — at most `ELSEWHERE_COUNT_CAP`, with `+` when the cap is reached or the
+ * pool (`ELSEWHERE_POOL` rows) was full, so the count is a lower bound. Facts, artifacts and records use
+ * their scope rank (outside the node's view = rank 3); passages and entities, whose node visibility
+ * differs from their home (a visible duplicate, a referencing record), compare with the node-scoped
+ * pool. Counts only. `undefined` when there are none.
  */
 function elsewhereNote(c: Ctx, kinds: readonly SearchKind[], terms: string[], op: 'AND' | 'OR'): string | undefined {
   const parts: string[] = [];
+  const limit = Math.ceil(ELSEWHERE_POOL / POOL_FACTOR);
   for (const k of kinds) {
-    const ids = (ctx: Ctx) => new Set(rankKind(RUNNERS[k](ctx, terms, op), Number.POSITIVE_INFINITY).map((h) => h.hit.id));
-    const wide = ids({ ...c, mode: 'tree', limit: MAX_LIMIT });
-    if (!wide.size) continue;
-    const near = ids({ ...c, limit: MAX_LIMIT });
-    const n = [...wide].filter((id) => !near.has(id)).length;
-    if (n > 0) parts.push(`${k} ${n}${wide.size >= MAX_LIMIT * POOL_FACTOR ? '+' : ''}`);
+    const wide = rankKind(RUNNERS[k]({ ...c, mode: 'tree', limit }, terms, op), Number.POSITIVE_INFINITY);
+    if (!wide.length) continue;
+    let far: Ranked[];
+    if (k === 'passage' || k === 'entity') {
+      const near = new Set(rankKind(RUNNERS[k]({ ...c, limit }, terms, op), Number.POSITIVE_INFINITY).map((h) => h.hit.id));
+      far = wide.filter((h) => !near.has(h.hit.id));
+    } else far = wide.filter((h) => h.rank === 3);
+    const n = far.length;
+    if (n > 0) parts.push(`${k} ${Math.min(n, ELSEWHERE_COUNT_CAP)}${n >= ELSEWHERE_COUNT_CAP || wide.length >= ELSEWHERE_POOL ? '+' : ''}`);
   }
   if (!parts.length) return undefined;
   return `more matches elsewhere in the business (outside node scope): ${parts.join(', ')}; repeat with scope "tree" to see them`;
