@@ -60,6 +60,8 @@ export const FEEDBACK_KINDS = [
   // --- knowledge store KS-7 (design §13, §14) ---
   /** The user pruned an artifact's stored file (target: the artifact; row, hash and text stay). */
   'artifact_prune',
+  /** The user rejected an entity merge suggestion (target: the suggested entity). */
+  'entity_merge_reject',
   // --- end knowledge store KS-7 ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];

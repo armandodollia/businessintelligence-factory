@@ -49,6 +49,7 @@ import { knowledgeRepos } from '../store/repos.js';
 import { DEFAULT_ACTOR, recordFeedback, type FeedbackEvent } from './events.js';
 import { FactActionError, applyReplacementByUser, retractFactByUser, setFactScopes } from '../knowledge/facts.js'; // KS-2, KS-7
 import { pruneArtifacts, type ArtifactFiles, type PruneResult } from '../knowledge/gc.js'; // KS-7
+import { mergeSuggestionIsUploadOnly } from '../knowledge/provenance.js'; // KS-7
 import { targetProvenance } from './provenance.js';
 import { UNIT_PROPOSAL_CRITERION } from './signals.js';
 
@@ -731,12 +732,37 @@ export function acceptMergeSuggestionAsUser(
 }
 
 /**
- * Rejects a merge suggestion (the suggestion row records the actor and time). No feedback kind exists
- * for it in design §13, so it writes no feedback event.
+ * Rejects a merge suggestion (the row records actor and time) and, in the same transaction, an
+ * `entity_merge_reject` feedback event on the suggested entity (before: the pair; after: the status).
+ * An upload-only name involved lists the suggestion in `beforeJson.uploadRefs` (export leaves it out).
  */
 export function rejectMergeSuggestionAsUser(store: Store, suggestionId: string, opts: KnowledgeActionOpts = {}): EntityMergeSuggestion {
   const s = callerSuggestion(store, suggestionId, opts);
-  return entityAction(() => rejectMergeSuggestion(store, scopeFor(store, s.rootWorkspaceId), s.id, actor(opts)));
+  return entityAction(() =>
+    store.transaction(() => {
+      const repo = knowledgeRepos(store).entities;
+      const entity = repo.get(s.entityId);
+      const candidate = repo.get(s.candidateId);
+      const rejected = rejectMergeSuggestion(store, scopeFor(store, s.rootWorkspaceId), s.id, actor(opts));
+      const uploadOnly = mergeSuggestionIsUploadOnly(store, s.id);
+      recordFeedback(store, {
+        workspaceId: entity?.workspaceId ?? s.rootWorkspaceId,
+        actor: actor(opts),
+        kind: 'entity_merge_reject',
+        targetType: 'entity',
+        targetId: s.entityId,
+        beforeJson: {
+          suggestionId: s.id, score: s.score,
+          ...(entity ? { entity: entitySnapshot(entity) } : {}),
+          ...(candidate ? { candidate: entitySnapshot(candidate) } : {}),
+          ...(uploadOnly ? { uploadRefs: [s.id] } : {}),
+        },
+        afterJson: { status: rejected.status, suggestionId: s.id },
+        ...(opts.reason ? { reason: opts.reason } : {}),
+      });
+      return rejected;
+    }),
+  );
 }
 
 export type PruneDeps = { store: Store; files: ArtifactFiles; config: Pick<BifConfig, 'knowledge'>; events?: EventBus };

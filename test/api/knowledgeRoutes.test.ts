@@ -171,6 +171,26 @@ describe('human actions go through feedback/actions.ts with the configured actor
     expect(listFeedback(s.t.store, { kind: 'entity_merge' })[0]).toMatchObject({ actor: 'ana@acme', targetId: s.globex.id });
     expect((await s.call('POST', s.k('ws_c', `/merge-suggestions/${list.body[0].id}/reject`), {})).status).toBe(409);
   });
+
+  it('rejecting a suggestion writes entity_merge_reject with the configured actor; other trees get 404', async () => {
+    const s = setup();
+    const sa = scopeFor(s.t.store, 'ws_a');
+    const globexInc = resolveEntity(s.t.store, sa, { kind: 'competitor', name: 'Globex Inc' }, { workspaceId: 'ws_c' });
+    s.t.fact('ws_c', 'Globex Inc raised prices', { entityId: globexInc.id });
+    const sid = (await s.get(s.k('ws_c', '/merge-suggestions'))).body[0].id as string;
+    expect((await s.call('POST', s.k('ws_b', `/merge-suggestions/${sid}/reject`), {})).status).toBe(404);
+    expect(listFeedback(s.t.store)).toEqual([]);
+    const r = await s.call('POST', s.k('ws_c', `/merge-suggestions/${sid}/reject`), { reason: 'different companies', actor: 'mallory' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ status: 'rejected', actor: 'ana@acme' });
+    const fb = listFeedback(s.t.store, { kind: 'entity_merge_reject' });
+    expect(fb).toHaveLength(1);
+    expect(fb[0]).toMatchObject({
+      actor: 'ana@acme', targetType: 'entity', targetId: globexInc.id, workspaceId: 'ws_c', reason: 'different companies',
+      beforeJson: { suggestionId: sid, candidate: { id: s.globex.id } }, afterJson: { status: 'rejected' },
+    });
+    expect((await s.get(s.k('ws_c', '/merge-suggestions'))).body).toEqual([]);
+  });
 });
 
 describe('upload-derived items are marked and explained', () => {

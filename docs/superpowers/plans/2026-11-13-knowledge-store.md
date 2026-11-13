@@ -1041,8 +1041,8 @@ the user decisions 13–16 recorded in design §3, §4 and §12).
   entity, `candidateId`), `rejectMergeSuggestionAsUser`, `pruneArtifactsAsUser`. All take the caller's
   node and answer an other-tree id with the same 404 as an unknown id. `artifact_prune` / target type
   `artifact` added to `FEEDBACK_KINDS`; `api/feedbackRoutes.ts` `TARGET_TYPES` gains `entity` and
-  `artifact`. **Open:** a rejected merge suggestion writes no feedback event (no kind for it in §13);
-  the suggestion row keeps actor and time.
+  `artifact`. A rejected merge suggestion writes `entity_merge_reject` (design-thread answer; added to
+  §13), target the suggested entity, `uploadRefs` = the suggestion when a name is upload-only.
 - **Reads:** search, entity card, node card, item (`expand`), artifact text (`read_artifact`, modes
   outline / text / raw) and changes call `knowledgeRead` with `role: 'user'`. The lists in
   `userViews.ts` use the same scope predicates but write no retrieval row (a user read exposes no
