@@ -46,7 +46,8 @@ describe('bus event persistence', () => {
 
     const all = listBusEvents(s.store, { workspaceId: 'ws_a', limit: 1000 });
     const types = new Set(all.map((e) => e.type));
-    expect(types).toEqual(new Set(['tool_call', 'run_status', 'task_status']));
+    // KS-5 × KS-6: the reviewer prompt's knowledge sections are logged reads; their bus event is persisted (ids only).
+    expect(types).toEqual(new Set(['tool_call', 'run_status', 'task_status', 'retrieval']));
     const err = listBusEvents(s.store, { workspaceId: 'ws_a', type: 'tool_call', agentRunId: run.agentRunId });
     expect(err).toHaveLength(1);
     expect(err[0]!.payload).toMatchObject({ type: 'tool_call', tool: 'save_finding', ok: false });
@@ -72,7 +73,7 @@ describe('bus event persistence', () => {
     expect(learningRepos(s.store).reviewIssues.list({ taskId: task.id }).map((r) => r.text)).toContain('REVIEW ISSUE TEXT no source');
     expect(learningRepos(s.store).decisionOutcomes.list({ taskId: task.id }).length).toBeGreaterThan(0);
     const all = listBusEvents(s.store, { workspaceId: 'ws_a', limit: 1000 });
-    expect([...new Set(all.map((e) => e.type))].sort()).toEqual(['run_status', 'task_status', 'tool_call']);
+    expect([...new Set(all.map((e) => e.type))].sort()).toEqual(['retrieval', 'run_status', 'task_status', 'tool_call']);
     const dump = JSON.stringify(all);
     expect(dump).not.toContain('REVIEW ISSUE TEXT');
     expect(dump).not.toContain('123456');
@@ -80,6 +81,7 @@ describe('bus event persistence', () => {
       run_status: ['type', 'workspaceId', 'agentRunId', 'taskId', 'status', 'exitCode', 'reason'],
       task_status: ['type', 'workspaceId', 'taskId', 'status'],
       tool_call: ['type', 'workspaceId', 'agentRunId', 'tool', 'ok', 'error'],
+      retrieval: ['type', 'workspaceId', 'retrievalEventId'],
     };
     for (const e of all) for (const k of Object.keys(e.payload)) expect(allowed[e.type]).toContain(k);
   });
