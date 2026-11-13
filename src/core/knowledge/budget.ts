@@ -2,11 +2,13 @@
  * Token budgets, fitting and cursors for knowledge responses (design §9 "Budgets").
  *
  * - `budgetFor`: the budget of one response: role override, else default; times the provider's
- *   scale; never above `hardMaxTokens`; a caller's `max_tokens` may lower it, never raise it.
+ *   scale; never above `hardMaxTokens`. A caller's `max_tokens` replaces it: lower, or higher up to the
+ *   hard maximum (scaled for the provider), so a pointer's "this call with max_tokens N" works. The read
+ *   tools then raise it to their floor (`READ_FLOOR_TOKENS`).
  * - `fitToBudget`: the longest prefix of `items` whose rendering fits. Prefix only — it never
  *   skips an item — so `offset + items.length` is where the next page starts (no loss, no repeat).
- *   An item larger than the whole budget is not returned (`items: []`, `truncated`): the read tools
- *   then shorten it (`shortenItem`) or page its text by position (KS-8 ruling).
+ *   Used by briefings and the reviewer context; the read tools assemble pages by measuring the whole
+ *   response instead (`paging.ts`).
  * - Cursors are opaque compact strings (`c1.<key>.<offset>[.<pos>].<check>`) bound to the request (`cursorKey` of its parameters), so a
  *   cursor replayed against another query is rejected, and checked (`cursorCheck`), so a hand-edited
  *   one is rejected too. They carry no ids or text; scope and tree
@@ -19,6 +21,22 @@ import { knowledgeSettings } from './config.js';
 import { estimateTokens } from './extract/index.js';
 
 export { estimateTokens };
+
+/**
+ * Floor of each read tool's response budget (tokens; paging rework, binding floor invariant): a smaller
+ * configured budget or `max_tokens` is clamped up to it. At its floor a page holds the tool's header
+ * (bounded), its notes, the envelope and at least one item: whole, a passage piece, or cut with its
+ * pointer — so while content remains, no page is empty. Measured by the sweep tests
+ * (`test/core/knowledge/pagingSweep*.test.ts`); documented in design §9 and the tool descriptions.
+ */
+export const READ_FLOOR_TOKENS = {
+  search: 200,
+  get_card: 200,
+  expand: 300,
+  read_artifact: 300,
+  list_changes: 200,
+  read_workspace: 200,
+} as const satisfies Record<string, number>;
 
 /** Tokens allowed for one response of `kind` to `role` on `provider` (see module doc). */
 export function budgetFor(

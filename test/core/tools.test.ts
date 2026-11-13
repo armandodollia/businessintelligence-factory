@@ -269,9 +269,9 @@ describe('tool handlers', () => {
 
     // KS-4: read_artifact serves the extracted text fenced (mode text) — never raw unfenced bytes.
     const read = await handle(c, 'read_artifact', { artifact_id: id, mode: 'text' });
-    expect(read).toMatchObject({ ok: true, data: { id, mode: 'text', content_trust: 'untrusted', items: [{ type: 'chunk', text: `<<<EVIDENCE ${id}\nPricing: $49/mo\n>>>` }] } });
+    expect(read).toMatchObject({ ok: true, data: { id, mode: 'text', content_trust: 'untrusted', items: [{ type: 'meta' }, { type: 'chunk', text: `<<<EVIDENCE ${id}\nPricing: $49/mo\n>>>` }] } });
     const img = await handle(c, 'read_artifact', { artifact_id: (png as { data: { artifactId: string } }).data.artifactId });
-    expect(img).toMatchObject({ ok: true, images: [{ mimeType: 'image/png' }], data: { mode: 'image', description: expect.stringContaining('Pro plan') } });
+    expect(img).toMatchObject({ ok: true, images: [{ mimeType: 'image/png' }], data: { mode: 'image', items: [{ type: 'meta' }, { type: 'description', text: expect.stringContaining('Pro plan') }] } });
     const other = await handle(ctx('worker', { workspaceId: 'ws_b' }), 'read_artifact', { artifact_id: id });
     expect(other.ok).toBe(false);
     // A reviewer reads only its task's review slice: without a task, nothing (same "not found").

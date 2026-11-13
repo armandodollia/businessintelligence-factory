@@ -2,8 +2,8 @@
  * KS-4 re-gate: no response or prompt section ever exceeds its budget, and one that drops content
  * says so — `truncated`, how many items, a cursor (tools) / a count (prompt sections). An agent must
  * never read "nothing fit" as "nothing exists".
- * - Tool calls: the effective budget is clamped up to `MIN_RESPONSE_TOKENS`, which always fits the
- *   truncation notice.
+ * - Tool calls: the effective budget is clamped up to the tool's floor (`READ_FLOOR_TOKENS`), at which
+ *   every page serves an item (paging rework, floor invariant): never a "nothing fits" notice.
  * - The reviewer context degrades: footer ids → count footer → one count line → empty (budget 1).
  */
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,7 +12,7 @@ import { budgetFor, estimateTokens } from '../../../src/core/knowledge/budget.js
 import { resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { reviewFactContext } from '../../../src/core/knowledge/factReview.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
-import { MIN_RESPONSE_TOKENS } from '../../../src/core/knowledge/tools.js';
+import { READ_FLOOR_TOKENS } from '../../../src/core/knowledge/tools.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
 import type { Task } from '../../../src/core/types.js';
@@ -61,12 +61,13 @@ describe('reviewer context at budgets 1, 10 and the default', () => {
   }
 });
 
-describe('tool responses at tiny configured budgets (clamped to MIN_RESPONSE_TOKENS)', () => {
+describe('tool responses at tiny configured budgets (clamped to each tool\'s floor)', () => {
   for (const n of [1, 10]) {
-    it(`budget ${n}: every tool stays within the floor and reports truncated, more and a cursor`, async () => {
+    it(`budget ${n}: every tool stays within its floor, serves an item, and reports truncated, more and a cursor`, async () => {
       const t = ks4(opened, withBudget(n));
       const e = resolveEntity(t.store, scopeFor(t.store, 'ws_a'), { kind: 'competitor', name: 'Globex' });
       for (let i = 0; i < 5; i++) t.fact('ws_a', `Globex fact ${i} ${'detail '.repeat(30)}`, { entityId: e.id, lastConfirmedAt: '2025-01-01T00:00:00.000Z' }); // stale: list_changes has items
+      t.store.profiles.insert({ workspaceId: 'ws_a', data: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`profile key number ${i}`, i])) });
       const c = t.ctx('ws_a');
       const calls: Array<[string, Record<string, unknown>]> = [
         ['search', { query: 'globex', kinds: ['fact'] }],
@@ -76,8 +77,10 @@ describe('tool responses at tiny configured budgets (clamped to MIN_RESPONSE_TOK
         ['expand', { id: e.id }],
       ];
       for (const [tool, input] of calls) {
-        const r = await t.call<{ truncated: boolean; more?: number; cursor?: string }>(c, tool as never, input);
-        expect(estimateTokens(JSON.stringify(r)), tool).toBeLessThanOrEqual(MIN_RESPONSE_TOKENS);
+        const r = await t.call<{ truncated: boolean; more?: number; cursor?: string; notes?: string[] } & Record<string, unknown>>(c, tool as never, input);
+        expect(estimateTokens(JSON.stringify(r)), tool).toBeLessThanOrEqual(READ_FLOOR_TOKENS[tool as keyof typeof READ_FLOOR_TOKENS]);
+        expect(((r.hits ?? r.lines ?? r.changes ?? r.items) as unknown[]).length, tool).toBeGreaterThan(0);
+        expect(JSON.stringify(r.notes ?? []), tool).not.toMatch(/nothing|raised/);
         expect(r.truncated, tool).toBe(true);
         expect(r.more, tool).toBeGreaterThan(0);
         expect(r.cursor, tool).toBeDefined();
@@ -85,16 +88,17 @@ describe('tool responses at tiny configured budgets (clamped to MIN_RESPONSE_TOK
     });
   }
 
-  it('a header too large for max_tokens is shortened (header_cut, Opus finding 4); expand with a larger budget serves it whole', async () => {
+  it('a long claim is an item, never a cut header (paging rework); at the floor it is cut with a pointer that returns it', async () => {
     const t = ks4(opened);
     const f = t.fact('ws_a', `Long claim ${'word '.repeat(700)}`);
     const c = t.ctx('ws_a');
-    const small = await t.call<{ id: string; claim?: string; header_cut?: boolean; tokens: number; notes?: string[] }>(c, 'expand', { id: f.id, max_tokens: MIN_RESPONSE_TOKENS });
-    expect(small.tokens).toBeLessThanOrEqual(MIN_RESPONSE_TOKENS);
-    expect(small).toMatchObject({ id: f.id, header_cut: true });
-    expect(JSON.stringify(small.notes ?? [])).not.toMatch(/nothing of this page fits/);
-    const big = await t.call<{ claim: string }>(c, 'expand', { id: f.id, max_tokens: 4000 });
-    expect(big.claim).toBe(f.claim);
+    const small = await t.call<{ id: string; header_cut?: boolean; tokens: number; notes?: string[]; items: Array<Record<string, unknown>> }>(c, 'expand', { id: f.id, max_tokens: 1 });
+    expect(small.tokens).toBeLessThanOrEqual(READ_FLOOR_TOKENS.expand);
+    expect(small).toMatchObject({ kind: 'fact', id: f.id, subject: f.subject });
+    expect(small.header_cut).toBeUndefined();
+    expect(small.items[0]).toMatchObject({ type: 'claim', cut: true, full: { kind: 'same_call', tool: 'expand' } });
+    const back = await t.call<{ items: Array<Record<string, unknown>> }>(c, 'expand', (small.items[0]!.full as { input: Record<string, unknown> }).input);
+    expect(back.items[0]).toEqual({ type: 'claim', text: f.claim });
   });
 
   it('an item larger than the page is shortened and marked cut, and the cursor moves on (KS-8: no placeholder)', async () => {

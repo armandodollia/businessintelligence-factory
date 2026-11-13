@@ -7,6 +7,8 @@
  *    (`omitted_entries`); it is marked `cut: true` and carries `full`, the call that returns it whole.
  * 4. Pages joined equal the full list at every budget at which every item fits a page; no array entry
  *    disappears without a count; an item larger than a page is cut, flagged and recoverable by `expand`.
+ * Paging rework: budgets start at each tool's floor (a smaller one is raised to it), and the header is on
+ * the first page only.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { TOOL_DESCRIPTIONS } from '../../../src/core/harness/tools/registry.js';
@@ -14,6 +16,7 @@ import type { RunContext } from '../../../src/core/harness/tokens.js';
 import { estimateTokens } from '../../../src/core/knowledge/budget.js';
 import { resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { shortenItem } from '../../../src/core/knowledge/readCommon.js';
+import { KNOWLEDGE_READ_TOOLS, READ_FLOOR_TOKENS } from '../../../src/core/knowledge/tools.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
@@ -35,10 +38,11 @@ function world(role: Role = 'worker') {
     c.knowledge = { budgets: { default: { search: 8000, card: 8000, expand: 8000, briefing: 1500 } }, hardMaxTokens: 8000 };
   });
   const e = resolveEntity(t.store, scopeFor(t.store, 'ws_a'), { kind: 'competitor', name: 'Globex' });
-  // Facts of very different lengths (claims up to the 240 / 300-char serving caps and beyond).
+  // Facts of very different lengths (claims up to the 240 / 300-char serving caps and beyond); the last
+  // one of control characters (JSON-escaped six-fold), so its hit, line and change exceed the tools' floors.
   const lengths = [1, 30, 3, 60, 0, 12, 45, 2, 80];
   const facts = lengths.map((n, i) =>
-    t.fact('ws_a', `Globex widget claim ${i} ${'with more detail '.repeat(n)}end ${i}`, { entityId: e.id, createdAt: T0 }),
+    t.fact('ws_a', `Globex widget claim ${i} ${i === 8 ? '\u0001'.repeat(230) : 'with more detail '.repeat(n)} end ${i}`, { entityId: e.id, createdAt: T0 }),
   );
   // One sibling-node fact so the node-scoped search has an "elsewhere" note on its first page.
   t.fact('ws_d', 'Globex widget claim elsewhere', { entityId: e.id });
@@ -59,14 +63,15 @@ async function follow(t: Ks4, c: RunContext, tool: Tool, input: Record<string, u
   for (let i = 0; i < 80; i++) {
     const p = await t.call<Page>(c, tool, { ...input, ...(cursor ? { cursor } : {}) });
     pages.push(p);
-    if (!p.cursor || NOTHING_FITS.test(JSON.stringify(p.notes ?? []))) return pages;
+    expect(JSON.stringify(p.notes ?? []), 'never "nothing fits"').not.toMatch(NOTHING_FITS);
+    if (!p.cursor) return pages;
     expect(p.cursor, `a cursor never points back at the same page (${JSON.stringify(input)})`).not.toBe(cursor);
     cursor = p.cursor;
   }
   throw new Error('paging did not end');
 }
 
-const NOTHING_FITS = /nothing of this page fits/;
+const NOTHING_FITS = /nothing|raised/;
 const itemsOf = (p: Page, tool: Tool) => (p[LIST_KEY[tool]] as unknown[] | undefined) ?? [];
 const isCut = (x: unknown) => typeof x === 'object' && x !== null && (x as { cut?: unknown }).cut === true;
 /** The id an item is recovered by. */
@@ -95,8 +100,8 @@ const CASES: Array<{ tool: Tool; input: (w: ReturnType<typeof world>) => Record<
   { tool: 'search', input: () => ({ query: 'globex widget claim', kinds: ['fact'] }) },
   { tool: 'search', input: () => ({ query: 'globex widget claim', kinds: ['fact'], include_unverified: true }), role: 'synthesizer' },
   { tool: 'get_card', input: (w) => ({ entity_id: w.e.id }) },
-  { tool: 'list_changes', input: () => ({}) },
-  { tool: 'list_changes', input: () => ({ include_unverified: true }), role: 'synthesizer' },
+  { tool: 'list_changes', input: () => ({ since: '2026-10-01' }) },
+  { tool: 'list_changes', input: () => ({ since: '2026-10-01', include_unverified: true }), role: 'synthesizer' },
 ];
 
 describe('list paging ruling: end the page before an item that does not fit; shorten only what no page can hold', () => {
@@ -110,32 +115,13 @@ describe('list paging ruling: end the page before an item that does not fit; sho
       expect(ref.some(isCut)).toBe(false);
       let sawCut = false;
       let sawUncutRun = false;
-      const fixed = Object.fromEntries(Object.entries(whole!).filter(([key]) => !['tokens', 'truncated', 'more', 'cursor', 'notes', LIST_KEY[k.tool]].includes(key)));
-      const recurringNotes = (whole!.notes ?? []).filter((n) => !n.startsWith('more matches elsewhere'));
-      for (let budget = 100; budget <= 1400; budget += 10) {
+      const fixed = Object.fromEntries(Object.entries(whole!).filter(([key]) => !['tokens', 'truncated', 'more', 'cursor', 'notes', 'content_trust', 'relaxed', LIST_KEY[k.tool]].includes(key)));
+      const floor = READ_FLOOR_TOKENS[k.tool];
+      for (let budget = floor; budget <= 1400; budget += 10) {
         const pages = await follow(w.t, w.c, k.tool, { ...input, max_tokens: budget });
         for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(budget);
-        const last = pages.at(-1)!;
-        if (NOTHING_FITS.test(JSON.stringify(last.notes ?? []))) {
-          // Never a false "nothing fits": even the barest form of the next item (kind, id, cut, the
-          // pointer to the full item) on a page of this request would exceed the budget.
-          const next = ref[pages.slice(0, -1).flatMap((p) => itemsOf(p, k.tool)).length];
-          const id = idOf(next) ?? w.e.id;
-          // The pointer the code gives such an item: its own `expand` (hits) or this request at it.
-          const full = k.tool === 'search'
-            ? { kind: 'expand_id', tool: 'expand', input: { id } }
-            : { kind: 'same_call', tool: k.tool, input: { ...input, cursor: last.cursor, max_tokens: 100 } };
-          const bare = typeof next === 'string'
-            ? { text: '…', cut: true, full }
-            : {
-                ...Object.fromEntries(['kind', 'type', 'change'].filter((f) => typeof (next as Record<string, unknown>)[f] === 'string').map((f) => [f, (next as Record<string, unknown>)[f]])),
-                id, cut: true, full,
-              };
-          const page = { ...fixed, [LIST_KEY[k.tool]]: [bare], tokens: budget, truncated: true, more: ref.length, cursor: last.cursor, ...(recurringNotes.length ? { notes: recurringNotes } : {}) };
-          // Within the estimate's rounding (a cursor at item 0 is a few characters longer).
-          expect(estimateTokens(JSON.stringify(page)), `budget ${budget}: false "nothing fits"`).toBeGreaterThan(budget - 4);
-          continue;
-        }
+        for (const p of pages.slice(1)) expect(Object.keys(fixed).filter((key) => key in p), 'the header is on the first page only').toEqual([]);
+        expect(Object.fromEntries(Object.keys(fixed).map((key) => [key, pages[0]![key]])), 'the first page carries the whole header').toEqual(fixed);
         const joined = pages.flatMap((p) => itemsOf(p, k.tool));
         expect(joined.length, `budget ${budget}`).toBe(ref.length);
         for (const [i, item] of joined.entries()) {
@@ -166,20 +152,19 @@ describe('list paging ruling: end the page before an item that does not fit; sho
     for (const [tool, input] of [
       ['search', { query: 'globex widget claim 8', kinds: ['fact'] }],
       ['get_card', { entity_id: w.e.id }],
-      ['list_changes', {}],
+      ['list_changes', { since: '2026-10-01' }],
     ] as const) {
       const ref = (await follow(w.t, w.c, tool, { ...input, max_tokens: 8000 })).flatMap((p) => itemsOf(p, tool));
       let longestRecovered = false;
       // Every budget at which the longest item is cut (and a page still holds its bare form with the pointer).
-      for (let budget = 100; budget <= 300; budget += 10) {
+      for (let budget = READ_FLOOR_TOKENS[tool]; budget <= 450; budget += 10) {
         const pages = await follow(w.t, w.c, tool, { ...input, max_tokens: budget });
-        if (NOTHING_FITS.test(JSON.stringify(pages.at(-1)!.notes ?? []))) continue;
         const joined = pages.flatMap((p) => itemsOf(p, tool));
         expect(joined.length, tool).toBe(ref.length);
         for (const [i, item] of joined.entries()) {
           if (!isCut(item)) continue;
           await expectRecovered(w.t, w.c, item as Record<string, unknown>, ref[i], `${tool} budget ${budget} item ${i}`);
-          if (JSON.stringify(ref[i]).includes(longest.claim.slice(0, 120))) longestRecovered = true;
+          if (JSON.stringify(ref[i]).includes(JSON.stringify(longest.claim.slice(0, 60)).slice(1, -1))) longestRecovered = true;
         }
       }
       expect(longestRecovered, tool).toBe(true);
@@ -218,12 +203,11 @@ describe('shortenItem (ruling 3)', () => {
   });
 });
 
-describe('list tool descriptions (ruling 5)', () => {
-  it('say: follow cursor until it is absent; an item marked cut carries the call that returns it whole', () => {
-    for (const tool of ['search', 'get_card', 'list_changes'] as const) {
-      expect(TOOL_DESCRIPTIONS[tool], tool).toContain(
-        'follow `cursor` until it is absent; an item marked `cut` is shortened: make the call in its `full` ({tool, input}) to get it whole; `too_large` = larger than the hard maximum, served cut with its `size_tokens`.',
-      );
+describe('read tool descriptions (paging rework)', () => {
+  it('say: follow cursor until it is absent; an item marked cut carries full, the exact call that returns it; and the floor', () => {
+    for (const tool of KNOWLEDGE_READ_TOOLS) {
+      expect(TOOL_DESCRIPTIONS[tool], tool).toContain('follow `cursor` until it is absent; an item marked `cut` carries `full`, the exact call that returns it');
+      expect(TOOL_DESCRIPTIONS[tool], tool).toContain(`Floor: ${READ_FLOOR_TOKENS[tool]} tokens`);
     }
   });
 });
@@ -242,17 +226,18 @@ describe('shortened text never splits an id (Opus finding 6)', () => {
   });
 });
 
-describe('expand of a non-text item shortens its header like text reads (Opus finding 4, §9)', () => {
-  it('a fact with a long claim at 100-300 tokens: header_cut on the first page, never "nothing fits", every item visited', async () => {
+describe('expand of a fact: a fixed header, then items (paging rework)', () => {
+  it('a fact with a long claim from its floor to 300 tokens: the whole header on the first page, the claim an item, never "nothing fits"', async () => {
     const t = ks4(opened);
     const a = await t.page('ws_a', 'Acme pricing page: the Pro plan costs 49 dollars per seat.');
     const f = t.fact('ws_a', `Acme pricing claim ${'with a fairly long explanation of the plan tiers and seat prices '.repeat(8)}`, {
       evidence: [a.id], criteria: { a: 'b'.repeat(200) } as never,
     });
     const c = t.ctx('ws_a');
-    const [whole] = await t.call<Page>(c, 'expand', { id: f.id, max_tokens: 8000 }).then((p) => [p]);
-    const ref = (whole!.items as unknown[]) ?? [];
-    for (let budget = 100; budget <= 300; budget += 10) {
+    const whole = await t.call<Page>(c, 'expand', { id: f.id, max_tokens: 8000 });
+    const ref = (whole.items as unknown[]) ?? [];
+    expect(ref[0]).toEqual({ type: 'claim', text: f.claim });
+    for (let budget = READ_FLOOR_TOKENS.expand; budget <= 300; budget += 10) {
       const pages: Page[] = [];
       let cursor: string | undefined;
       for (let i = 0; i < 40; i++) {
@@ -260,12 +245,12 @@ describe('expand of a non-text item shortens its header like text reads (Opus fi
         pages.push(p);
         expect(p.tokens).toBeLessThanOrEqual(budget);
         expect(JSON.stringify(p.notes ?? []), `budget ${budget}`).not.toMatch(NOTHING_FITS);
+        expect((p.items as unknown[]).length, `budget ${budget}: every page serves an item`).toBeGreaterThan(0);
         if (!p.cursor) break;
         cursor = p.cursor;
       }
-      // Re-gate (Opus 1): the header is shortened only when it cannot fit a page alone; else it is whole.
-      if (pages[0]!.header_cut === true) expect(pages[0]).toMatchObject({ id: f.id });
-      else expect(pages[0]).toMatchObject({ id: f.id, claim: f.claim });
+      expect(pages[0]).toMatchObject({ kind: 'fact', id: f.id, subject: f.subject, lifecycle: 'current' });
+      expect(pages[0]!.header_cut).toBeUndefined();
       expect(pages.flatMap((p) => (p.items as unknown[]) ?? []).length, `budget ${budget}`).toBe(ref.length);
     }
   });

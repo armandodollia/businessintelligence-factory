@@ -97,7 +97,8 @@ describe('scope toggle: node by default, tree when asked', () => {
     const s = setup();
     const r = await s.get(s.k('ws_c', `/items/${s.labs.id}`));
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ id: s.labs.id, source: 'ws_d', claim: 'Globex offers loans to Labs customers', content_trust: 'untrusted' });
+    expect(r.body).toMatchObject({ id: s.labs.id, source: 'ws_d', content_trust: 'untrusted' });
+    expect(r.body.items[0]).toEqual({ type: 'claim', text: 'Globex offers loans to Labs customers' });
   });
 
   it('a bad scope value is a 400; an unknown node a 404', async () => {

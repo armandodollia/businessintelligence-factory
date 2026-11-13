@@ -198,9 +198,10 @@ describe('interviewer can read uploads', () => {
     const r = await t.handle(ctx('interviewer', t), 'read_artifact', { artifact_id: up.id, mode: 'text' });
     expect(r.ok).toBe(true);
     // KS-4: the extracted text, fenced; the read is logged and flags the run as upload-exposed.
-    const data = (r as { data: { items: Array<{ text: string }>; upload?: boolean } }).data;
-    expect(data.items[0]!.text).toContain('renewals,-12%');
-    expect(data.items[0]!.text.startsWith(`<<<EVIDENCE ${up.id}`)).toBe(true);
+    const data = (r as { data: { items: Array<{ type: string; text: string }>; upload?: boolean } }).data;
+    const passage = data.items.find((i) => i.type === 'chunk')!; // after the artifact's metadata item
+    expect(passage.text).toContain('renewals,-12%');
+    expect(passage.text.startsWith(`<<<EVIDENCE ${up.id}`)).toBe(true);
     expect(data.upload).toBe(true);
   });
 });

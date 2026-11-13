@@ -8,6 +8,7 @@ import { budgetFor, estimateTokens } from '../../../src/core/knowledge/budget.js
 import { resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import type { Store } from '../../../src/core/store/db.js';
+import { READ_FLOOR_TOKENS } from '../../../src/core/knowledge/tools.js';
 import { ks4, type Ks4 } from './ks4fixture.js';
 
 const opened: Store[] = [];
@@ -74,12 +75,12 @@ describe('budgets and cursors (design §9, §18)', () => {
     expect(new Set(pages.flatMap((p) => p.hits.map((h) => h.id))).size).toBe(50);
     expect(pages.slice(0, -1).every((p) => p.more! > 0)).toBe(true);
     // Raw pages, concatenated, are the whole (redacted) file.
-    const raw = await allPages<Paged & { items: Array<{ text: string }> }>(t, c, 'read_artifact', { artifact_id: doc.id, mode: 'raw' });
-    const text = raw.map((p) => p.items[0]!.text.replace(/^<<<EVIDENCE [^\n]*\n/, '').replace(/\n>>>$/, '')).join('');
+    const raw = await allPages<Paged & { items: Array<{ type?: string; text: string }> }>(t, c, 'read_artifact', { artifact_id: doc.id, mode: 'raw' });
+    const text = raw.flatMap((p) => p.items.filter((i) => (i as { type?: string }).type === 'raw')).map((i) => i.text.replace(/^<<<EVIDENCE [^\n]*\n/, '').replace(/\n>>>$/, '')).join('');
     expect(text).toBe(t.artifacts.read(doc.id).bytes.toString('utf8'));
   });
 
-  it('max_tokens lowers the budget (never raises it) and hardMaxTokens caps any role override', async () => {
+  it('max_tokens lowers the budget or raises it up to the hard maximum; hardMaxTokens caps any role override; the floor is the minimum', async () => {
     const t = ks4(opened, (cfg) => {
       cfg.knowledge = { ...(cfg.knowledge ?? {}), hardMaxTokens: 900, budgets: { roles: { worker: { search: 5000 } } } };
     });
@@ -91,7 +92,21 @@ describe('budgets and cursors (design §9, §18)', () => {
     expect(small.tokens).toBeLessThanOrEqual(200);
     const raised = await t.call<Paged>(c, 'search', { query: 'globex', kinds: ['fact'], limit: 50, max_tokens: 100000 });
     expect(raised.tokens).toBeLessThanOrEqual(900);
-    expect((await t.handle(c, 'search', { query: 'globex', max_tokens: 5 })).ok).toBe(false); // below the floor
+    // Below the tool's floor: raised to it (a page that serves an item), not refused.
+    const tiny = await t.call<Paged & { hits: unknown[] }>(c, 'search', { query: 'globex', kinds: ['fact'], limit: 50, max_tokens: 5 });
+    expect(tiny.tokens).toBeLessThanOrEqual(READ_FLOOR_TOKENS.search);
+    expect(tiny.hits.length).toBeGreaterThan(0);
+    // Above the role budget, up to the hard maximum (a pointer's "this call with max_tokens N").
+    const t2 = ks4(opened, (cfg) => {
+      cfg.knowledge = { ...(cfg.knowledge ?? {}), budgets: { roles: { worker: { search: 300 } } } };
+    });
+    await big(t2);
+    const c2 = t2.ctx('ws_a');
+    const role = await t2.call<Paged>(c2, 'search', { query: 'globex', kinds: ['fact'], limit: 50 });
+    expect(role.tokens).toBeLessThanOrEqual(300);
+    const up = await t2.call<Paged>(c2, 'search', { query: 'globex', kinds: ['fact'], limit: 50, max_tokens: 3000 });
+    expect(up.tokens).toBeGreaterThan(300);
+    expect(up.tokens).toBeLessThanOrEqual(3000);
   });
 
   it('a cursor is bound to its request: another query, node or role rejects it', async () => {
@@ -125,7 +140,7 @@ describe('retrieval log (design §13; hard ruling: every served item is listed)'
       tokensReturned: s.tokens, resultCount: rows[0]!.resultIds.length, uploadDerived: false,
     });
     // Each fact hit and the entity named on it.
-    expect(rows[0]!.resultIds).toEqual(s.hits.flatMap((h) => [{ id: h.id, kind: 'fact' }, { id: ent.id, kind: 'entity' }]));
+    expect(rows[0]!.resultIds).toEqual([...s.hits.map((h) => ({ id: h.id, kind: 'fact' })).slice(0, 1), { id: ent.id, kind: 'entity' }, ...s.hits.slice(1).map((h) => ({ id: h.id, kind: 'fact' }))]);
     expect(s.hits.every((h) => h.entity?.id === ent.id)).toBe(true);
     // Every fact id shown on a card line is listed.
     const lineIds = card.lines.flatMap((l) => [...l.matchAll(/\[(fnd_[0-9A-Z]+)\]/g)].map((m) => m[1]!));

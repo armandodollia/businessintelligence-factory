@@ -2,46 +2,47 @@
  * `expand` and `read_artifact` (design §9). Reads by id: any id of the caller's tree (see
  * `readCommon.ts`); an unknown id and an id of another tree get the same "not found" text.
  *
- * - fact: full claim, criteria, freshness, evidence with quotes and captions, version history, the
+ * - fact: header (kind, id, subject, status, lifecycle, version, entity, source); items: the claim,
+ *   criteria, state (lineage, confirmations, freshness), evidence, each verified quote, versions, the
  *   unverified update (a rejected replacement), relations it asserts.
- * - artifact: metadata, description, captures, previous / next capture of the same URL (text changed
- *   or not), outline (headings with chunk ids and sizes); says when extraction is pending and when the
- *   document was cut at the extraction cap.
+ * - artifact: header (kind, id, artifact kind, title, source); items: metadata and extraction state,
+ *   description, captures, previous / next capture of the same URL (text changed or not), outline
+ *   (headings with chunk ids and sizes); notes say when extraction is pending and when the document was
+ *   cut at the extraction cap.
  * - chunk: its text (redacted across chunk boundaries, fenced), `around` neighbours on each side.
- * - entity: its card with the `expand` budget (more facts than `get_card`).
- * - record (competitor, persona, symptom, hypothesis, recommendation): its fields.
+ * - entity: its card with the `expand` budget (more facts than `get_card`); node: its node card.
+ * - record (competitor, persona, symptom, hypothesis, recommendation): one item per field.
  *
  * `read_artifact` modes: `outline` (documents' default), `text` (the extracted text, chunk by chunk),
  * `image` (screenshots' and images' default), `raw` (the stored bytes of a text format, redacted whole
  * and then paged, fenced). Every mode pages with a cursor bound to the request.
  *
- * Paging (KS-8 design-thread ruling): the header goes on the first page only (later pages: `id`, items,
- * envelope). Text reads (text / raw modes, chunks and their neighbours) page by position — a passage that
- * does not fit is served up to the budget, marked `cut: true`, and the next cursor continues from that
- * character; nothing is skipped. Other items are listed whole, or shortened and marked `cut: true` when
- * one alone is larger than the page (`shortenItem`).
+ * Paging (rework, binding; `paging.ts`): a small fixed header — identity only, bounded — on the first
+ * page only, then items, each page assembled by measuring the real response. Text (passages, raw) pages
+ * by position: a piece that does not end its passage is `cut: true` and the cursor continues from its
+ * next character. Any other item too big for a page on its own is cut and carries `full`.
  *
  * Synthesizer and interviewer see usable facts and records only: anything else answers "not found",
  * and history / unverified updates are left out. Reviewer and escalation runs read only their task's
  * review slice; nested items outside it are left out.
  */
 import type { ArtifactStore } from '../evidence/artifacts.js';
-import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Artifact, Finding, RetrievalResultRef, TextChunk } from '../types.js';
-import { estimateTokens, decodeCursorAt, encodeCursor } from './budget.js';
-import { entityCard, nodeCard, type CardLine } from './cards.js';
+import { encodeCursor } from './budget.js';
+import { cardPageLines, entityCard, HEADER_NAME_JSON, nodeCard, nodeLineRecover } from './cards.js';
 import { getEntity } from './entities.js';
+import { normalizeText } from './extract/index.js';
 import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
+import { assemblePage, boundedText, laterPageNeed, type PageItem } from './paging.js';
 import { itemIsUploadDerived } from './provenance.js';
 import {
-  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, itemExpandId, outsideScopeNote, pageOf, readableById, shortenItem,
-  sourceLabel, uniqueRefs, usableOnly,
-  cursorAtItem, nodeLineRecover, type ItemPage, type ReadEnv, type ReadOutput, type Recover,
+  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, outsideScopeNote, readableById,
+  sourceLabel, usableOnly, type ReadEnv, type ReadOutput, type Recover,
 } from './readCommon.js';
 import { narrowTo, notFound, type ScopeMode } from './scope.js';
 import { artifactChunks, canonicalArtifactId, servedChunkText, servedLine, servedTextState, type ServedTextState } from './texts.js';
-import { CONTENT_TRUST, fenceEvidence, redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
+import { fenceEvidence, redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
 
 const CLAIM_MAX = 4000;
 const LINE = 400;
@@ -55,21 +56,28 @@ export const expandNotFound = (id: string) => notFound('item', id);
 export const artifactNotFound = (id: string) => notFound('artifact', id);
 
 type Item = Record<string, unknown> & { type: string };
+/** A response before paging: its header (identity), items, and the notes of its first page. */
 type Built = {
-  header: Record<string, unknown>; items: Item[]; refs: Map<Item, RetrievalResultRef[]>; headerRefs: RetrievalResultRef[]; upload: boolean;
-  itemUpload: Map<Item, boolean>; notes: string[]; outside: number;
-  /** Re-gate: the call that returns a shortened item whole, when it is not this request (see `RECOVERY_KINDS`). */
-  recover?: (item: Item, index: number, need: number) => Recover | undefined;
+  header: Record<string, unknown>; headerRefs: RetrievalResultRef[]; upload: boolean;
+  items: PageItem[]; notes: string[]; outside: number;
 };
 
 function built(header: Record<string, unknown>, headerRefs: RetrievalResultRef[], upload: boolean): Built {
-  return { header, items: [], refs: new Map(), headerRefs, upload, itemUpload: new Map(), notes: [], outside: 0 };
+  return { header, headerRefs, upload, items: [], notes: [], outside: 0 };
 }
 
-function push(b: Built, item: Item, refs: RetrievalResultRef[] = [], upload = false): void {
-  b.items.push(item);
-  b.refs.set(item, refs);
-  b.itemUpload.set(item, upload);
+function push(b: Built, item: Item, refs: RetrievalResultRef[] = [], upload = false, extra: Partial<PageItem> = {}): void {
+  b.items.push({ value: item, refs, upload, ...extra });
+}
+
+/**
+ * A name for the header, bounded (`boundedText`); when the bound cuts it, the whole value is served as a
+ * `field` item too (paging rework: the header never needs cutting, and nothing is lost).
+ */
+function named(b: Built, field: string, full: string, refs: RetrievalResultRef[] = [], upload = false): string {
+  const shown = boundedText(full, HEADER_NAME_JSON);
+  if (shown !== full) push(b, { type: 'field', field, value: full }, refs, upload);
+  return shown;
 }
 
 const modeOf = (env: ReadEnv): ScopeMode => env.mode ?? 'node';
@@ -83,205 +91,31 @@ function inTree(env: ReadEnv, ws: string | undefined): boolean {
   return ws !== undefined && env.scope.treeIds.includes(ws);
 }
 
-/**
- * KS-8 ruling: the header (and the notes about the item) goes on the first page only; a later page
- * carries the item's id, its items and the envelope. A page starting at the very beginning (also a
- * "nothing fits" restart cursor) is a first page.
- */
-function firstPage(header: Record<string, unknown>, at: { offset: number; pos: number }): { header: Record<string, unknown>; first: boolean } {
-  const first = at.offset === 0 && at.pos === 0;
-  return { header: first ? header : { id: header.id }, first };
-}
-
-const cursorAt = (cursor: string | undefined, key: string) => (cursor ? decodeCursorAt(cursor, key) : { offset: 0, pos: 0 });
-
-/** Pages `b.items` within `budget` and assembles the output. */
+/** Pages `b.items` within `budget` (`assemblePage`: header and notes on the first page only). */
 function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
   if (b.outside) b.notes.push(outsideScopeNote(b.outside));
-  const at = cursorAt(cursor, key);
-  const recover = (item: Item, index: number, need: number): Recover | undefined =>
-    b.recover?.(item, index, need) ?? env.again?.(cursorAtItem(key, index), need);
-  const assemble = (page: ItemPage<Item>, header: Record<string, unknown>, notes: string[], first: boolean): ReadOutput => {
-    // A shortened item is a new object: its refs are those of the item it was cut from.
-    const src = b.items.slice(page.offset, page.offset + page.items.length);
-    const out: ReadOutput = {
-      data: { ...header, items: page.items },
-      results: uniqueRefs([...(first ? b.headerRefs : []), ...src.flatMap((i) => b.refs.get(i) ?? [])]),
-      uploadDerived: (first && b.upload) || src.some((i) => b.itemUpload.get(i) === true),
-      truncated: page.truncated,
-      restart: { cursor: page.startCursor, remaining: page.remaining },
-      more: page.more,
-      notes,
-      query,
-      scopeLabel: 'tree',
-    };
-    if (page.stalled) out.stalled = true;
-    if (page.cursor) out.cursor = page.cursor;
-    return out;
-  };
-  // Re-gate (Opus 1): page 0 serves the header first. An item that does not fit after it starts the next
-  // page (cursor offset 0, `pos` 1 = "header served") when a later page — the id, the items, the
-  // envelope — holds it whole; the header is shortened (`header_cut`) only when it cannot fit alone; an
-  // item is shortened only when it is too big for a whole page.
-  if (at.offset === 0 && at.pos === 0 && b.items.length) {
-    const envelope = envelopeTokens(budget, key, b.items.length, 1);
-    const laterCursor = encodeCursor({ key, offset: 0, pos: 1 });
-    const fitsLater = estimateTokens(JSON.stringify({
-      id: b.header.id, items: [b.items[0]], tokens: budget, truncated: true, more: b.items.length, cursor: laterCursor, content_trust: CONTENT_TRUST,
-    })) <= budget;
-    const headerOnly = (header: Record<string, unknown>, notes: string[]): ReadOutput =>
-      assemble({ items: [], truncated: true, more: b.items.length, cursor: laterCursor, offset: 0, startCursor: encodeCursor({ key, offset: 0 }), remaining: b.items.length }, header, notes, true);
-    const wholeHeader = estimateTokens(JSON.stringify({ ...b.header, items: [] })) + (b.notes.length ? estimateTokens(JSON.stringify(b.notes)) : 0) + envelope <= budget;
-    if (wholeHeader) {
-      const page = pageOf(b.items, b.header, budget, { key, notes: b.notes, recover });
-      if (page.items.length && (page.items[0] as { cut?: unknown }).cut !== true) return assemble(page, b.header, b.notes, true);
-      if (fitsLater) return headerOnly(b.header, b.notes);
-    } else if (fitsLater) {
-      const short = textHeader(b, at, budget - envelope);
-      return headerOnly(short.header, short.notes);
-    }
-  }
-  // Later pages, and a first item too big for any page: the header shortened first, leaving room for the
-  // envelope and the barest form of that item (Opus finding 4, §9), then the item shortened to fit.
-  const next = b.items[at.offset];
-  const nextId = next !== undefined ? itemExpandId(next) : undefined;
-  // The barest shortened item: its type, id, `cut` and the longest pointer (same call, cursor, budget).
-  const minItem = next === undefined ? 0 : estimateTokens(JSON.stringify({
-    ...(typeof (next as Item).type === 'string' ? { type: (next as Item).type } : {}), ...(nextId ? { id: nextId } : {}), cut: true,
-    full: { kind: 'same_call', tool: 'read_artifact', input: { id: b.header.id, cursor: cursorAtItem(key, b.items.length), max_tokens: 99_999 } },
-  }));
-  const { header, first, notes } = textHeader(b, at, budget - envelopeTokens(budget, key, b.items.length, 0) - minItem);
-  return assemble(pageOf(b.items, header, budget, { key, notes, recover, ...(cursor ? { cursor } : {}) }), header, notes, first);
+  const page = assemblePage({
+    key, cursor, budget, itemsKey: 'items', header: b.header, headerRefs: b.headerRefs, headerUpload: b.upload,
+    notes: env.pageNotes, firstNotes: b.notes, items: b.items, again: env.again,
+  });
+  return { data: page.data, results: page.results, uploadDerived: page.uploadDerived, truncated: page.truncated, query, scopeLabel: 'tree' };
 }
 
-/**
- * Tokens of the envelope the dispatcher adds to a page of this request (tokens, truncated, more, the
- * longest cursor this request can hand out, content_trust), measured rather than reserved.
- */
-function envelopeTokens(budget: number, key: string, items: number, longest: number): number {
-  return estimateTokens(JSON.stringify({
-    tokens: budget, truncated: true, more: items, cursor: encodeCursor({ key, offset: items, pos: longest }), content_trust: CONTENT_TRUST,
-  })) + 2;
-}
-
-/**
- * Header of a text read's page. First page: the whole header and notes; when they would leave less
- * than `room` for text (a small max_tokens), the header is shortened (`shortenItem`, then just the id)
- * and marked `header_cut: true` — `expand` of the id gives all of it — so the first page still serves
- * text and the cursor always moves forward. Later pages: the id only.
- */
-function textHeader(b: Built, at: { offset: number; pos: number }, room: number): { header: Record<string, unknown>; first: boolean; notes: string[] } {
-  const { header, first } = firstPage(b.header, at);
-  if (!first) return { header, first, notes: [] };
-  const size = (h: unknown, n: string[]) => estimateTokens(JSON.stringify({ ...(h as object), items: [] })) + (n.length ? estimateTokens(JSON.stringify(n)) : 0);
-  if (size(header, b.notes) <= room) return { header, first, notes: b.notes };
-  const notes = size({ id: header.id, header_cut: true }, b.notes) <= room ? b.notes : [];
-  const short = shortenItem(header, (h) => size(h, notes) <= room) as Record<string, unknown> | undefined;
-  const { cut: _cut, ...shortHeader } = short ?? { id: header.id };
-  return { header: { ...shortHeader, header_cut: true }, first, notes };
-}
-
-/** One passage of a text read: its served text (redacted, fence sequences removed) and its item fields. */
-type Passage = { chunk: TextChunk; text: string; meta: Item; refs: RetrievalResultRef[]; upload: boolean };
-
-function passageOf(env: ReadEnv, c: TextChunk, upload: boolean): Passage {
+/** A passage of a text read: position-paged (`paging.ts`); its text redacted across chunk boundaries, fence sequences removed. */
+function passageItem(env: ReadEnv, c: TextChunk, upload: boolean, fence: string): PageItem {
   const meta: Item = { type: 'chunk', chunk_id: c.id, seq: c.seq };
   if (c.headingPath) meta.heading = servedLine(env.store, env.scope.workspaceId, stripFences(c.headingPath), 160);
   if (c.locator) meta.locator = c.locator;
-  // Redacted across chunk boundaries first, then fence sequences removed: positions index this text, and
-  // a cut made in it can never fall inside a fence marker (the fence is added around each piece).
-  const text = stripFences(servedChunkText(env.store, env.scope.workspaceId, c));
-  return { chunk: c, text, meta, refs: [{ id: c.id, kind: 'chunk' }], upload: upload || c.uploadDerived === true };
-}
-
-/** Smallest piece of a passage served after whole passages on the same page (characters). */
-const MIN_PIECE_CHARS = 48;
-
-/** Prefer to end a cut piece after a space (within the last 40 characters), never inside a surrogate pair. */
-function cutPoint(text: string, n: number): number {
-  let k = n;
-  if (k < text.length) {
-    const ws = text.slice(Math.max(0, k - 40), k).search(/\s\S*$/);
-    if (ws >= 0) {
-      const at = Math.max(0, k - 40) + ws + 1;
-      if (at > 0) k = at;
-    }
-  }
-  const code = text.charCodeAt(k - 1);
-  if (k > 0 && k < text.length && code >= 0xd800 && code <= 0xdbff) k--;
-  return k;
-}
-
-/**
- * Pages passages by position (KS-8 ruling). From the cursor's (passage, character): whole passages
- * while they fit; then the next one up to the budget, marked `cut: true`, and the cursor continues
- * from exactly that character. Nothing is skipped; a piece always fits (or nothing is served and the
- * page is `stalled`). A continued piece carries only `type`, `chunk_id` and `seq`.
- */
-function finishText(b: Built, fenceId: string, passages: Passage[], budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
-  const at = cursorAt(cursor, key);
-  const longest = passages.reduce((m, x) => Math.max(m, x.text.length), 0);
-  const envelope = envelopeTokens(budget, key, passages.length, longest);
-  const minPiece = passages.length ? estimateTokens(JSON.stringify({ type: 'chunk', chunk_id: passages[0]!.chunk.id, seq: 0, text: fenceEvidence(fenceId, 'x'.repeat(64)), cut: true })) : 0;
-  const { header, first, notes } = textHeader(b, at, budget - envelope - minPiece);
-  let o = Math.min(at.offset, passages.length);
-  let p = o < passages.length ? Math.min(at.pos, passages[o]!.text.length) : 0;
-  let used = estimateTokens(JSON.stringify({ ...header, items: [] })) + envelope + (notes.length ? estimateTokens(JSON.stringify(notes)) : 0);
-  const items: Item[] = [];
-  const refs: RetrievalResultRef[] = first ? [...b.headerRefs] : [];
-  let upload = first && b.upload;
-  const cost = (it: Item) => estimateTokens(`${JSON.stringify(it)}\n`);
-  while (o < passages.length) {
-    const ps = passages[o]!;
-    let base: Item = p === 0 ? ps.meta : { type: 'chunk', chunk_id: ps.chunk.id, seq: ps.chunk.seq };
-    const rest = ps.text.slice(p);
-    const whole: Item = { ...base, text: fenceEvidence(fenceId, rest) };
-    if (used + cost(whole) <= budget) {
-      items.push(whole);
-      used += cost(whole);
-      refs.push(...ps.refs);
-      upload ||= ps.upload;
-      o++;
-      p = 0;
-      continue;
-    }
-    // A long heading must not stop the passage from starting on a small page (the outline lists headings).
-    if (!items.length && base === ps.meta && used + cost({ ...base, text: fenceEvidence(fenceId, rest.slice(0, 64)), cut: true }) > budget) {
-      base = { type: 'chunk', chunk_id: ps.chunk.id, seq: ps.chunk.seq };
-    }
-    const piece = (n: number): Item => ({ ...base, text: fenceEvidence(fenceId, rest.slice(0, n)), cut: true });
-    let lo = 0;
-    let hi = rest.length - 1;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (used + cost(piece(mid)) <= budget) lo = mid;
-      else hi = mid - 1;
-    }
-    const n = lo > 0 ? cutPoint(rest, lo) : 0;
-    // After whole passages, a sliver (under MIN_PIECE_CHARS) is not worth a piece: the passage starts on the next page.
-    if (n > 0 && (!items.length || n >= MIN_PIECE_CHARS)) {
-      items.push(piece(n));
-      refs.push(...ps.refs);
-      upload ||= ps.upload;
-      p += n;
-    }
-    break;
-  }
-  const truncated = o < passages.length;
-  const out: ReadOutput = {
-    data: { ...header, items },
-    results: uniqueRefs(refs),
-    uploadDerived: upload,
-    truncated,
-    restart: { cursor: encodeCursor({ key, offset: at.offset, pos: at.pos }), remaining: Math.max(1, passages.length - at.offset) },
-    more: passages.length - o,
-    notes,
-    query,
-    scopeLabel: 'tree',
+  // Redacted first, then fence sequences removed: positions index this text, and a cut made in it can
+  // never fall inside a fence marker (the fence is added around each piece).
+  const body = stripFences(servedChunkText(env.store, env.scope.workspaceId, c));
+  const cont = { type: 'chunk', chunk_id: c.id, seq: c.seq };
+  return {
+    value: { ...meta, text: fenceEvidence(fence, body) },
+    refs: [{ id: c.id, kind: 'chunk' }],
+    upload: upload || c.uploadDerived === true,
+    text: { body, fence, meta: (pos) => (pos === 0 ? meta : cont) },
   };
-  if (truncated && !items.length) out.stalled = true;
-  else if (truncated) out.cursor = encodeCursor({ key, offset: o, pos: p });
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +126,25 @@ function factById(env: ReadEnv, id: string): Finding {
   if (!f || !inTree(env, f.workspaceId) || !readableById(env.scope, modeOf(env), factInNodeScope(env.store, env.scope, f.id))) throw expandNotFound(id);
   if (usableOnly(env.role) && !isFactUsable(f)) throw expandNotFound(id);
   return f;
+}
+
+/** Whitespace-insensitive form (as the quote check of `save_finding`). */
+const squash = (s: string) => normalizeText(s).replace(/\s+/g, ' ').trim();
+
+/**
+ * The passage around a quote (design §7.3 as amended): `expand <chunk>` when that chunk holds the whole
+ * quote, else with the fewest neighbours (`around`) that hold it; none when no such call does.
+ */
+function quotePassage(env: ReadEnv, chunkId: string, quote: string): Recover | undefined {
+  const c = knowledgeRepos(env.store).chunks.get(chunkId);
+  if (!c) return undefined;
+  const q = squash(quote);
+  const all = artifactChunks(env.store, c.artifactId);
+  for (let n = 0; n <= MAX_AROUND; n++) {
+    const text = all.filter((x) => x.seq >= c.seq - n && x.seq <= c.seq + n).map((x) => x.text).join('\n\n');
+    if (squash(text).includes(q)) return { kind: 'expand_chunk', tool: 'expand', input: { id: chunkId, ...(n ? { around: n } : {}) } };
+  }
+  return undefined;
 }
 
 function evidenceItems(env: ReadEnv, b: Built, f: Finding): void {
@@ -311,14 +164,18 @@ function evidenceItems(env: ReadEnv, b: Built, f: Finding): void {
     if (a.title || a.sourceUrl) item.title = servedLine(store, ws, stripFences(a.title ?? a.sourceUrl ?? ''), 160);
     if (a.description) item.description = fenceEvidence(aid, servedLine(store, ws, a.description, 300));
     push(b, item, [{ id: aid, kind: 'artifact' }], a.uploadDerived === true);
-    // Re-gate (binding): each verified quote is its own item, so the fact's cursor pages through all of them.
+    // Each verified quote is its own item, so the fact's cursor pages through all of them. A quote cut
+    // because it is larger than a page is recovered by this request at it (`same_call`); `passage` is the
+    // passage around it, given only when that call holds the whole quote.
     for (const r of refsRows.filter((x) => x.artifactId === aid && x.quote)) {
-      const q: Item = { type: 'quote', artifact_id: aid, ...(r.chunkId ? { chunk_id: r.chunkId } : {}), quote: fenceEvidence(aid, servedLine(store, ws, r.quote!, CLAIM_MAX)) };
+      const passage = r.chunkId ? quotePassage(env, r.chunkId, r.quote!) : undefined;
+      const q: Item = {
+        type: 'quote', artifact_id: aid, ...(r.chunkId ? { chunk_id: r.chunkId } : {}),
+        quote: fenceEvidence(aid, servedLine(store, ws, r.quote!, CLAIM_MAX)), ...(passage ? { passage } : {}),
+      };
       push(b, q, [{ id: aid, kind: 'artifact' }, ...(r.chunkId ? [{ id: r.chunkId, kind: 'chunk' as const }] : [])], a.uploadDerived === true);
     }
   }
-  // A quote too long for a page: its passage (position-paged) when it has one, else this request at it.
-  b.recover = (item) => (item.type === 'quote' && typeof item.chunk_id === 'string' ? { kind: 'expand_chunk', tool: 'expand', input: { id: item.chunk_id } } : undefined);
 }
 
 function expandFact(env: ReadEnv, id: string): Built {
@@ -328,32 +185,37 @@ function expandFact(env: ReadEnv, id: string): Built {
   const fresh = factFreshness(store, f, env.config, env.now);
   const headerRefs: RetrievalResultRef[] = [{ id: f.id, kind: 'fact' }];
   let upload = f.uploadDerived === true;
-  const header: Record<string, unknown> = {
-    kind: 'fact', id: f.id,
-    subject: servedLine(store, ws, f.subject, 200),
-    claim: servedLine(store, ws, f.claim, CLAIM_MAX),
-    criteria: redactServed(store, ws, f.criteria),
-    status: f.status,
-    lifecycle: f.lifecycle ?? 'current',
-    version: f.version ?? 1,
-    lineage_id: f.lineageId ?? f.id,
-    confirm_count: f.confirmCount ?? 0,
-    freshness: { since: fresh.since, age_days: fresh.ageDays, ttl_days: fresh.ttlDays, stale: fresh.stale },
-  };
-  if (f.workspaceId !== ws) header.source = f.workspaceId;
-  if (f.lineageConflict) header.lineage_conflict = true;
+  let entity: { id: string; name: string } | undefined;
   if (f.entityId && !env.slice) {
     try {
       const e = getEntity(store, env.scope, f.entityId);
-      header.entity = { id: e.id, name: servedLine(store, ws, e.name, 160) };
+      entity = { id: e.id, name: servedLine(store, ws, e.name, 160) };
       headerRefs.push({ id: e.id, kind: 'entity' });
       upload ||= itemIsUploadDerived(store, e.id);
     } catch {
       // entity of another tree cannot happen; leave it out
     }
   }
-  if (upload) header.upload = true;
-  const b = built(header, headerRefs, upload);
+  const b = built({}, headerRefs, upload);
+  b.header = {
+    kind: 'fact', id: f.id,
+    subject: named(b, 'subject', servedLine(store, ws, f.subject, 200), [{ id: f.id, kind: 'fact' }], f.uploadDerived === true),
+    status: f.status,
+    lifecycle: f.lifecycle ?? 'current',
+    version: f.version ?? 1,
+    ...(f.workspaceId !== ws ? { source: f.workspaceId } : {}),
+    ...(entity ? { entity: { id: entity.id, name: named(b, 'entity_name', entity.name, [{ id: entity.id, kind: 'entity' }], upload) } } : {}),
+    ...(upload ? { upload: true } : {}),
+  };
+  const factRef = [{ id: f.id, kind: 'fact' as const }];
+  push(b, { type: 'claim', text: servedLine(store, ws, f.claim, CLAIM_MAX) }, factRef, f.uploadDerived === true);
+  const criteria = redactServed(store, ws, f.criteria);
+  if (criteria && typeof criteria === 'object' && Object.keys(criteria).length) push(b, { type: 'criteria', criteria }, factRef, f.uploadDerived === true);
+  push(b, {
+    type: 'state', lineage_id: f.lineageId ?? f.id, confirm_count: f.confirmCount ?? 0,
+    freshness: { since: fresh.since, age_days: fresh.ageDays, ttl_days: fresh.ttlDays, stale: fresh.stale },
+    ...(f.lineageConflict ? { lineage_conflict: true } : {}),
+  });
   evidenceItems(env, b, f);
   const lineage = f.lineageId ?? f.id;
   const all = lineageVersions(store, lineage).filter((v) => v.id !== f.id && inTree(env, v.workspaceId));
@@ -423,23 +285,34 @@ function extractionNotes(state: ServedTextState): string[] {
   return notes;
 }
 
-function artifactHeader(env: ReadEnv, a: Artifact): { header: Record<string, unknown>; state: ServedTextState; refs: RetrievalResultRef[]; upload: boolean } {
+/**
+ * An artifact's header (kind, id, artifact kind, title, source, flags) and its first items: `meta` (mime,
+ * capture time, URL, flow, extraction state) and its `description`. Notes: extraction state.
+ */
+function artifactBuilt(env: ReadEnv, a: Artifact, extra: Record<string, unknown> = {}): { b: Built; state: ServedTextState } {
   const { store } = env;
   const ws = env.scope.workspaceId;
   const state = servedTextState(store, env.scope, a.id, 'tree');
-  const header: Record<string, unknown> = { kind: 'artifact', id: a.id, artifact_kind: a.kind, mime: a.mime, captured_at: a.capturedAt };
-  if (a.title) header.title = servedLine(store, ws, stripFences(a.title), 200);
-  if (a.sourceUrl) header.source_url = servedLine(store, ws, a.sourceUrl, 400);
-  if (a.flow) header.flow = servedLine(store, ws, stripFences(a.flow), 80);
-  if (a.step !== undefined) header.step = a.step;
-  if (a.description) header.description = fenceEvidence(a.id, servedLine(store, ws, a.description, 1000));
-  header.extraction = extractionInfo(state);
-  if (state.truncated) header.document_truncated = true;
-  if (a.workspaceId !== ws) header.source = a.workspaceId;
-  if (state.uploadDerived) header.upload = true;
   const refs: RetrievalResultRef[] = [{ id: a.id, kind: 'artifact' }];
   if (state.canonicalId !== a.id) refs.push({ id: state.canonicalId, kind: 'artifact' });
-  return { header, state, refs, upload: state.uploadDerived };
+  const upload = state.uploadDerived;
+  const b = built({}, refs, upload);
+  const title = a.title ? named(b, 'title', servedLine(store, ws, stripFences(a.title), 200), refs, upload) : undefined;
+  b.header = {
+    kind: 'artifact', id: a.id, artifact_kind: a.kind, ...(title !== undefined ? { title } : {}), ...extra,
+    ...(state.truncated ? { document_truncated: true } : {}),
+    ...(a.workspaceId !== ws ? { source: a.workspaceId } : {}),
+    ...(upload ? { upload: true } : {}),
+  };
+  const meta: Item = { type: 'meta', mime: a.mime, captured_at: a.capturedAt };
+  if (a.sourceUrl) meta.source_url = servedLine(store, ws, a.sourceUrl, 400);
+  if (a.flow) meta.flow = servedLine(store, ws, stripFences(a.flow), 80);
+  if (a.step !== undefined) meta.step = a.step;
+  meta.extraction = extractionInfo(state);
+  push(b, meta, refs, upload);
+  if (a.description) push(b, { type: 'description', text: fenceEvidence(a.id, servedLine(store, ws, a.description, 1000)) }, refs, upload);
+  b.notes.push(...extractionNotes(state));
+  return { b, state };
 }
 
 function outlineItems(env: ReadEnv, b: Built, a: Artifact, upload: boolean): void {
@@ -455,9 +328,8 @@ function expandArtifact(env: ReadEnv, id: string): Built {
   const { store } = env;
   const ws = env.scope.workspaceId;
   const a = artifactById(env, id);
-  const h = artifactHeader(env, a);
-  const b = built(h.header, h.refs, h.upload);
-  b.notes.push(...extractionNotes(h.state));
+  const { b } = artifactBuilt(env, a);
+  const artRef: RetrievalResultRef[] = [{ id: a.id, kind: 'artifact' }];
   // Captures: their text is served under the artifact's flag (a capture has no flag of its own).
   const caps = knowledgeRepos(store).artifactCaptures.list({ artifactId: a.id }).sort((x, y) => x.capturedAt.localeCompare(y.capturedAt));
   for (const cap of caps) {
@@ -473,7 +345,7 @@ function expandArtifact(env: ReadEnv, id: string): Built {
     if (cap.note) item.note = fenceEvidence(a.id, servedLine(store, ws, cap.note, 300));
     if (cap.description) item.description = fenceEvidence(a.id, servedLine(store, ws, cap.description, 600));
     if (cap.entityId && !env.slice) item.entity_id = cap.entityId;
-    push(b, item, [{ id: a.id, kind: 'artifact' }], h.upload);
+    push(b, item, artRef, b.upload);
   }
   if (!env.slice && a.urlKey) {
     // Previous / next capture of the same page (another artifact = other bytes), text changed or not.
@@ -501,7 +373,7 @@ function expandArtifact(env: ReadEnv, id: string): Built {
       push(b, item);
     }
   }
-  outlineItems(env, b, a, h.upload);
+  outlineItems(env, b, a, b.upload);
   return b;
 }
 
@@ -521,7 +393,7 @@ function chunkOwner(env: ReadEnv, chunk: TextChunk): Artifact | undefined {
   return undefined;
 }
 
-function expandChunk(env: ReadEnv, id: string, around: number): { b: Built; owner: Artifact; passages: Passage[] } {
+function expandChunk(env: ReadEnv, id: string, around: number): Built {
   const { store } = env;
   const c = knowledgeRepos(store).chunks.get(id);
   if (!c) throw expandNotFound(id);
@@ -536,8 +408,10 @@ function expandChunk(env: ReadEnv, id: string, around: number): { b: Built; owne
   const b = built(header, refs, state.uploadDerived);
   if (state.truncated) b.notes.push('the document was cut at the extraction cap (maxTextChars): only its start is indexed and served');
   const n = Math.max(0, Math.min(MAX_AROUND, Math.floor(around)));
-  const all = artifactChunks(store, owner.id).filter((x) => x.seq >= c.seq - n && x.seq <= c.seq + n);
-  return { b, owner, passages: all.map((x) => passageOf(env, x, state.uploadDerived)) };
+  for (const x of artifactChunks(store, owner.id).filter((x) => x.seq >= c.seq - n && x.seq <= c.seq + n)) {
+    b.items.push(passageItem(env, x, state.uploadDerived, owner.id));
+  }
+  return b;
 }
 
 // ---------------------------------------------------------------------------
@@ -553,25 +427,26 @@ function expandEntity(env: ReadEnv, id: string): Built {
     throw expandNotFound(id);
   }
   const b = built({ kind: 'entity', ...card.header }, card.headerRefs, card.headerUpload);
-  for (const l of card.lines) push(b, { type: 'line', text: l.text }, l.refs, l.upload);
-  // Re-gate (binding): a line too long for a page points at `get_card <entity>` at that line (the entity
-  // card lists fewer facts, so the line is found by its text); a line only this fuller card lists is
-  // recovered by this request at it.
-  const scopeIn = env.mode === 'tree' ? { scope: 'tree' } : {};
-  const cardInput: Record<string, unknown> = { entity_id: id, ...scopeIn };
-  const plain = entityCard(env, env.scope, modeOf(env), id);
-  b.recover = (item, _index, need) => {
-    const j = plain.lines.findIndex((l) => l.text === item.text);
-    if (j < 0 || !env.keyFor || !env.pointerBudget) return undefined;
-    const at = cursorAtItem(env.keyFor('get_card', cardInput), j);
-    const onCard = estimateTokens(JSON.stringify({ ...plain.header, lines: [item.text], tokens: 99_999, truncated: true, more: plain.lines.length, cursor: at, content_trust: CONTENT_TRUST })) + 2;
-    const m = env.pointerBudget(Math.max(need, onCard));
-    return m === undefined ? undefined : { kind: 'get_card_line', tool: 'get_card', input: { ...cardInput, cursor: at, max_tokens: m } };
+  // A line too long for a page points at `get_card <entity>` at that line (the entity card lists fewer
+  // facts, so the line is found by its text, on a card built only then); a line only this fuller card
+  // lists is recovered by this request at it.
+  const cardInput: Record<string, unknown> = { entity_id: id, ...(env.mode === 'tree' ? { scope: 'tree' } : {}) };
+  let plain: string[] | undefined;
+  const onCard = (text: string): Recover | undefined => {
+    if (!env.keyFor || !env.pointerBudget) return undefined;
+    plain ??= cardPageLines(entityCard(env, env.scope, modeOf(env), id)).map((l) => l.text);
+    const j = plain.indexOf(text);
+    if (j < 0) return undefined;
+    const key = env.keyFor('get_card', cardInput);
+    const next = j + 1 < plain.length ? encodeCursor({ key, offset: j + 1 }) : undefined;
+    const m = env.pointerBudget(laterPageNeed('lines', text, next, plain.length - j - 1), 'get_card');
+    return m === undefined ? undefined : { kind: 'get_card_line', tool: 'get_card', input: { ...cardInput, cursor: encodeCursor({ key, offset: j }), max_tokens: m } };
   };
+  for (const l of cardPageLines(card)) push(b, { type: 'line', text: l.text }, l.refs, l.upload, { recover: () => onCard(l.text) });
   return b;
 }
 
-/** Re-gate (binding): `expand` of a node id returns its node card (lines as items), as `read_workspace` does. */
+/** `expand` of a node id returns its node card (lines as items), as `read_workspace` does. */
 function expandNode(env: ReadEnv, id: string): Built {
   const node = env.store.workspaces.get(id);
   if (!node || !env.scope.treeIds.includes(id)) throw expandNotFound(id);
@@ -579,63 +454,91 @@ function expandNode(env: ReadEnv, id: string): Built {
   if (!view || !readableById(env.scope, modeOf(env), env.scope.nodeIds.includes(id))) throw expandNotFound(id);
   const card = nodeCard(env, view, modeOf(env));
   const b = built({ kind: 'node', id, ...card.header }, card.headerRefs, card.headerUpload);
-  for (const l of card.lines) push(b, { type: 'line', text: l.text }, l.refs, l.upload);
-  const lineRecover = nodeLineRecover(env, id, env.mode === 'tree' ? 'tree' : undefined);
-  b.recover = (item, index, need) => lineRecover(item, index, need);
+  const recover = nodeLineRecover(env, id, modeOf(env), card);
+  cardPageLines(card).forEach((l, i) => push(b, { type: 'line', text: l.text }, l.refs, l.upload, { recover: () => recover(i) }));
   return b;
 }
 
 const RECORD_PREFIX: Record<string, string> = { cmp_: 'competitor', per_: 'persona', sym_: 'symptom', hyp_: 'hypothesis', rec_: 'recommendation' };
 
+/**
+ * A typed record: header (kind, record type, id, name, status, source) and one `field` item per other
+ * field (paging rework: a persona's 13 profile fields are 13 items, paged by the cursor).
+ */
 function expandRecord(env: ReadEnv, id: string, type: string): Built {
   const { store } = env;
   const ws = env.scope.workspaceId;
   const usable = (r: { status?: string; includeOverride?: boolean }) => r.status !== 'superseded' && (r.includeOverride ?? r.status === 'verified');
   const red = <T>(v: T): T => redactServed(store, ws, v);
-  let header: Record<string, unknown>;
+  let name: string | undefined;
+  let recordType = type;
+  let status: string | undefined;
   let home: string;
+  const fields: Array<[string, unknown]> = [];
   switch (type) {
     case 'competitor': {
       const c = store.competitors.get(id);
       if (!c || !recordReadable(env, c.workspaceId) || (usableOnly(env.role) && !usable(c))) throw expandNotFound(id);
       home = c.workspaceId;
-      header = { kind: 'record', type, id, name: red(c.name), site: c.site ? red(c.site) : undefined, threat: c.threat, directness: c.directness, comparison: c.comparison, evidence: c.evidence, status: c.status, entity_id: c.entityId };
+      name = red(c.name);
+      status = c.status;
+      fields.push(['site', c.site ? red(c.site) : undefined], ['threat', c.threat], ['directness', c.directness], ['comparison', c.comparison], ['evidence', c.evidence], ['entity_id', c.entityId]);
       break;
     }
     case 'persona': {
       const p = store.personas.get(id);
       if (!p || !recordReadable(env, p.workspaceId) || (usableOnly(env.role) && !usable(p))) throw expandNotFound(id);
       home = p.workspaceId;
-      const profile = Object.fromEntries(Object.entries(p.profile ?? {}).map(([k, v]) => [k, { value: servedLine(store, ws, v?.value ?? '', 600), confidence: v?.confidence, evidence: v?.evidence }]));
-      header = { kind: 'record', type, id, slug: p.slug, segment: red(p.segment), audience: p.audience ?? 'external', profile, status: p.status, entity_id: p.entityId };
+      name = p.slug;
+      status = p.status;
+      fields.push(['segment', red(p.segment)], ['audience', p.audience ?? 'external'], ['entity_id', p.entityId]);
+      for (const [k, v] of Object.entries(p.profile ?? {})) {
+        fields.push([`profile.${k}`, { value: servedLine(store, ws, v?.value ?? '', 600), confidence: v?.confidence, evidence: v?.evidence }]);
+      }
       break;
     }
     case 'symptom': {
       const s = store.symptoms.get(id);
       if (!s || !recordReadable(env, s.workspaceId)) throw expandNotFound(id);
       home = s.workspaceId;
-      header = { kind: 'record', type: s.kind, id, title: red(s.title), detail: servedLine(store, ws, s.detail, 2000), criteria: red(s.criteria), evidence: s.evidence, entity_id: s.entityId };
+      recordType = s.kind;
+      name = red(s.title);
+      fields.push(['detail', servedLine(store, ws, s.detail, 2000)], ['criteria', red(s.criteria)], ['evidence', s.evidence], ['entity_id', s.entityId]);
       break;
     }
     case 'hypothesis': {
       const h = store.symptomHypotheses.get(id);
       if (!h || !recordReadable(env, h.workspaceId) || (usableOnly(env.role) && !usable(h))) throw expandNotFound(id);
       home = h.workspaceId;
-      header = { kind: 'record', type, id, symptom_id: h.symptomId, hypothesis: servedLine(store, ws, h.hypothesis, 2000), confidence: h.confidence, evidence: h.evidence, status: h.status, entity_id: h.entityId };
+      status = h.status;
+      fields.push(['symptom_id', h.symptomId], ['hypothesis', servedLine(store, ws, h.hypothesis, 2000)], ['confidence', h.confidence], ['evidence', h.evidence], ['entity_id', h.entityId]);
       break;
     }
     default: {
       const r = store.recommendations.get(id);
       if (!r || !recordReadable(env, r.workspaceId) || (usableOnly(env.role) && !usable(r))) throw expandNotFound(id);
       home = r.workspaceId;
-      header = { kind: 'record', type: 'recommendation', id, title: red(r.title), summary: servedLine(store, ws, r.summary, 3000), criteria: red(r.criteria), finding_ids: r.findingIds, priority: r.priority, status: r.status };
+      recordType = 'recommendation';
+      name = red(r.title);
+      status = r.status;
+      fields.push(['summary', servedLine(store, ws, r.summary, 3000)], ['criteria', red(r.criteria)], ['finding_ids', r.findingIds], ['priority', r.priority]);
     }
   }
-  for (const k of Object.keys(header)) if (header[k] === undefined) delete header[k];
-  if (home !== ws) header.source = home;
   const upload = itemIsUploadDerived(store, id);
-  if (upload) header.upload = true;
-  return built(header, [{ id, kind: 'record' }], upload);
+  const refs: RetrievalResultRef[] = [{ id, kind: 'record' }];
+  const b = built({}, refs, upload);
+  const shownName = name !== undefined ? named(b, 'name', name, refs, upload) : undefined;
+  b.header = {
+    kind: 'record', type: recordType, id, ...(shownName !== undefined ? { name: shownName } : {}), ...(status !== undefined ? { status } : {}),
+    ...(home !== ws ? { source: home } : {}), ...(upload ? { upload: true } : {}),
+  };
+  for (const [field, v] of fields) {
+    if (v === undefined) continue;
+    // A profile field keeps its value, confidence and evidence together; any other field is `value`.
+    const item: Item = field.startsWith('profile.') ? { type: 'field', field, ...(v as object) } : { type: 'field', field, value: v };
+    push(b, item, refs, upload);
+  }
+  return b;
 }
 
 /** Throws `notFound('entity')` unless the entity (survivor) of the tree may be read by id. */
@@ -654,10 +557,8 @@ export function runExpand(env: ReadEnv, input: ExpandInput, budget: number, key:
   let b: Built;
   if (id.startsWith('fnd_')) b = expandFact(env, id);
   else if (id.startsWith('art_')) b = expandArtifact(env, id);
-  else if (id.startsWith('chk_')) {
-    const x = expandChunk(env, id, input.around ?? 0);
-    return finishText(x.b, x.owner.id, x.passages, budget, key, input.cursor, id);
-  } else if (id.startsWith('ent_')) b = expandEntity(env, id);
+  else if (id.startsWith('chk_')) b = expandChunk(env, id, input.around ?? 0);
+  else if (id.startsWith('ent_')) b = expandEntity(env, id);
   else if (env.store.workspaces.get(id)) b = expandNode(env, id);
   else {
     const type = Object.entries(RECORD_PREFIX).find(([p]) => id.startsWith(p))?.[1];
@@ -679,44 +580,40 @@ export function runReadArtifact(env: ReadEnv, files: ArtifactBytes, input: ReadA
   const base = a.mime.split(';')[0]!.trim();
   const isImage = a.kind === 'screenshot' || base.startsWith('image/');
   const mode: ReadArtifactMode = input.mode ?? (isImage ? 'image' : 'outline');
-  const h = artifactHeader(env, a);
-  const header = { ...h.header, mode };
-  const b = built(header, h.refs, h.upload);
-  b.notes.push(...extractionNotes(h.state));
+  const { b } = artifactBuilt(env, a, { mode });
   const query = `${a.id} ${mode}`;
+  const done = () => finish(env, b, budget, key, input.cursor, query);
   switch (mode) {
     case 'outline':
-      outlineItems(env, b, a, h.upload);
-      return finish(env, b, budget, key, input.cursor, query);
+      outlineItems(env, b, a, b.upload);
+      return done();
     case 'text': {
-      const passages = artifactChunks(store, a.id).map((c) => passageOf(env, c, h.upload));
-      if (!passages.length) b.notes.push('no extracted text to serve for this artifact');
-      return finishText(b, a.id, passages, budget, key, input.cursor, query);
+      const chunks = artifactChunks(store, a.id);
+      if (!chunks.length) b.notes.push('no extracted text to serve for this artifact');
+      for (const c of chunks) b.items.push(passageItem(env, c, b.upload, a.id));
+      return done();
     }
     case 'image': {
-      const out = finish(env, b, budget, key, undefined, query);
-      if (!IMAGE_MIME.test(base)) {
-        out.notes = [...(out.notes ?? []), `not an inlinable image (${base}); use mode "outline" or "text"`];
-        return out;
-      }
+      // The image goes with the first page (its header); a later page carries only the remaining items.
+      const note = (n: string) => {
+        b.notes.push(n);
+        return done();
+      };
+      if (!IMAGE_MIME.test(base)) return note(`not an inlinable image (${base}); use mode "outline" or "text"`);
       const bytes = storedBytes(files, a.id);
-      if (!bytes) {
-        out.notes = [...(out.notes ?? []), FILE_GONE];
-        return out;
-      }
-      if (bytes.byteLength > IMAGE_MAX_BYTES) {
-        out.notes = [...(out.notes ?? []), `image too large to inline (${bytes.byteLength} bytes)`];
-        return out;
-      }
-      out.images = [{ data: bytes.toString('base64'), mimeType: base }];
+      if (!bytes) return note(FILE_GONE);
+      if (bytes.byteLength > IMAGE_MAX_BYTES) return note(`image too large to inline (${bytes.byteLength} bytes)`);
+      const out = done();
+      if (!input.cursor) out.images = [{ data: bytes.toString('base64'), mimeType: base }];
       return out;
     }
     case 'raw': {
       if (!TEXT_MIME.test(base)) {
         b.notes.push(`raw mode serves text formats only (${base} is binary); use mode "text" for the extracted text`);
-        return finish(env, b, budget, key, undefined, query);
+        return done();
       }
-      return rawPage(env, files, a, b, budget, key, input.cursor, query);
+      rawItem(env, files, a, b);
+      return done();
     }
   }
 }
@@ -732,17 +629,17 @@ function storedBytes(files: ArtifactBytes, id: string): Buffer | undefined {
   }
 }
 
-/** Raw text of a text-format artifact: redacted WHOLE (up to the extraction cap), then paged by characters and fenced. */
-function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budget: number, key: string, cursor: string | undefined, query: string): ReadOutput {
+/** Raw text of a text-format artifact: redacted WHOLE (up to the extraction cap), then one position-paged, fenced item. */
+function rawItem(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built): void {
   const { store } = env;
   const ws = env.scope.workspaceId;
-  const cap = (env.config.knowledge?.extraction?.maxTextChars ?? 2_000_000);
+  const cap = env.config.knowledge?.extraction?.maxTextChars ?? 2_000_000;
   const secrets = treeSecrets(store, ws);
   const margin = secrets.reduce((m, s) => Math.max(m, s.length), 0);
   const bytes = storedBytes(files, a.id);
   if (!bytes) {
     b.notes.push(FILE_GONE);
-    return finish(env, b, budget, key, undefined, query);
+    return;
   }
   const all = bytes.toString('utf8');
   let text = redactServed(store, ws, all.slice(0, cap + margin));
@@ -755,40 +652,9 @@ function rawPage(env: ReadEnv, files: ArtifactBytes, a: Artifact, b: Built, budg
     b.header.document_truncated = true;
     b.notes.push(`the stored file is longer than ${cap} characters; raw mode serves its start only`);
   }
-  const offset = cursor ? Math.min(decodeCursorAt(cursor, key).offset, text.length) : 0;
-  // KS-8 ruling: the artifact header and its notes on the first page only (shortened when the page is small).
-  const envelope = envelopeTokens(budget, key, text.length, 0);
-  const minPiece = estimateTokens(JSON.stringify({ type: 'raw', offset: text.length, text: fenceEvidence(a.id, 'x'.repeat(64)) }));
-  const { header, notes } = textHeader(b, { offset, pos: 0 }, budget - envelope - minPiece);
-  const overhead = estimateTokens(JSON.stringify({ ...header, items: [] })) + envelope + (notes.length ? estimateTokens(JSON.stringify(notes)) : 0);
-  // Fenced, JSON-escaped text grows; leave a margin of one third.
-  const pageChars = Math.max(64, Math.floor(((budget - overhead) * 4 * 2) / 3));
-  let end = Math.min(text.length, offset + pageChars);
-  let item: Item;
-  for (;;) {
-    const code = text.charCodeAt(end - 1);
-    if (end < text.length && code >= 0xd800 && code <= 0xdbff) end--;
-    item = { type: 'raw', offset, text: fenceEvidence(a.id, text.slice(offset, end)) };
-    // JSON escaping varies with the content: shrink until the page provably fits.
-    if (overhead + estimateTokens(JSON.stringify(item)) <= budget || end - offset <= 16) break;
-    end = offset + Math.floor((end - offset) * 0.8);
-  }
-  const out: ReadOutput = {
-    data: { ...header, items: [item] },
-    results: uniqueRefs(b.headerRefs),
-    uploadDerived: b.upload,
-    truncated: end < text.length,
-    restart: { cursor: encodeCursor({ key, offset }), remaining: Math.max(1, text.length - offset) },
-    more: end < text.length ? text.length - end : 0,
-    notes,
-    query,
-    scopeLabel: 'tree',
-  };
-  if (end < text.length) out.cursor = encodeCursor({ key, offset: end });
-  return out;
-}
-
-/** Card lines → expand items (exported for `get_card` paging in tools.ts). */
-export function cardItems(lines: CardLine[]): Item[] {
-  return lines.map((l) => ({ type: 'line', text: l.text }));
+  b.items.push({
+    value: { type: 'raw', offset: 0, text: fenceEvidence(a.id, text) },
+    refs: [], upload: b.upload,
+    text: { body: text, fence: a.id, meta: (pos) => ({ type: 'raw', offset: pos }) },
+  });
 }

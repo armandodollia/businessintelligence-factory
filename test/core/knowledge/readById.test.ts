@@ -45,8 +45,9 @@ describe('reads by id vs. what is listed around the item', () => {
     const tree = await w.t.call<Card>(c, 'get_card', { entity_id: w.globex.id, scope: 'tree' });
     expect(tree.lines.join('\n')).toContain(w.lending.id);
     expect(tree.lines.join('\n')).toContain('Globex Loans');
-    const ex = await w.t.call<{ id: string; source: string; claim: string }>(c, 'expand', { id: w.lending.id });
-    expect(ex).toMatchObject({ id: w.lending.id, source: 'ws_d', claim: 'Globex offers loans to Lending customers' });
+    const ex = await w.t.call<{ id: string; source: string; items: unknown[] }>(c, 'expand', { id: w.lending.id });
+    expect(ex).toMatchObject({ id: w.lending.id, source: 'ws_d' });
+    expect(ex.items[0]).toEqual({ type: 'claim', text: 'Globex offers loans to Lending customers' });
   });
 
   it('expand of an entity lists neighbours in node scope unless scope "tree"', async () => {

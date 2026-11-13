@@ -115,8 +115,8 @@ describe('upload exposure through every read path (design §12)', () => {
     await ingestorFor(t).idle();
     expect(knowledgeRepos(t.store).artifactTexts.get(up.id)!.duplicateOf).toBe(pub.id);
     const c = t.ctx('ws_a');
-    const r = await t.call<{ items: Array<{ text: string }> }>(c, 'read_artifact', { artifact_id: up.id, mode: 'text' });
-    expect(r.items[0]!.text).toContain('49 dollars');
+    const r = await t.call<{ items: Array<{ type: string; text: string }> }>(c, 'read_artifact', { artifact_id: up.id, mode: 'text' });
+    expect(r.items.find((i) => i.type === 'chunk')!.text).toContain('49 dollars');
     expect(t.rows(c.agentRunId)[0]!.resultIds.map((x) => x.id)).toEqual(expect.arrayContaining([up.id, pub.id]));
     expect(runIsUploadExposed(t.store, c.agentRunId)).toBe(true);
   });
@@ -152,8 +152,8 @@ describe('upload exposure through every read path (design §12)', () => {
     expect(s2.hits[0]!.flags).toBeUndefined();
     // The card names the upload-only alias marked and lists its row.
     const c3 = t.ctx('ws_a');
-    const card = await t.call<{ entity: { aliases: string[] } }>(c3, 'get_card', { entity_id: globex.id });
-    expect(card.entity.aliases).toEqual(['Project Falcon [upload]']);
+    const card = await t.call<{ lines: string[] }>(c3, 'get_card', { entity_id: globex.id });
+    expect(card.lines.filter((l) => l.startsWith('alias: '))).toEqual(['alias: Project Falcon [upload]']);
     expect(t.rows(c3.agentRunId)[0]!.resultIds.map((r) => r.id)).toContain(falcon.id);
   });
 });

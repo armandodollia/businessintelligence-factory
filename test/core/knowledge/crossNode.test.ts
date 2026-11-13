@@ -143,11 +143,18 @@ describe('search: "elsewhere in the business" count', () => {
     const w = world();
     for (let i = 0; i < 12; i++) w.t.fact('ws_c', `HR note number ${i} about payments approvals and their long waiting times in the queue`);
     const c = w.t.ctx('ws_c');
-    const r = await w.t.call<{ tokens: number; hits: unknown[]; notes?: string[] }>(c, 'search', { query: 'approvals', max_tokens: 300 });
-    expect(r.tokens).toBeLessThanOrEqual(300);
-    expect(r.hits.length).toBeGreaterThan(0);
-    // The first page carries the line when it fits beside the hits; later pages do not repeat it.
-    expect((r.notes ?? []).some((n) => n.includes('elsewhere'))).toBe(true);
+    // The first page carries the line when it fits beside the hits (it never costs one: decision 14);
+    // pages are measured exactly, so whether it fits depends on the room the last hit leaves.
+    let shown = 0;
+    for (let budget = 250; budget <= 450; budget += 5) {
+      const r = await w.t.call<{ tokens: number; hits: unknown[]; notes?: string[] }>(c, 'search', { query: 'approvals', max_tokens: budget });
+      expect(r.tokens).toBeLessThanOrEqual(budget);
+      expect(r.hits.length).toBeGreaterThan(0);
+      if ((r.notes ?? []).some((n) => n.includes('elsewhere'))) shown++;
+    }
+    expect(shown).toBeGreaterThan(0);
+    const whole = await w.t.call<{ notes?: string[] }>(c, 'search', { query: 'approvals' });
+    expect((whole.notes ?? []).some((n) => n.includes('elsewhere'))).toBe(true);
   });
 });
 

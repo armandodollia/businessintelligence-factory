@@ -1,10 +1,11 @@
 /**
- * Re-gate (Opus 1): `expand` pages never shorten an item that would fit a later page whole. Page 0
- * serves the header (shortened, `header_cut`, only when the header alone cannot fit); an item that does
- * not fit after it starts the next page; only an item too big for a whole page is shortened.
+ * `expand` pages never shorten an item that would fit a later page whole (re-gate, Opus 1; paging
+ * rework). Page 0 serves the whole header (never cut); an item that does not fit after others starts the
+ * next page; only an item too big for a page on its own is cut, with a measured pointer.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { estimateTokens } from '../../../src/core/knowledge/budget.js';
+import { READ_FLOOR_TOKENS } from '../../../src/core/knowledge/tools.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos } from '../../../src/core/store/repos.js';
 import { ks4 } from './ks4fixture.js';
@@ -38,7 +39,8 @@ async function follow(w: Awaited<ReturnType<typeof world>>, input: Record<string
   for (let i = 0; i < 80; i++) {
     const p = await w.t.call<Page>(w.c, 'expand', { id: w.f.id, ...input, ...(cursor ? { cursor } : {}) });
     pages.push(p);
-    if (!p.cursor || /nothing of this page fits/.test(JSON.stringify(p.notes ?? []))) break;
+    expect(JSON.stringify(p.notes ?? [])).not.toMatch(/nothing|raised/);
+    if (!p.cursor) break;
     expect(p.cursor).not.toBe(cursor);
     cursor = p.cursor;
   }
@@ -56,14 +58,15 @@ describe('expand pages: header first, an item never cut when a later page holds 
     expect(items).toEqual(whole.items);
   });
 
-  it('at every budget 100-600 a cut item is too big for a later page on its own', async () => {
+  it('at every budget from the floor to 600 a cut item is too big for a later page on its own', async () => {
     const w = await world();
     const whole = await w.t.call<Page>(w.ref, 'expand', { id: w.f.id, max_tokens: 8000 });
-    for (let budget = 100; budget <= 600; budget += 10) {
+    for (let budget = READ_FLOOR_TOKENS.expand; budget <= 600; budget += 10) {
       const pages = await follow(w, { max_tokens: budget });
       let seen = 0;
       for (const p of pages) {
         expect(p.tokens).toBeLessThanOrEqual(budget);
+        expect(p.items!.length, `budget ${budget}: every page serves an item`).toBeGreaterThan(0);
         for (const it of p.items ?? []) {
           const ref = whole.items![seen]!;
           seen++;
@@ -71,7 +74,10 @@ describe('expand pages: header first, an item never cut when a later page holds 
             expect(it, `budget ${budget}`).toEqual(ref);
             continue;
           }
-          const later = { id: w.f.id, items: [ref], tokens: budget, truncated: true, more: whole.items!.length, cursor: p.cursor ?? '', content_trust: 'untrusted' };
+          // Its pointer asks for the measured later page that holds it (no header there), larger than this budget.
+          const later = { items: [ref], tokens: budget, truncated: true, more: whole.items!.length, cursor: p.cursor ?? '', content_trust: 'untrusted' };
+          const m = (it.full as { input: { max_tokens: number } }).input.max_tokens;
+          if (p !== pages[0]) expect(m, `budget ${budget}`).toBeGreaterThan(budget);
           expect(estimateTokens(JSON.stringify(later)), `budget ${budget}: item ${seen - 1} cut but fits a later page`).toBeGreaterThan(budget);
         }
       }

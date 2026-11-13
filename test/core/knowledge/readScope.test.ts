@@ -117,7 +117,8 @@ describe('isolation (design §12, §18)', () => {
 
   it('reads by id accept any node of the tree (the id is the explicit request) and label the source', async () => {
     const w = await world();
-    const e = await w.t.call<{ id: string; source?: string; claim: string }>(w.t.ctx('ws_c'), 'expand', { id: w.sibling.id });
-    expect(e).toMatchObject({ id: w.sibling.id, source: 'ws_d', claim: 'Widget pricing is 11 dollars in Labs' });
+    const e = await w.t.call<{ id: string; source?: string; items: unknown[] }>(w.t.ctx('ws_c'), 'expand', { id: w.sibling.id });
+    expect(e).toMatchObject({ id: w.sibling.id, source: 'ws_d' });
+    expect(e.items[0]).toEqual({ type: 'claim', text: 'Widget pricing is 11 dollars in Labs' });
   });
 });

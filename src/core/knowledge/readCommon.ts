@@ -1,7 +1,7 @@
 /**
  * Shared pieces of the KS-4 read tools (design §7.1, §9, §12): the request environment, visibility
- * predicates (SQL, so tree isolation is inside every FTS query), the reviewer slice check, and paging
- * that accounts for the whole response envelope (no response ever exceeds its budget).
+ * predicates (SQL, so tree isolation is inside every FTS query), the reviewer slice check, and the
+ * cutting of an item too big for a page (`shortenItem`; pages are assembled in `paging.ts`).
  *
  * Visibility (design §7.1):
  * - queries (`search`, `list_changes`, cards) see the active ids of the scope: `node` (default) = the
@@ -14,11 +14,10 @@
 import type { BifConfig, KnowledgeBudgetKind, ProviderId } from '../config/schema.js';
 import type { Store } from '../store/db.js';
 import type { RetrievalResultRef, RetrievalRole } from '../types.js';
-import { encodeCursor, decodeCursor, estimateTokens, fitToBudget } from './budget.js';
 import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { artifactVisible, canonicalArtifactId, capText } from './texts.js';
-import { CONTENT_TRUST, FENCE_CLOSE, FENCE_OPEN } from './trust.js';
+import { FENCE_CLOSE, FENCE_OPEN } from './trust.js';
 import type { Entity, EntityKind, Relation, RelationSourceKind, RelationType } from '../types.js';
 import { getEntity } from './entities.js';
 import { SOURCE_TABLES, sourceUsableSql, sourceVisibleSql } from './usable.js';
@@ -44,52 +43,35 @@ export type ReadEnv = {
    */
   slice?: ReviewSlice;
   /**
-   * Re-gate (binding recovery shapes): the same request at `cursor` with `max_tokens` = `need` plus the
-   * role-note reserve — the pointer of last resort for a shortened item (`same_call`); `undefined` when
-   * that exceeds the hard maximum (the item is then flagged `too_large` with its size). Set by
-   * `knowledgeRead`; absent in direct calls (tests, briefings), where no pointer is given.
+   * `same_call` (paging rework, binding): this request at `cursor` with `max_tokens` = the measured `need`
+   * (raised to the tool's floor); `undefined` above the hard maximum (the item is then flagged `too_large`
+   * with its size). Set by `knowledgeRead`; absent in direct calls (tests, briefings): no pointer is given.
    */
   again?: (cursor: string, need: number) => Recover | undefined;
   /** Cursor key of another read tool's request by the same caller (pointers into another tool). */
   keyFor?: (tool: string, input: Record<string, unknown>) => string;
-  /** The largest `max_tokens` a pointer may ask for (hard maximum × provider scale). */
-  pointerBudget?: (need: number) => number | undefined;
-  /**
-   * Re-gate (Opus 3): notes the dispatcher adds to every page of this request (role notes), first in
-   * `notes`. Pages are measured with them, so no fixed reserve is needed.
-   */
+  /** The `max_tokens` a pointer into `tool` asks for: `need` raised to that tool's floor; `undefined` above the hard maximum. */
+  pointerBudget?: (need: number, tool: string) => number | undefined;
+  /** Notes the dispatcher adds to every page of this request (role notes), first in `notes`; pages are measured with them. */
   pageNotes?: string[];
 };
 
 /**
- * Re-gate (binding recovery shapes): how a shortened item is recovered. In order of preference:
- * 1. content of this response is an item of it (the request's `cursor` reaches it; no pointer);
- * 2. the exact call that returns that content — `expand_id` (a hit's own item), `expand_chunk` (a quote
- *    too long for a page: its passage, position-paged), `get_card_line` (a line of `expand` of an
- *    entity: that line of the entity card), `read_workspace_line` (a node card line);
- * 3. `same_call`: the same request at that item with a larger `max_tokens` (up to the hard maximum).
+ * How a cut item is recovered (`full`; paging rework, binding). In order of preference:
+ * 1. content of this response is an item of it: the request's `cursor` reaches it (no pointer); a passage
+ *    piece (`cut: true` on position-paged text) continues on the next page from its next character;
+ * 2. the exact call that returns that item — `expand_id` (a search hit: `expand <id>`), `get_card_line` (a
+ *    line of `expand <entity>`: that line of `get_card <entity>`), `read_workspace_line` (a node card line) —
+ *    with the measured `max_tokens` of the page that holds it whole;
+ * 3. `same_call`: this request at the item with the measured `max_tokens` that holds it (up to the hard maximum).
  * A value larger than the hard maximum is served cut, `too_large: true`, with `size_tokens`.
+ * `expand_chunk` is not a recovery: it is the `passage` of a quote (the passage around it), given only when
+ * that call contains the whole quote.
  */
-export const RECOVERY_KINDS = ['expand_id', 'expand_chunk', 'get_card_line', 'read_workspace_line', 'same_call'] as const;
+export const RECOVERY_KINDS = ['expand_id', 'get_card_line', 'read_workspace_line', 'same_call'] as const;
 export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
-export type Recover = { kind: RecoveryKind; tool: string; input: Record<string, unknown> };
-
-/** A cursor that starts a page AT item `index` (for item 0: after the header, `pos` 1 — ignored by plain lists). */
-export const cursorAtItem = (key: string, index: number): string => encodeCursor({ key, offset: index, ...(index === 0 ? { pos: 1 } : {}) });
-
-/**
- * Re-gate (binding): a node card line too big for a page is recovered by `read_workspace <node>` at that
- * line, with the budget that holds it (its cursor is keyed to that request, whichever tool showed the line).
- */
-export function nodeLineRecover(env: ReadEnv, workspaceId: string, scope: ScopeMode | undefined) {
-  const input: Record<string, unknown> = { workspace_id: workspaceId, ...(scope ? { scope } : {}) };
-  return (_line: unknown, index: number, need: number): Recover | undefined => {
-    const m = env.pointerBudget?.(need);
-    if (m === undefined || !env.keyFor) return undefined;
-    return { kind: 'read_workspace_line', tool: 'read_workspace', input: { ...input, cursor: cursorAtItem(env.keyFor('read_workspace', input), index), max_tokens: m } };
-  };
-}
-
+/** A call: `full` of a cut item (a `RECOVERY_KINDS` kind), or the `passage` of a quote (`expand_chunk`). */
+export type Recover = { kind: RecoveryKind | 'expand_chunk'; tool: string; input: Record<string, unknown> };
 
 /** Roles that only ever see usable facts and records (design §9). */
 export function usableOnly(role: RetrievalRole): boolean {
@@ -112,8 +94,9 @@ export function inSlice(env: Pick<ReadEnv, 'store' | 'slice'>, id: string): bool
   return false;
 }
 
-/** What one read produced, before the envelope (tokens, cursor, content_trust) is added. */
+/** What one read produced: the response as served (`assemblePage`) and its retrieval row. */
 export type ReadOutput = {
+  /** The whole response, envelope and measured `tokens` included. */
   data: Record<string, unknown>;
   /** Every item whose text the response carries, in response order (retrieval log, design §13). */
   results: RetrievalResultRef[];
@@ -121,19 +104,8 @@ export type ReadOutput = {
   uploadDerived: boolean;
   /** The response left items out (budget); `cursor` continues. */
   truncated: boolean;
-  more?: number;
-  cursor?: string;
   relaxed?: boolean;
-  notes?: string[];
   images?: Array<{ data: string; mimeType: string }>;
-  /** Where this page started: a notice that serves nothing of it hands out this cursor and count. */
-  restart?: { cursor: string; remaining: number };
-  /**
-   * Nothing of the page could be served within the budget (not even a shortened item or one character
-   * of a passage): the dispatcher answers with the "repeat with a larger max_tokens" notice instead of a
-   * page that would hand out a cursor to the same place.
-   */
-  stalled?: boolean;
   /** What the log stores as the query (search text, or a compact form of the input). */
   query: string;
   /** `node` | `tree` | `node:<id>`. */
@@ -196,98 +168,8 @@ export function uniqueRefs(refs: readonly RetrievalResultRef[]): RetrievalResult
   return out;
 }
 
-/**
- * Tokens reserved for the envelope the dispatcher adds (`tokens`, `truncated`, `more`, `cursor`,
- * `content_trust`, `relaxed`, `notes`). Notes are counted separately by the caller.
- */
-export const ENVELOPE_TOKENS = 48;
-
-/** A page of items, plus where it started (to repeat it with a larger budget). */
-export type ItemPage<T> = {
-  items: T[];
-  truncated: boolean;
-  more: number;
-  cursor?: string;
-  offset: number;
-  /** A cursor for this same page (the "nothing fits" notice hands it out: repeat with a larger max_tokens). */
-  startCursor: string;
-  /** Items from `offset` on (what a notice says was left out when nothing of the page is served). */
-  remaining: number;
-  /** Nothing fit, not even the next item shortened. */
-  stalled?: boolean;
-};
-
-/** The id a list item is recovered by with `expand`: its `id`, a replacement's new version, its artifact, or the first `[id]` of a line. */
-export function itemExpandId(item: unknown): string | undefined {
-  if (typeof item === 'string') return /\[([a-z]+_[A-Za-z0-9]+)\]/.exec(item)?.[1];
-  if (!item || typeof item !== 'object') return undefined;
-  const o = item as Record<string, unknown>;
-  const to = o.to as { id?: unknown } | undefined;
-  for (const v of [o.id, to?.id, o.chunk_id, o.artifact_id]) if (typeof v === 'string' && v) return v;
-  return undefined;
-}
-
-/**
- * One page of `items` for a response whose fixed part is `header`; the whole JSON stays within `budget`.
- * Never skips an item (final-gate ruling, binding):
- * - an item that does not fit the rest of the page ends the page, and the cursor points AT it — an item
- *   is never shortened because the page is nearly full;
- * - only an item too big for a whole page on its own (an empty page of this request: the same header,
- *   notes and envelope every page of it carries) is shortened (`shortenItem`: `cut: true`, dropped list
- *   entries counted, "expand <id> for the full item") and served alone; the cursor then moves past it.
- */
-export function pageOf<T>(
-  items: readonly T[],
-  header: Record<string, unknown>,
-  budget: number,
-  opts: {
-    key: string; cursor?: string; notes?: readonly string[]; itemsKey?: string;
-    /** Pointer of a shortened item (`need`: tokens of a page holding it whole); `undefined` = flag it `too_large`. */
-    recover?: (item: T, index: number, need: number) => Recover | undefined;
-  },
-): ItemPage<T> {
-  const offset = opts.cursor ? Math.min(decodeCursor(opts.cursor, opts.key), items.length) : 0;
-  const overhead =
-    estimateTokens(JSON.stringify({ ...header, [opts.itemsKey ?? 'items']: [] })) +
-    ENVELOPE_TOKENS +
-    (opts.notes?.length ? estimateTokens(JSON.stringify(opts.notes)) : 0);
-  const rest = items.slice(offset);
-  const startCursor = encodeCursor({ key: opts.key, offset });
-  const fit = fitToBudget(rest, (x) => JSON.stringify(x), budget, overhead);
-  if (!fit.items.length && rest.length) {
-    // The next item alone, measured on the page it would be served on (the envelope as the dispatcher
-    // writes it: this cursor, `more`, the notes). Whole when it fits; shortened only when it does not.
-    const cursor = rest.length > 1 ? encodeCursor({ key: opts.key, offset: offset + 1 }) : undefined;
-    // Re-gate (Opus 3): the last item's page has no `more` and no cursor, and is not truncated.
-    const last = rest.length === 1;
-    const alone = (x: unknown) =>
-      estimateTokens(JSON.stringify({
-        ...header, [opts.itemsKey ?? 'items']: [x], tokens: budget, truncated: !last, ...(last ? {} : { more: rest.length - 1 }),
-        ...(cursor ? { cursor } : {}), content_trust: CONTENT_TRUST, ...(opts.notes?.length ? { notes: opts.notes } : {}),
-      })) <= budget;
-    if (alone(rest[0])) {
-      const page: ItemPage<T> = { items: [rest[0]!], truncated: rest.length > 1, more: rest.length - 1, offset, startCursor, remaining: rest.length };
-      if (cursor) page.cursor = cursor;
-      return page;
-    }
-    const need = estimateTokens(JSON.stringify({
-      ...header, [opts.itemsKey ?? 'items']: [rest[0]], tokens: 99_999, truncated: true, more: rest.length,
-      cursor: cursorAtItem(opts.key, offset + 1), content_trust: CONTENT_TRUST, ...(opts.notes?.length ? { notes: opts.notes } : {}),
-    })) + 2;
-    const full = opts.recover?.(rest[0]!, offset, need);
-    const short = shortenItem(rest[0], alone, full ? { full } : { size: need }) as T | undefined;
-    if (short === undefined) return { items: [], truncated: true, more: rest.length, offset, startCursor, remaining: rest.length, stalled: true };
-    const page: ItemPage<T> = { items: [short], truncated: !last, more: rest.length - 1, offset, startCursor, remaining: rest.length };
-    if (rest.length > 1) page.cursor = encodeCursor({ key: opts.key, offset: offset + 1 });
-    return page;
-  }
-  const out: ItemPage<T> = { items: fit.items, truncated: fit.truncated, more: fit.more, offset, startCursor, remaining: rest.length };
-  if (fit.more > 0 && fit.items.length > 0) out.cursor = encodeCursor({ key: opts.key, offset: offset + fit.items.length });
-  return out;
-}
-
-/** Fields never shortened: ids, kinds, states, dates (they are short, and an id is how the full text is fetched). */
-const KEEP_WHOLE = /^(id|kind|type|source|status|lifecycle|change|relation|mode|flags|cited_by)$|_ids?$|_at$/;
+/** Fields never shortened: ids, kinds, labels, states, dates, a quote's passage pointer (short; an id is how the full text is fetched). */
+const KEEP_WHOLE = /^(id|kind|type|field|source|status|lifecycle|change|relation|mode|flags|cited_by|passage)$|_ids?$|_at$/;
 /** Angle-bracket runs (incl. lookalikes) a cut must not end inside (see `stripFences`). */
 const TRAILING_ANGLES = /[<>＜﹤＞﹥]+$/;
 

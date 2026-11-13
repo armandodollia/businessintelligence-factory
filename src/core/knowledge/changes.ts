@@ -15,7 +15,8 @@ import type { Finding, RetrievalResultRef } from '../types.js';
 import { cursorKey } from './budget.js';
 import { getEntity } from './entities.js';
 import { factFreshness, recordStaleOutcome } from './facts.js';
-import { artifactVisibleSql, cursorAtItem, day, factVisibleSql, pageOf, usableOnly, visParams, type ReadEnv, type ReadOutput } from './readCommon.js';
+import { assemblePage } from './paging.js';
+import { artifactVisibleSql, day, factVisibleSql, usableOnly, visParams, type ReadEnv, type ReadOutput } from './readCommon.js';
 import { notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { servedLine } from './texts.js';
 import { factUsableSql } from './usable.js';
@@ -153,26 +154,15 @@ export function runListChanges(env: ReadEnv, view: KnowledgeScope, input: Change
 
   const header = { since, scope: mode, ...(input.runId ? { run_id: input.runId } : {}) };
   const notes = hide ? ['usable facts only: old and retracted claims are shown as ids'] : [];
-  const key = cursorKey(cursorParts);
-  // Re-gate (binding): a change carries more than any one item's `expand` returns (dates, both claims,
-  // a reason), so a shortened change points at this same request, at it, with the budget that holds it.
-  const page = pageOf(changes.map((c) => c.item), header, budget, {
-    key, notes, itemsKey: 'changes', ...(input.cursor ? { cursor: input.cursor } : {}),
-    recover: (_c, i, need) => env.again?.(cursorAtItem(key, i), need),
+  // A change carries more than any one item's `expand` returns (dates, both claims, a reason), so a cut
+  // change points at this same request, at it, with the measured budget that holds it (`same_call`).
+  const page = assemblePage({
+    key: cursorKey(cursorParts), cursor: input.cursor, budget, itemsKey: 'changes', header, headerRefs: [], headerUpload: false,
+    notes: env.pageNotes, firstNotes: notes, items: changes.map((c) => ({ value: c.item, refs: c.refs, upload: c.upload })), again: env.again,
   });
-  const shown = changes.slice(page.offset, page.offset + page.items.length);
-  const out: ReadOutput = {
-    data: { ...header, changes: page.items },
-    results: shown.flatMap((c) => c.refs),
-    uploadDerived: shown.some((c) => c.upload),
-    truncated: page.truncated,
-    restart: { cursor: page.startCursor, remaining: page.remaining },
-    more: page.more,
-    notes,
+  return {
+    data: page.data, results: page.results, uploadDerived: page.uploadDerived, truncated: page.truncated,
     query: input.runId ? `run ${input.runId}` : `since ${since}`,
     scopeLabel: view.workspaceId !== env.scope.workspaceId ? `node:${view.workspaceId}` : mode,
   };
-  if (page.stalled) out.stalled = true;
-  if (page.cursor) out.cursor = page.cursor;
-  return out;
 }

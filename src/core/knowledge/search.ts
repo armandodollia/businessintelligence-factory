@@ -23,11 +23,12 @@ import { knowledgeRepos } from '../store/repos.js';
 import type { Entity, Finding, RetrievalResultRef, TextChunk } from '../types.js';
 import { fenceEvidence, stripFences } from './trust.js';
 import { cursorKey } from './budget.js';
+import { assemblePage, boundedText, type AssembledPage } from './paging.js';
 import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
 import {
-  ageDays, artifactVisibleSql, entityVisibleIn, factVisibleSql, pageOf, recordVisibleSql, usableOnly, visParams,
+  ageDays, artifactVisibleSql, entityVisibleIn, factVisibleSql, recordVisibleSql, usableOnly, visParams,
   type ReadEnv, type ReadOutput,
 } from './readCommon.js';
 import { scopeRank, type KnowledgeScope, type ScopeMode } from './scope.js';
@@ -487,43 +488,32 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
     relaxed = true;
   }
   if (!terms.length) notes.push('empty query: newest items of the entity first');
-  const header = { query: input.query ?? '', scope: mode, ...(relaxed ? { relaxed: true } : {}) };
-  // Measured with the role notes the dispatcher puts first in `notes` (re-gate, Opus 3).
-  const pageWith = (n: string[]) => pageOf(hits.map((h) => h.hit), header, budget, {
-    key: cursorKey(cursorParts), notes: [...(env.pageNotes ?? []), ...n], itemsKey: 'hits', ...(input.cursor ? { cursor: input.cursor } : {}),
-    // Re-gate (binding): a hit is one item of the store; `expand` of its id returns it whole.
-    recover: (h) => ({ kind: 'expand_id', tool: 'expand', input: { id: h.id } }),
+  // The header echoes the request (bounded: the query is the agent's own text, not store content).
+  const header = { query: boundedText(input.query ?? '', QUERY_ECHO_JSON), scope: mode };
+  const pageWith = (firstNotes: string[]): AssembledPage => assemblePage({
+    key: cursorKey(cursorParts), cursor: input.cursor, budget, itemsKey: 'hits', header, headerRefs: [], headerUpload: false,
+    notes: env.pageNotes, firstNotes, relaxed,
+    // A hit is one item of the store; `expand` of its id returns it whole.
+    items: hits.map((h) => ({ value: h.hit, refs: h.refs, upload: h.upload, recover: () => ({ kind: 'expand_id', tool: 'expand', input: { id: h.hit.id } }) })),
   });
   let page = pageWith(notes);
   // KS-7 (user decision, design §3): a node-scoped search says how many more matches exist elsewhere in
   // the business. First page only; counts only (no text, no ids; the retrieval row is unchanged); left
-  // out when it would cost a hit of this page (the response budget always holds).
+  // out when it would cost a hit of this page or shorten one (the response budget always holds).
   const elsewhere = mode === 'node' && !input.cursor ? elsewhereNote(c, kinds, terms, relaxed ? 'OR' : 'AND') : undefined;
   if (elsewhere) {
     const withNote = pageWith([...notes, elsewhere]);
-    // Identical page (final-gate ruling): the note never costs a hit nor shortens one further.
-    if (JSON.stringify(withNote.items) === JSON.stringify(page.items) && withNote.truncated === page.truncated) {
-      page = withNote;
-      notes.push(elsewhere);
-    }
+    const hitsOf = (p: AssembledPage) => JSON.stringify(p.data.hits);
+    if (hitsOf(withNote) === hitsOf(page) && withNote.truncated === page.truncated) page = withNote;
   }
-  const shown = hits.slice(page.offset, page.offset + page.items.length);
-  const out: ReadOutput = {
-    data: { ...header, hits: page.items },
-    results: shown.flatMap((h) => h.refs),
-    uploadDerived: shown.some((h) => h.upload),
-    truncated: page.truncated,
-    restart: { cursor: page.startCursor, remaining: page.remaining },
-    more: page.more,
-    relaxed,
-    notes,
-    query: input.query ?? '',
-    scopeLabel: input.narrowed ? `node:${input.narrowed}` : mode,
+  return {
+    data: page.data, results: page.results, uploadDerived: page.uploadDerived, truncated: page.truncated, relaxed,
+    query: input.query ?? '', scopeLabel: input.narrowed ? `node:${input.narrowed}` : mode,
   };
-  if (page.stalled) out.stalled = true;
-  if (page.cursor) out.cursor = page.cursor;
-  return out;
 }
+
+/** JSON characters of the query echoed in a search header. */
+const QUERY_ECHO_JSON = 240;
 
 /**
  * Cap of the "elsewhere" count per kind (final-gate follow-up): counting stops here and the note says

@@ -1,9 +1,9 @@
 /**
  * KS-8 design-thread ruling after the real-CLI smoke: read tools page by position and never skip.
  *
- * - The artifact header (title, URL, description, extraction, notes) is sent on the first page only;
- *   later pages carry the item id, the items and the envelope (tokens, truncated, more, cursor,
- *   content_trust) and nothing else.
+ * - The artifact header (identity: kind, id, kind of artifact, title, mode) and its notes are sent on the
+ *   first page only (paging rework: metadata and description are its first items); later pages carry the
+ *   items and the envelope (tokens, truncated, more, cursor, content_trust) and nothing else.
  * - Text reads (`read_artifact` text / raw, `expand` on a chunk or with neighbours): a passage that
  *   does not fit is served up to the budget and the next `cursor` continues from exactly that point;
  *   `cut: true` only ever means "the next page continues this passage". No placeholder, no
@@ -11,7 +11,8 @@
  * - Lists of short items: never skip an item; an item too long for the page is shortened, marked
  *   `cut: true`, and `expand` of its id gives the full text.
  * - Still: redaction before every cut, no cut inside a fence marker, every response within budget
- *   (floor 100), cursors bound to the request, the retrieval row lists every item whose text was served.
+ *   (clamped up to the tool's floor), cursors bound to the request, the retrieval row lists every item
+ *   whose text was served.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { TOOL_DESCRIPTIONS, toolJsonSchema } from '../../../src/core/harness/tools/registry.js';
@@ -19,6 +20,7 @@ import { estimateTokens } from '../../../src/core/knowledge/budget.js';
 import { resolveEntity } from '../../../src/core/knowledge/entities.js';
 import { cutServedText, shortenItem } from '../../../src/core/knowledge/readCommon.js';
 import { scopeFor } from '../../../src/core/knowledge/scope.js';
+import { READ_FLOOR_TOKENS } from '../../../src/core/knowledge/tools.js';
 import { servedChunkText } from '../../../src/core/knowledge/texts.js';
 import { stripFences } from '../../../src/core/knowledge/trust.js';
 import type { RunContext } from '../../../src/core/harness/tokens.js';
@@ -35,10 +37,11 @@ type Item = Record<string, unknown> & { type?: string; chunk_id?: string; text?:
 type Page = Record<string, unknown> & { items?: Item[]; truncated: boolean; more?: number; cursor?: string; notes?: string[]; tokens: number };
 
 const SECRET = 'Zq7-hunter-secret';
-const LONG = `The Team plan costs $49 per user per month, billed annually. ${'It includes unlimited warehouses and shared dashboards. '.repeat(14)}Login ${SECRET} is not for sharing. Some <<<fake fence>>> text. The end of the plan text.`;
+const LONG = `The Team plan costs $49 per user per month, billed annually. ${'It includes unlimited warehouses and shared dashboards. '.repeat(30)}Login ${SECRET} is not for sharing. Some <<<fake fence>>> text. The end of the plan text.`;
 const TEXT = `# Overview\n\nPricing overview for a fictional vendor.\n\n## Plans\n\n${LONG}\n\n## Trial\n\nEvery plan starts with a 14-day free trial.\n\n## Support\n\n${'Support answers within two business days. '.repeat(6)}\n`;
 const FENCED = /^<<<EVIDENCE [A-Za-z0-9_-]+\n([\s\S]*)\n>>>$/;
-const LATER_KEYS = new Set(['id', 'items', 'tokens', 'truncated', 'more', 'cursor', 'content_trust']);
+const LATER_KEYS = new Set(['items', 'tokens', 'truncated', 'more', 'cursor', 'content_trust']);
+const FLOOR = READ_FLOOR_TOKENS.read_artifact;
 
 async function setup(extra: Record<string, unknown> = {}) {
   const t = ks4(opened);
@@ -81,7 +84,7 @@ describe('read_artifact text pages by position (KS-8 ruling)', () => {
     it(`max_tokens ${budget}: every passage is served whole across the pages, nothing skipped, each page within budget`, async () => {
       const { t, a, chunks, c } = await setup({ title: undefined, description: undefined });
       const pages = await follow(t, c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: budget });
-      for (const p of pages) expect(estimateTokens(JSON.stringify(p))).toBeLessThanOrEqual(Math.max(100, budget));
+      for (const p of pages) expect(estimateTokens(JSON.stringify(p))).toBeLessThanOrEqual(Math.max(FLOOR, budget));
       const served = joined(pages);
       for (const ch of chunks) expect(served.get(ch.id)).toBe(stripFences(servedChunkText(t.store, 'ws_a', ch)));
       expect(pages.at(-1)!.truncated).toBe(false);
@@ -91,7 +94,7 @@ describe('read_artifact text pages by position (KS-8 ruling)', () => {
 
   it('a passage longer than a page is continued exactly where the last page stopped; cut means "continues on the next page"', async () => {
     const { t, a, c } = await setup();
-    const pages = await follow(t, c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: 160 });
+    const pages = await follow(t, c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: FLOOR });
     const pieces = pages.flatMap((p) => p.items ?? []);
     expect(pieces.filter((i) => i.cut).length).toBeGreaterThan(1);
     pages.forEach((p, i) => {
@@ -105,12 +108,11 @@ describe('read_artifact text pages by position (KS-8 ruling)', () => {
     const { t, a, c } = await setup();
     const pages = await follow(t, c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: 250 });
     expect(pages.length).toBeGreaterThan(2);
-    expect(pages[0]).toMatchObject({ id: a.id, title: 'pricing page', mode: 'text' });
-    expect(String(pages[0]!.description)).toContain('fictional pricing page');
-    for (const p of pages.slice(1)) {
-      for (const k of Object.keys(p)) expect(LATER_KEYS.has(k), `later page key ${k}`).toBe(true);
-      expect(p.id).toBe(a.id);
-    }
+    expect(pages[0]).toMatchObject({ kind: 'artifact', id: a.id, title: 'pricing page', mode: 'text' });
+    const items = pages.flatMap((p) => p.items ?? []);
+    expect(items[0]).toMatchObject({ type: 'meta', mime: 'text/markdown' });
+    expect(String(items.find((i) => i.type === 'description')!.text)).toContain('fictional pricing page');
+    for (const p of pages.slice(1)) for (const k of Object.keys(p)) expect(LATER_KEYS.has(k), `later page key ${k}`).toBe(true);
   });
 
   it('redaction runs before every cut: no piece shows any part of a secret', async () => {
@@ -132,7 +134,7 @@ describe('read_artifact text pages by position (KS-8 ruling)', () => {
     expect(rows).toHaveLength(pages.length);
     pages.forEach((p, i) => {
       const ids = rows[i]!.resultIds.map((r) => r.id);
-      for (const it of p.items ?? []) expect(ids).toContain(it.chunk_id);
+      for (const it of (p.items ?? []).filter((x) => x.type === 'chunk')) expect(ids).toContain(it.chunk_id);
     });
   });
 
@@ -162,17 +164,18 @@ describe('raw mode and expand on chunks page by position', () => {
     it(`raw at max_tokens ${budget}: the joined pieces are the whole stored text, header on the first page only`, async () => {
       const { t, a, c } = await setup();
       const pages = await follow(t, c, 'read_artifact', { artifact_id: a.id, mode: 'raw', max_tokens: budget });
-      for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(budget);
-      const text = pages.flatMap((p) => p.items ?? []).map((i) => FENCED.exec(String(i.text))![1]).join('');
+      for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(Math.max(FLOOR, budget));
+      const text = pages.flatMap((p) => p.items ?? []).filter((i) => i.type === 'raw').map((i) => FENCED.exec(String(i.text))![1]).join('');
       expect(text).toBe(stripFences(TEXT.replace(SECRET, '[redacted]')));
       for (const p of pages.slice(1)) for (const k of Object.keys(p)) expect(LATER_KEYS.has(k), `later page key ${k}`).toBe(true);
     });
   }
 
-  it('a first page too small for the whole header shortens it (header_cut) and still serves text', async () => {
+  it('a first page at the floor carries the whole header and still serves an item (never header_cut)', async () => {
     const { t, a, c } = await setup();
-    const p = await t.call<Page>(c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: 100 });
-    expect(p).toMatchObject({ id: a.id, header_cut: true });
+    const p = await t.call<Page>(c, 'read_artifact', { artifact_id: a.id, mode: 'text', max_tokens: 1 });
+    expect(p).toMatchObject({ kind: 'artifact', id: a.id, title: 'pricing page', mode: 'text' });
+    expect(p.header_cut).toBeUndefined();
     expect(p.items!.length).toBeGreaterThan(0);
     expect(p.cursor).toBeDefined();
   });
@@ -202,8 +205,8 @@ describe('lists never skip an item (KS-8 ruling)', () => {
       knowledgeRepos(t.store).findingEvidence.insert({ findingId: f.id, seq: i, artifactId: art.id, quote: `quote ${i} ${'q'.repeat(1500)}` });
     }
     const c = t.ctx('ws_a');
-    const pages = await follow(t, c, 'expand', { id: f.id, max_tokens: 300 });
-    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(300);
+    const pages = await follow(t, c, 'expand', { id: f.id, max_tokens: 400 });
+    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(400);
     const evidence = pages.flatMap((p) => p.items ?? []).filter((i) => i.type === 'evidence');
     expect(evidence.map((e) => e.artifact_id)).toEqual([a.id, b.id, g.id]);
     expect(evidence.some((e) => e.cut === true)).toBe(false); // each fits a later page whole
@@ -218,8 +221,8 @@ describe('lists never skip an item (KS-8 ruling)', () => {
     const t = ks4(opened);
     const ids = Array.from({ length: 6 }, (_, i) => t.fact('ws_a', `Globex widget fact number ${i} ${'detail '.repeat(25)}`).id);
     const c = t.ctx('ws_a');
-    const pages = await follow(t, c, 'search', { query: 'globex widget', kinds: ['fact'], max_tokens: 100 });
-    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(100);
+    const pages = await follow(t, c, 'search', { query: 'globex widget', kinds: ['fact'], max_tokens: 1 });
+    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(READ_FLOOR_TOKENS.search);
     const hits = pages.flatMap((p) => (p.hits as Item[]) ?? []);
     expect(hits.map((h) => h.id).sort()).toEqual([...ids].sort());
     const rows = t.rows(c.agentRunId);
@@ -231,11 +234,12 @@ describe('lists never skip an item (KS-8 ruling)', () => {
   it('card lines: every fact line is served across the pages; a line too long for the page is shortened, and expand of its id gives the full claim', async () => {
     const t = ks4(opened);
     const e = resolveEntity(t.store, scopeFor(t.store, 'ws_a'), { kind: 'competitor', name: 'Globex' });
-    const facts = Array.from({ length: 4 }, (_, i) => t.fact('ws_a', `Globex claim ${i} ${'with a long tail of detail '.repeat(12)}end of claim ${i}`, { entityId: e.id }));
+    // Control characters are JSON-escaped six-fold: these lines are larger than a page at the floor.
+    const facts = Array.from({ length: 4 }, (_, i) => t.fact('ws_a', `Globex claim ${i} ${'\u0001'.repeat(200)} end of claim ${i}`, { entityId: e.id }));
     const c = t.ctx('ws_a');
-    // 160: at the 100-token floor a card page cannot hold even a bare cut line with its pointer.
-    const pages = await follow(t, c, 'get_card', { entity_id: e.id, max_tokens: 160 });
-    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(160);
+    const pages = await follow(t, c, 'get_card', { entity_id: e.id, max_tokens: READ_FLOOR_TOKENS.get_card });
+    for (const p of pages) expect(p.tokens).toBeLessThanOrEqual(READ_FLOOR_TOKENS.get_card);
+    expect(pages.flatMap((p) => (p.lines as unknown[]) ?? []).some((l) => typeof l === 'object'), 'some line is cut').toBe(true);
     type Line = string | { text: string; cut?: boolean; full?: { tool: string; input: Record<string, unknown> } };
     const lines = pages.flatMap((p) => (p.lines as Line[]) ?? []);
     // Re-gate (binding): a cut line carries the call that returns it whole (this card, at it, larger budget).
@@ -251,7 +255,7 @@ describe('lists never skip an item (KS-8 ruling)', () => {
     // Every fact line is back whole; a card line summarises its claim (≤ 300 chars), `expand` of the id has all of it.
     for (const f of facts) {
       expect(recovered.some((l) => l.includes(f.id)), f.id).toBe(true);
-      expect((await t.call<{ claim: string }>(c, 'expand', { id: f.id })).claim).toMatch(/end of claim \d$/);
+      expect((await t.call<{ items: Array<{ type: string; text?: string }> }>(c, 'expand', { id: f.id })).items[0]!.text).toMatch(/end of claim \d$/);
     }
   });
 });
@@ -281,17 +285,17 @@ describe('shortening helpers (KS-8 ruling)', () => {
   });
 });
 
-describe('read tool descriptions (KS-8 ruling)', () => {
-  it('say: follow cursor until it is absent and you have read everything', () => {
+describe('read tool descriptions (KS-8 ruling, paging rework)', () => {
+  it('say: follow cursor until it is absent; cut carries full; a passage piece continues; the floor', () => {
     for (const tool of ['read_artifact', 'expand', 'search', 'get_card', 'list_changes', 'read_workspace'] as const) {
       const props = (toolJsonSchema(tool) as { properties: Record<string, { description?: string }> }).properties;
       expect(props.cursor?.description, tool).toMatch(/until it is absent/);
       expect(props.max_tokens?.description, tool).toMatch(/capped/);
+      expect(TOOL_DESCRIPTIONS[tool], tool).toMatch(/follow `cursor` until it is absent; an item marked `cut` carries `full`, the exact call that returns it/);
+      expect(TOOL_DESCRIPTIONS[tool], tool).not.toMatch(/retry_cursor|header_cut/);
     }
-    expect(TOOL_DESCRIPTIONS.read_artifact).toMatch(/follow `cursor` until it is absent and you have read everything/);
-    expect(TOOL_DESCRIPTIONS.read_artifact).not.toMatch(/retry_cursor|larger max_tokens/);
-    expect(TOOL_DESCRIPTIONS.expand).toMatch(/follow `cursor` until it is absent/);
-    expect(TOOL_DESCRIPTIONS.search).toMatch(/an item marked `cut` is shortened: make the call in its `full`/);
+    expect(TOOL_DESCRIPTIONS.read_artifact).toMatch(/a passage marked `cut` continues on the next page/);
+    expect(TOOL_DESCRIPTIONS.expand).toMatch(/a passage marked `cut` continues on the next page/);
   });
 });
 

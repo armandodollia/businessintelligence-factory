@@ -11,6 +11,7 @@ import { scopeFor } from '../../../src/core/knowledge/scope.js';
 import { listOutcomes } from '../../../src/core/learning/outcomes.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
+import { READ_FLOOR_TOKENS } from '../../../src/core/knowledge/tools.js';
 import { ks4, T0 } from './ks4fixture.js';
 
 const opened: Store[] = [];
@@ -150,9 +151,13 @@ describe('expand and read_artifact (design §9)', () => {
     const v2 = t.fact('ws_a', 'Acme Pro costs 49 dollars', { evidence: [a.id], lineageId: v1.id, version: 2, replacesId: v1.id });
     knowledgeRepos(t.store).findingEvidence.insert({ findingId: v2.id, seq: 0, artifactId: a.id, quote: 'costs 49 dollars per seat' });
     const v3 = t.fact('ws_a', 'Acme Pro costs 59 dollars', { lineageId: v1.id, version: 3, replacesId: v2.id, lifecycle: 'candidate', status: 'unverified' });
-    const ex = await t.call<{ claim: string; items: Array<Record<string, unknown>> }>(t.ctx('ws_a'), 'expand', { id: v2.id });
-    expect(ex.claim).toBe('Acme Pro costs 49 dollars');
+    const ex = await t.call<{ claim?: string; items: Array<Record<string, unknown>> }>(t.ctx('ws_a'), 'expand', { id: v2.id });
+    // Paging rework: the header is identity (kind, id, subject, state); the claim is the first item.
+    expect(ex).toMatchObject({ kind: 'fact', id: v2.id, subject: 'Acme', lifecycle: 'current', version: 2 });
+    expect(ex.claim).toBeUndefined();
+    expect(ex.items[0]).toEqual({ type: 'claim', text: 'Acme Pro costs 49 dollars' });
     expect(ex.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'state', lineage_id: v1.id }),
       expect.objectContaining({ type: 'evidence', artifact_id: a.id, title: 'Pricing', description: `<<<EVIDENCE ${a.id}\nPricing page, Pro plan visible\n>>>` }),
       // Re-gate (binding): each quote is an item of its own.
       expect.objectContaining({ type: 'quote', artifact_id: a.id, quote: `<<<EVIDENCE ${a.id}\ncosts 49 dollars per seat\n>>>` }),
@@ -168,9 +173,9 @@ describe('expand and read_artifact (design §9)', () => {
     const a1 = await t.page('ws_a', 'Version one of the pricing page with enough words to pass the cap of eighty characters easily.', { sourceUrl: 'https://acme.test/pricing' });
     const a2 = await t.page('ws_a', 'Version two.', { sourceUrl: 'https://acme.test/pricing?utm_source=x' });
     const c = t.ctx('ws_a');
-    const ex = await t.call<{ document_truncated?: boolean; extraction: { truncated?: boolean }; notes: string[]; items: Array<Record<string, unknown>> }>(c, 'expand', { id: a1.id });
+    const ex = await t.call<{ document_truncated?: boolean; notes: string[]; items: Array<Record<string, unknown>> }>(c, 'expand', { id: a1.id });
     expect(ex.document_truncated).toBe(true);
-    expect(ex.extraction.truncated).toBe(true);
+    expect(ex.items[0]).toMatchObject({ type: 'meta', source_url: 'https://acme.test/pricing', extraction: { truncated: true } });
     expect(ex.notes.join(' ')).toMatch(/cut at the extraction cap/);
     expect(ex.items.filter((i) => i.type === 'capture')).toHaveLength(1);
     expect(ex.items.find((i) => i.type === 'page_version')).toMatchObject({ relation: 'next', artifact_id: a2.id, text_changed: true });
@@ -205,8 +210,15 @@ describe('expand and read_artifact (design §9)', () => {
     const t = ks4(opened);
     const id = newId('rec');
     t.store.recommendations.insert({ id, workspaceId: 'ws_a', title: 'Lower price', summary: 'Do it', criteria: {}, findingIds: ['fnd_x'], personaFeedback: [], priority: 2, createdAt: T0, status: 'verified' });
-    const r = await t.call<Record<string, unknown>>(t.ctx('ws_a'), 'expand', { id });
-    expect(r).toMatchObject({ kind: 'record', type: 'recommendation', title: 'Lower price', finding_ids: ['fnd_x'] });
+    const r = await t.call<Record<string, unknown> & { items: unknown[] }>(t.ctx('ws_a'), 'expand', { id });
+    // Paging rework: identity in the header, one `field` item per other field.
+    expect(r).toMatchObject({ kind: 'record', type: 'recommendation', id, name: 'Lower price', status: 'verified' });
+    expect(r.items).toEqual([
+      { type: 'field', field: 'summary', value: 'Do it' },
+      { type: 'field', field: 'criteria', value: {} },
+      { type: 'field', field: 'finding_ids', value: ['fnd_x'] },
+      { type: 'field', field: 'priority', value: 2 },
+    ]);
   });
 });
 
@@ -289,14 +301,16 @@ describe('edge cases', () => {
     expect(r.notes.join(' ')).toMatch(/not available/);
   });
 
-  it('a header larger than max_tokens is shortened (header_cut), never an over-budget response (Opus finding 4)', async () => {
+  it('a long claim at a small max_tokens: the whole header, the claim cut with its pointer, never over the floor (paging rework)', async () => {
     const t = ks4(opened);
     const f = t.fact('ws_a', `Long claim ${'word '.repeat(700)}`);
     const c = t.ctx('ws_a');
-    const r = await t.call<{ tokens: number; id: string; claim?: string; header_cut?: boolean }>(c, 'expand', { id: f.id, max_tokens: 100 });
-    expect(r.tokens).toBeLessThanOrEqual(100);
-    expect(r).toMatchObject({ id: f.id, header_cut: true });
-    expect(String(r.claim ?? '').length).toBeLessThan(f.claim.length);
+    const r = await t.call<{ tokens: number; id: string; header_cut?: boolean; items: Array<Record<string, unknown>> }>(c, 'expand', { id: f.id, max_tokens: 100 });
+    expect(r.tokens).toBeLessThanOrEqual(READ_FLOOR_TOKENS.expand);
+    expect(r).toMatchObject({ kind: 'fact', id: f.id, subject: 'Acme' });
+    expect(r.header_cut).toBeUndefined();
+    expect(r.items).toEqual([expect.objectContaining({ type: 'claim', cut: true, full: expect.objectContaining({ kind: 'same_call' }) })]);
+    expect(String(r.items[0]!.text).length).toBeLessThan(f.claim.length);
     // The row lists the fact whose (shortened) text was served.
     expect(t.rows(c.agentRunId)[0]!.resultIds.map((x) => x.id)).toContain(f.id);
   });

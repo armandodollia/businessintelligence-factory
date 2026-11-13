@@ -23,23 +23,45 @@ import { entityNames, getEntity } from './entities.js';
 import { factFreshness } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
 import {
-  aroundVisible, artifactVisibleSql, day, factVisibleSql, isCrossNodeCausal, recordVisibleSql, relationSourceNode, visParams, type ReadEnv,
+  aroundVisible, artifactVisibleSql, day, factVisibleSql, isCrossNodeCausal, recordVisibleSql, relationSourceNode, visParams, type ReadEnv, type Recover,
 } from './readCommon.js';
 import { neighbours, type Edge } from './relations.js';
 import type { KnowledgeScope, ScopeMode } from './scope.js';
+import { encodeCursor } from './budget.js';
+import { boundedText, laterPageNeed } from './paging.js';
 import { servedLine } from './texts.js';
 import { factUsableSql, outputUsableSql } from './usable.js';
 
 export type CardLine = { text: string; refs: RetrievalResultRef[]; upload: boolean };
 
 export type Card = {
-  /** The fixed part of the card (always returned). */
+  /** Identity only (paging rework): id, name (bounded), kind, home node; served on a card's first page. */
   header: Record<string, unknown>;
   headerRefs: RetrievalResultRef[];
   headerUpload: boolean;
-  /** Lines in priority order (budget drops the tail). */
+  /**
+   * What the header leaves out, served as the card's first lines (paging rework): a name too long for the
+   * header, aliases (entity); scope, description and audiences (node). Not part of briefings.
+   */
+  detail: CardLine[];
+  /** Lines in priority order. */
   lines: CardLine[];
 };
+
+/** JSON characters of a name in a card or response header (`boundedText`). */
+export const HEADER_NAME_JSON = 200;
+
+/** The lines a card is paged by: its detail lines, then its lines. */
+export function cardPageLines(card: Pick<Card, 'detail' | 'lines'>): CardLine[] {
+  return [...card.detail, ...card.lines];
+}
+
+/** A name for a header, bounded (`boundedText`); a name cut there is served whole as a detail line too. */
+function headerName(name: string, detail: CardLine[], refs: RetrievalResultRef[] = [], upload = false): string {
+  const shown = boundedText(name, HEADER_NAME_JSON);
+  if (shown !== name) detail.push({ text: `name: ${name}`, refs, upload });
+  return shown;
+}
 
 /** Facts shown on one entity card before the "left out" line (the rest: `search` with `entity_id`). */
 export const CARD_MAX_FACTS = 15;
@@ -239,16 +261,23 @@ export function entityCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, 
   const group = groupOf(store, e.id);
   const headerRefs: RetrievalResultRef[] = [{ id: e.id, kind: 'entity' }];
   for (const a of names.aliases) if (a.entityId) headerRefs.push({ id: a.entityId, kind: 'entity' });
+  const detail: CardLine[] = [];
   const header = {
     entity: {
       id: e.id,
-      name: servedLine(store, ws, e.name, 200),
+      name: headerName(servedLine(store, ws, e.name, 200), detail, [{ id: e.id, kind: 'entity' }], names.uploadOnly),
       kind: e.kind,
       home: e.workspaceId,
-      ...(names.aliases.length ? { aliases: names.aliases.map((a) => (a.uploadOnly ? `${servedLine(store, ws, a.name, 120)} [upload]` : servedLine(store, ws, a.name, 120))) } : {}),
       ...(names.uploadOnly ? { upload: true } : {}),
     },
   };
+  // Aliases are lines (paging rework: the header is identity only), each with its row and upload mark.
+  for (const a of names.aliases) {
+    detail.push({
+      text: `alias: ${servedLine(store, ws, a.name, 120)}${a.uploadOnly ? ' [upload]' : ''}`,
+      refs: a.entityId ? [{ id: a.entityId, kind: 'entity' }] : [], upload: a.uploadOnly,
+    });
+  }
   const lines: CardLine[] = [...typedLines(env, view, mode, group)];
   const facts = cardFacts(store, view, mode, group);
   lines.push(...facts.slice(0, maxFacts).map((f) => factLine(env, f)));
@@ -265,7 +294,7 @@ export function entityCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, 
       : 'nothing left out of this card for your scope. Unverified and history facts: search with include_unverified / include_history.',
     refs: [], upload: false,
   });
-  return { header, headerRefs, headerUpload: names.uploadOnly || names.aliases.some((a) => a.uploadOnly), lines };
+  return { header, headerRefs, headerUpload: names.uploadOnly || names.aliases.some((a) => a.uploadOnly), detail, lines };
 }
 
 /** The card of node `view.workspaceId` within its own view (`mode` node) or the tree. */
@@ -275,19 +304,21 @@ export function nodeCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode): C
   const node = store.workspaces.get(view.workspaceId)!;
   const sc = scopeOf(node);
   const p = visParams(view, mode);
+  const detail: CardLine[] = [];
   const header = {
     node: {
       id: node.id,
-      name: servedLine(store, ws, node.name, 200),
+      name: headerName(servedLine(store, ws, node.name, 200), detail),
       level: sc.level,
-      scope: servedLine(store, ws, sc.name, 200),
-      ...(sc.description ? { description: servedLine(store, ws, sc.description, 400) } : {}),
-      audiences: audiencesOf(node),
       ...(node.parentWorkspaceId ? { parent: node.parentWorkspaceId } : {}),
     },
     // Another node's card (read by id): labelled with its source node; it shows that node's own view.
     ...(node.id !== env.scope.workspaceId ? { source: node.id } : {}),
   };
+  // Paging rework: the header is identity only; the node's scope, description and audiences are lines.
+  detail.push({ text: `scope: ${servedLine(store, ws, sc.name, 200)}`, refs: [], upload: false });
+  if (sc.description) detail.push({ text: `description: ${servedLine(store, ws, sc.description, 400)}`, refs: [], upload: false });
+  detail.push({ text: `audiences: ${audiencesOf(node).join(', ')}`, refs: [], upload: false });
   const lines: CardLine[] = [];
   const profile = store.profiles.get(node.id)?.data ?? {};
   const keys = Object.keys(profile);
@@ -349,5 +380,18 @@ export function nodeCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode): C
     }));
   }
   lines.push({ text: 'more: search (scope "tree" for the rest of the business), get_card with an entity_id, list_changes', refs: [], upload: false });
-  return { header, headerRefs: [], headerUpload: false, lines };
+  return { header, headerRefs: [], headerUpload: false, detail, lines };
+}
+
+/** A node card line too big for a page: `read_workspace <node>` at that line, with the measured budget that holds it. */
+export function nodeLineRecover(env: ReadEnv, workspaceId: string, scope: ScopeMode | undefined, card: Card) {
+  const input: Record<string, unknown> = { workspace_id: workspaceId, ...(scope === 'tree' ? { scope } : {}) };
+  const all = cardPageLines(card);
+  return (index: number): Recover | undefined => {
+    if (!env.keyFor || !env.pointerBudget) return undefined;
+    const key = env.keyFor('read_workspace', input);
+    const next = index + 1 < all.length ? encodeCursor({ key, offset: index + 1 }) : undefined;
+    const m = env.pointerBudget(laterPageNeed('lines', all[index]!.text, next, all.length - index - 1), 'read_workspace');
+    return m === undefined ? undefined : { kind: 'read_workspace_line', tool: 'read_workspace', input: { ...input, cursor: encodeCursor({ key, offset: index }), max_tokens: m } };
+  };
 }

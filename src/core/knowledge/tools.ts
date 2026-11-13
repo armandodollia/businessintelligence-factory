@@ -3,11 +3,12 @@
  * `get_card`, `expand`, `read_artifact`, `list_changes`, `read_workspace`. The harness dispatcher
  * calls `knowledgeRead` for agent runs; KS-7's API calls it with `role: 'user'`.
  *
- * For every call it builds the caller's `KnowledgeScope`, picks the budget (`budgetFor`, a caller's
- * `max_tokens` can only lower it), enforces the reviewer / escalation slice, runs the tool, adds the
- * envelope (`tokens`, `truncated`, `more`, `cursor`, `content_trust`, `relaxed`, `notes`) and writes
- * ONE `retrieval_events` row listing every item whose text the response carried (its `upload_derived`
- * also re-checks every listed id), with the measured latency.
+ * For every call it builds the caller's `KnowledgeScope`, picks the budget (`budgetFor`: the role's
+ * budget, or the caller's `max_tokens`, which may lower it or raise it up to the hard maximum; then
+ * clamped up to the tool's floor, `READ_FLOOR_TOKENS`), enforces the reviewer / escalation slice, runs
+ * the tool (each page assembled and measured whole by `assemblePage`, envelope included) and writes ONE
+ * `retrieval_events` row listing every item whose text the response carried (its `upload_derived` also
+ * re-checks every listed id), with the measured latency.
  *
  * Errors carry no store text: unknown ids, ids of another tree and (reviewer) ids outside the slice
  * all answer the same "<kind> '<id>' not found". An attempt on an id that exists outside the caller's
@@ -17,30 +18,30 @@ import type { BifConfig, ModelRef } from '../config/schema.js';
 import type { EventBus } from '../events.js';
 import type { Store } from '../store/db.js';
 import type { RetrievalRole } from '../types.js';
-import { budgetFor, cursorKey, estimateTokens, InvalidCursorError, maxRequestTokens } from './budget.js';
-import { entityCard, nodeCard, type Card } from './cards.js';
+import { budgetFor, cursorKey, InvalidCursorError, maxRequestTokens, READ_FLOOR_TOKENS } from './budget.js';
+import { cardPageLines, entityCard, nodeCard, nodeLineRecover, type Card } from './cards.js';
 import { runListChanges } from './changes.js';
 import { artifactNotFound, assertEntityReadable, expandNotFound, runExpand, runReadArtifact, type ArtifactBytes, type ReadArtifactMode } from './expand.js';
+import { assemblePage, type PageItem } from './paging.js';
 import {
-  anyUploadDerived, BUDGET_KIND, cursorAtItem, inSlice, nodeLineRecover, pageOf, readableById, uniqueRefs, usableOnly,
+  anyUploadDerived, BUDGET_KIND, inSlice, readableById, usableOnly,
   type ReadEnv, type ReadOutput, type Recover, type ReviewSlice,
 } from './readCommon.js';
 import { recordRetrieval } from './retrievalLog.js';
 import { factScope } from './facts.js';
 import { KnowledgeNotFoundError, narrowTo, notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { runSearch, SearchInputError, type SearchKind } from './search.js';
-import { CONTENT_TRUST } from './trust.js';
 
 /**
- * Smallest response budget of a knowledge read tool (tokens). A configured budget below it (a tiny
- * role / provider budget, or a `hardMaxTokens` under it) is clamped UP to it, and `max_tokens` cannot go
- * below it (schema floor), so a response can always at least carry the truncation notice
- * (`truncated`, `more`, `cursor`, a note): an agent never reads "nothing fit" as "nothing exists".
+ * Smallest response budget of any knowledge read (tokens): every tool's floor (`READ_FLOOR_TOKENS`) is at
+ * least this, and a pointer never asks for less.
  */
 export const MIN_RESPONSE_TOKENS = 100;
 
 export const KNOWLEDGE_READ_TOOLS = ['search', 'get_card', 'expand', 'read_artifact', 'list_changes', 'read_workspace'] as const;
 export type KnowledgeReadTool = (typeof KNOWLEDGE_READ_TOOLS)[number];
+
+export { READ_FLOOR_TOKENS };
 
 /** Input as validated by the tool registry (snake_case, as agents send it). */
 export type KnowledgeReadInput = {
@@ -130,27 +131,18 @@ function narrowed(store: Store, scope: KnowledgeScope, workspaceId: string | und
 }
 
 function cardOutput(
-  card: Card, budget: number, key: string, cursor: string | undefined, query: string, scopeLabel: string,
-  recover: (line: unknown, index: number, need: number) => Recover | undefined,
+  env: ReadEnv, card: Card, budget: number, key: string, cursor: string | undefined, query: string, scopeLabel: string,
+  recover?: (index: number) => Recover | undefined,
 ): ReadOutput {
-  const lines = card.lines.map((l) => l.text);
-  // A line too big for a whole page comes back as { text, cut: true, full } (never skipped); `full` is the
-  // call that returns it whole (re-gate: entity card → the same call; node card → read_workspace).
-  const page = pageOf<string | { text: string; cut: true }>(lines, card.header, budget, { key, itemsKey: 'lines', recover, ...(cursor ? { cursor } : {}) });
-  const shown = card.lines.slice(page.offset, page.offset + page.items.length);
-  const out: ReadOutput = {
-    data: { ...card.header, lines: page.items },
-    results: uniqueRefs([...card.headerRefs, ...shown.flatMap((l) => l.refs)]),
-    uploadDerived: card.headerUpload || shown.some((l) => l.upload),
-    truncated: page.truncated,
-    restart: { cursor: page.startCursor, remaining: page.remaining },
-    more: page.more,
-    query,
-    scopeLabel,
-  };
-  if (page.stalled) out.stalled = true;
-  if (page.cursor) out.cursor = page.cursor;
-  return out;
+  // A line too big for a page on its own comes back as { text, cut: true, full } (never skipped).
+  const items: PageItem[] = cardPageLines(card).map((l, i) => ({
+    value: l.text, refs: l.refs, upload: l.upload, ...(recover ? { recover: () => recover(i) } : {}),
+  }));
+  const page = assemblePage({
+    key, cursor, budget, itemsKey: 'lines', header: card.header, headerRefs: card.headerRefs, headerUpload: card.headerUpload,
+    notes: env.pageNotes, items, again: env.again,
+  });
+  return { data: page.data, results: page.results, uploadDerived: page.uploadDerived, truncated: page.truncated, query, scopeLabel };
 }
 
 /** Runs one knowledge read for `caller` (see module doc). Never throws for caller errors. */
@@ -172,7 +164,8 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     ...(deps.slice ? { slice: deps.slice } : {}),
     mode: input.scope ?? 'node',
   };
-  const budget = Math.max(MIN_RESPONSE_TOKENS, budgetFor(deps.config, caller.role, caller.model?.provider, BUDGET_KIND[tool]!, input.max_tokens));
+  const floor = (t: string) => READ_FLOOR_TOKENS[t as KnowledgeReadTool] ?? MIN_RESPONSE_TOKENS;
+  const budget = Math.max(floor(tool), budgetFor(deps.config, caller.role, caller.model?.provider, BUDGET_KIND[tool]!, input.max_tokens));
   // A cursor is bound to its request: tool, caller node and role, and every input except paging.
   const { cursor, max_tokens: _maxTokens, ...rest } = input;
   const key = cursorKey({ tool, ws: caller.workspaceId, role: caller.role, ...rest });
@@ -180,20 +173,19 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
   if (usableOnly(caller.role) && (input.include_unverified || input.include_history)) {
     roleNotes.push(`include_unverified / include_history are ignored for role ${caller.role}: usable facts only`);
   }
-  // Final-gate ruling + re-gate (Opus 3): every page of the request carries the role notes (only `search`
-  // takes the flags that produce them), so its pages are measured with them, as the notes they are.
+  // Every page of the request carries the role notes (only `search` takes the flags that produce them),
+  // so every page is measured with them.
   if (roleNotes.length) env.pageNotes = roleNotes;
-  const pageBudget = budget;
-  // Re-gate (binding recovery shapes): pointers of shortened items. A pointer asks for the budget that
-  // holds the item whole plus this request's role-note reserve; above the hard maximum there is none.
+  // Pointers of cut items (paging rework): the measured budget that holds the item, raised to the target
+  // tool's floor; above the hard maximum there is none (the item is flagged `too_large`).
   const maxRequest = Math.max(MIN_RESPONSE_TOKENS, maxRequestTokens(deps.config, caller.model?.provider));
-  env.pointerBudget = (need) => {
-    const n = Math.max(MIN_RESPONSE_TOKENS, need + (budget - pageBudget) + 4);
-    return n <= maxRequest ? n : undefined;
+  env.pointerBudget = (need, t) => {
+    const n = Math.max(floor(t), need);
+    return n <= Math.max(maxRequest, floor(t)) ? n : undefined;
   };
   env.keyFor = (t, inp) => cursorKey({ tool: t, ws: caller.workspaceId, role: caller.role, ...inp });
   env.again = (at, need) => {
-    const m = env.pointerBudget!(need);
+    const m = env.pointerBudget!(need, tool);
     return m === undefined ? undefined : { kind: 'same_call', tool, input: { ...rest, cursor: at, max_tokens: m } };
   };
 
@@ -223,7 +215,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
           ...(input.since ? { since: input.since } : {}),
           ...(input.limit !== undefined ? { limit: input.limit } : {}),
           ...(cursor ? { cursor } : {}),
-        }, pageBudget, { tool, ws: caller.workspaceId, role: caller.role, ...rest });
+        }, budget, { tool, ws: caller.workspaceId, role: caller.role, ...rest });
         break;
       }
       case 'get_card':
@@ -234,21 +226,22 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
         if (input.entity_id && tool === 'get_card') {
           assertEntityReadable(env, input.entity_id);
           const card = entityCard(env, scope, mode, input.entity_id);
-          out = cardOutput(card, pageBudget, key, cursor, `entity ${input.entity_id}`, mode, (_l, i, need) => env.again!(cursorAtItem(key, i), need));
+          out = cardOutput(env, card, budget, key, cursor, `entity ${input.entity_id}`, mode);
         } else {
           const view = narrowed(store, scope, input.workspace_id ?? caller.workspaceId);
           if (!readableById(scope, mode, scope.nodeIds.includes(view.workspaceId))) throw notFound('workspace', view.workspaceId);
-          out = cardOutput(nodeCard(env, view, mode), pageBudget, key, cursor, `node ${view.workspaceId}`,
-            view.workspaceId === caller.workspaceId ? mode : `${mode}:${view.workspaceId}`, nodeLineRecover(env, view.workspaceId, input.scope));
+          const card = nodeCard(env, view, mode);
+          out = cardOutput(env, card, budget, key, cursor, `node ${view.workspaceId}`,
+            view.workspaceId === caller.workspaceId ? mode : `${mode}:${view.workspaceId}`, nodeLineRecover(env, view.workspaceId, mode, card));
         }
         break;
       }
       case 'expand':
-        out = runExpand(env, { id: input.id ?? '', ...(input.around !== undefined ? { around: input.around } : {}), ...(cursor ? { cursor } : {}) }, pageBudget, key);
+        out = runExpand(env, { id: input.id ?? '', ...(input.around !== undefined ? { around: input.around } : {}), ...(cursor ? { cursor } : {}) }, budget, key);
         break;
       case 'read_artifact': {
         if (!deps.files) throw new Error('read_artifact needs the artifact store');
-        out = runReadArtifact(env, deps.files, { artifactId: input.artifact_id ?? '', ...(input.mode ? { mode: input.mode } : {}), ...(cursor ? { cursor } : {}) }, pageBudget, key);
+        out = runReadArtifact(env, deps.files, { artifactId: input.artifact_id ?? '', ...(input.mode ? { mode: input.mode } : {}), ...(cursor ? { cursor } : {}) }, budget, key);
         break;
       }
       case 'list_changes': {
@@ -272,30 +265,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     throw err;
   }
 
-  const notes = [...roleNotes, ...(out.notes ?? [])];
-  const data: Record<string, unknown> = { ...out.data, tokens: 0, truncated: out.truncated };
-  if (out.truncated) data.more = out.more ?? 0;
-  if (out.cursor) data.cursor = out.cursor;
-  if (out.relaxed) data.relaxed = true;
-  data.content_trust = CONTENT_TRUST;
-  if (notes.length) data.notes = notes;
-  data.tokens = estimateTokens(JSON.stringify(data));
-  data.tokens = estimateTokens(JSON.stringify(data));
-  if ((data.tokens as number) > budget || out.stalled) {
-    // The fixed part alone (e.g. a long claim) does not fit the budget, or nothing of the page could be
-    // served (KS-8: never a cursor that points back at the same place): serve no store text rather than
-    // exceed it (design §4 anti-goal: no unbounded response), and say what was left out: `truncated`,
-    // how many items, and the cursor that repeats this page with a larger max_tokens.
-    const more = Math.max(1, out.restart?.remaining ?? 1);
-    out = { ...out, results: [], uploadDerived: false, truncated: true, more };
-    for (const k of Object.keys(data)) delete data[k];
-    Object.assign(data, {
-      tokens: 0, truncated: true, more, ...(out.restart ? { cursor: out.restart.cursor } : {}), content_trust: CONTENT_TRUST,
-      notes: [`nothing of this page fits ${budget} tokens: repeat with this cursor and a larger max_tokens`],
-    });
-    data.tokens = estimateTokens(JSON.stringify(data));
-  }
-
+  const data = out.data;
   const uploadDerived = out.uploadDerived || anyUploadDerived(store, out.results);
   const ev = recordRetrieval(
     { store, ...(deps.events ? { events: deps.events } : {}) },
