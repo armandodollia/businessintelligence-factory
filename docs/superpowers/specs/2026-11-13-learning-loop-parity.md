@@ -143,7 +143,7 @@ agent output and which prompt version — and feed it into calibration and expor
 
 ## Wave 2 (after wave 1 is merged)
 
-### WP-E — Lessons engine and retro (migration 18)
+### WP-E — Lessons engine and retro (migration 19)
 Per role, per tree root lesson rules built from machine signals (review-issue
 classes from `review_issues`, decision outcome labels, worker failures, policy
 denials) and human signals (feedback events, ratings): add a rule when a category
@@ -155,13 +155,15 @@ version changes accordingly). Scheduled weekly retro job via the existing
 scheduler: digest decisions, outcomes, feedback, costs; a `retro` agent proposes
 prompt/calibration edits as pending items with evidence.
 
-### WP-F — Reviewer audit and experiments (migration 19)
+### WP-F — Reviewer audit and experiments (migration 20)
 Reviewer audit: re-review N recently verified tasks with a different configured
 model/provider; store `reviewer_audits`; misses become reviewer lessons (WP-E) and
 decision outcomes. Experiments: `experiment_id`/`arm` on runs and decisions; run
 the same task under prompt/model A and B (lessons off during experiments); compare
 review pass rate, rounds, ratings, cost per arm. API + minimal UI.
 
-### WP-G — Metrics view (migration 20 if needed)
+### WP-G — Metrics view (migration 21 if needed)
+
+Migration 18 is owned by knowledge-store KS-0 (plans/2026-11-13-knowledge-store.md).
 Metrics API + view: pass rate, rounds to pass, failures, cost, rating agreement,
 outcome labels, over time and per role / task type / prompt version / model.
