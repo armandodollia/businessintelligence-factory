@@ -689,6 +689,7 @@ function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclus
             ? 'exposed_run'
             : firstCause([
                 o.taskId ? uploads.exposedCause(o.taskId) : undefined,
+                o.taskId ? uploads.taskCitesExposedOutput(o.taskId) : undefined, // Opus finding 3: the task rule
                 uploads.exposedCause(o.id),
                 uploads.exposedCause(o.findingId),
                 o.priorFindingId ? uploads.exposedCause(o.priorFindingId) : undefined,

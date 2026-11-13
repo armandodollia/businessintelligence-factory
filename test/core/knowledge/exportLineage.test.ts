@@ -126,3 +126,23 @@ describe('a confirm or retract by an exposed task does not taint its target (des
     });
   }
 });
+
+describe('fact-observation lines follow the task rule (Opus 3)', () => {
+  it("an observation of a task whose outputs cite an exposed output is left out, like that task's decisions", async () => {
+    const w = await world();
+    const f = await w.save(await w.exposed(), 'Acme Pro costs 49 dollars per seat');
+    const g = await w.save(w.run(), 'Acme offers a free tier');
+    // T11 saves a recommendation citing F (its outputs cite an exposed output) and confirms G.
+    const t11 = w.run();
+    const rec = w.t.store.recommendations.insert({
+      id: newId('rec'), workspaceId: 'ws_a', title: 'Price per seat', summary: 's', criteria: {}, findingIds: [f],
+      personaFeedback: [], priority: 1, createdAt: T0, status: 'verified', taskId: (w.t.store.agentRuns.get(t11.agentRunId)!).taskId!,
+    });
+    expect(rec.findingIds).toEqual([f]);
+    const a = await w.page(t11, 'Free tier still listed.');
+    await w.t.call(t11, 'confirm_finding', { finding_id: g, evidence: [a] });
+    const obs = knowledgeRepos(w.t.store).factObservations.list({ findingId: g }).find((o) => o.kind === 'confirm')!;
+    expect(w.observations()).not.toContain(obs.id);
+    expect(w.observations(true)).toContain(obs.id);
+  });
+});
