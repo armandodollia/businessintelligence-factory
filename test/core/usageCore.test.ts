@@ -163,4 +163,16 @@ describe('prompt store', () => {
     });
     expect(promptStoreGaps(s)).toEqual(['missing1']);
   });
+
+  it('integration: promptStoreGaps also covers ratings, feedback events, outcomes, usage and review issues', () => {
+    const s = store();
+    const now = new Date().toISOString();
+    s.ratings.insert({ id: 'rat_1', workspaceId: 'ws_a', targetType: 'decision', targetId: 'dec_1', criterion: 'score', agentValue: 8, verdict: 'agree', createdAt: now, promptVersion: 'gap_rating' });
+    s.db.prepare(`INSERT INTO feedback_events (id, workspace_id, created_at, kind, target_type, target_id, prompt_version) VALUES ('fbk_1', 'ws_a', ?, 'prompt_patch_apply', 'prompt', 'worker', 'gap_feedback')`).run(now);
+    s.db.prepare(`INSERT INTO agent_usage (id, workspace_id, run_id, role, provider, model, prompt_version, attempt, created_at) VALUES ('use_1', 'ws_a', 'arun_x', 'worker', 'claude', 'sonnet', 'gap_usage', 1, ?)`).run(now);
+    s.db.prepare(`INSERT INTO decision_outcomes (id, workspace_id, decision_id, outcome, label, evidence_json, source, role, prompt_version, created_at) VALUES ('dout_1', 'ws_a', 'dec_x', 'x', 'stale', '{}', 'what_changed', 'worker', 'gap_outcome', ?)`).run(now);
+    s.db.prepare(`INSERT INTO decision_outcomes (id, workspace_id, decision_id, outcome, label, evidence_json, source, role, prompt_version, created_at) VALUES ('dout_2', 'ws_a', 'dec_y', 'x', 'stale', '{}', 'what_changed', 'orchestrator', 'n/a', ?)`).run(now);
+    s.db.prepare(`INSERT INTO review_issues (id, workspace_id, task_id, round, issue_id, class, text, status, reviewer_run_id, worker_prompt_version, created_at) VALUES ('ri_1', 'ws_a', 't', 1, 'i1', 'nit', 'x', 'open', 'r', 'gap_issue', ?)`).run(now);
+    expect(promptStoreGaps(s)).toEqual(['gap_feedback', 'gap_issue', 'gap_outcome', 'gap_rating', 'gap_usage']);
+  });
 });

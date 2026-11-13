@@ -14,6 +14,8 @@ import {
 } from '../../src/core/feedback/actions.js';
 import { actorOf as calibrationActorOf } from '../../src/core/scoring/calibrationHistory.js';
 import { recordSystemDecision } from '../../src/core/systemDecision.js';
+import { getPromptText, promptStoreGaps } from '../../src/core/prompts/store.js';
+import { revertCalibrationAsUser } from '../../src/core/feedback/actions.js';
 import { usageRepos } from '../../src/core/store/usageRepos.js';
 import { actorOf, latestFeedback, listFeedback, onFeedback, recordFeedback } from '../../src/core/feedback/events.js';
 import { targetProvenance } from '../../src/core/feedback/provenance.js';
@@ -381,6 +383,20 @@ describe('prompt patch apply', () => {
     expect(versions[1]).toMatchObject({ id: out.versionId, actor: 'ana', decisionId: out.decisionId });
     expect(out.feedback.afterJson).toMatchObject({ versionId: out.versionId, decisionId: out.decisionId });
     expect(listFeedback(t.store, { kind: 'prompt_patch_apply' })).toHaveLength(1);
+  });
+
+  it('integration: every role prompt version it tags resolves in the prompt store (apply and revert)', () => {
+    const t = researchSetup(opened);
+    t.store.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: T0 });
+    for (const role of ['worker', 'reviewer', 'persona', 'orchestrator'] as const) {
+      const out = applyPromptPatchAsUser(t, 'ws_a', { role, patchText: `## Calibration\n\n1. ${role} rule\n`, examples: [] }, { actor: 'ana' });
+      expect(getPromptText(t.store, out.previousPromptVersion)).toMatchObject({ role });
+      expect(getPromptText(t.store, out.promptVersion)!.text).toContain(`${role} rule`);
+    }
+    const first = usageRepos(t.store).calibrationVersions.list({ rootWorkspaceId: 'ws_a', role: 'worker' })[0]!;
+    const rev = revertCalibrationAsUser(t, 'ws_a', first.id, { actor: 'ana' });
+    expect(getPromptText(t.store, rev.promptVersion)).toBeDefined();
+    expect(promptStoreGaps(t.store)).toEqual([]);
   });
 
   it('one actorOf: the calibration history module re-exports the feedback one', () => {

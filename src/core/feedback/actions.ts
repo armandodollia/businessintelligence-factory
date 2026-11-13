@@ -10,6 +10,7 @@ import { setIncludeInSynthesis } from '../evidence/synthesis.js';
 import { resolveUserRequest } from '../harness/tools/handlers.js';
 import { PROTECTED_PROFILE_KEYS, mergePatch } from '../interview/interview.js';
 import { calibrationAppendix, loadPrompt, promptVersion, withCalibration, type CalibrationScope } from '../prompts/index.js';
+import { recordPromptVersion } from '../prompts/store.js';
 import { reviewerSystemPrompt, workerSystemPrompt } from '../research/systemPrompts.js';
 import { setOutputInclude } from '../research/outputs.js';
 import { calibrationScope, proposePromptPatch, type PromptPatch } from '../scoring/calibration.js';
@@ -359,23 +360,36 @@ export function recordWeightsChange(
 // prompt patches
 
 /**
- * Canonical current prompt version of a role in a business tree: the version its runs record for
- * the base prompt (worker / synthesizer: worker prompt without task-type extras or browser note;
- * reviewer: reviewer prompt + policy; orchestrator / interviewer: their prompt; persona: the persona
+ * Canonical current prompt text of a role in a business tree: the text its runs record for the base
+ * prompt (worker / synthesizer: worker prompt without task-type extras or browser note; reviewer:
+ * reviewer prompt + policy; orchestrator / interviewer: their prompt; persona: the persona
  * calibration appendix, since persona prompts are per persona). Changes when a patch is applied.
  */
-export function rolePromptVersion(config: BifConfig, role: Role, scope: CalibrationScope): string {
+export function rolePromptText(config: BifConfig, role: Role, scope: CalibrationScope): string {
   switch (role) {
     case 'worker':
     case 'synthesizer':
-      return promptVersion(workerSystemPrompt(config, role, false, undefined, scope));
+      return workerSystemPrompt(config, role, false, undefined, scope);
     case 'reviewer':
-      return promptVersion(reviewerSystemPrompt(config, scope));
+      return reviewerSystemPrompt(config, scope);
     case 'persona':
-      return promptVersion(withCalibration('', 'persona', scope));
+      return withCalibration('', 'persona', scope);
     default:
-      return loadPrompt(role, scope).version;
+      return loadPrompt(role, scope).text;
   }
+}
+
+/** Canonical current prompt version of a role in a business tree (hash of `rolePromptText`). */
+export function rolePromptVersion(config: BifConfig, role: Role, scope: CalibrationScope): string {
+  return promptVersion(rolePromptText(config, role, scope));
+}
+
+/**
+ * `rolePromptVersion` that also stores the text in the prompt store (WP-B `recordPromptVersion`), so
+ * the hash a decision / feedback event is tagged with always resolves to its text.
+ */
+export function recordRolePromptVersion(store: Store, config: BifConfig, role: Role, scope: CalibrationScope): string {
+  return recordPromptVersion(store, role, rolePromptText(config, role, scope));
 }
 
 export type AppliedPatch = {
@@ -407,7 +421,7 @@ export function applyPromptPatchAsUser(
   const { store, config } = deps;
   const who = actor(opts);
   const scope = calibrationScope(store, config.dataDir, workspaceId);
-  const previousPromptVersion = rolePromptVersion(config, patch.role, scope);
+  const previousPromptVersion = recordRolePromptVersion(store, config, patch.role, scope);
   const previousAppendix = calibrationAppendix(patch.role, scope);
   const sources = proposePromptPatch(workspaceId, patch.role, { store }).sources ?? [];
   return store.transaction(() => {
@@ -417,7 +431,7 @@ export function applyPromptPatchAsUser(
       scope,
       who,
     );
-    const version = rolePromptVersion(config, patch.role, scope);
+    const version = recordRolePromptVersion(store, config, patch.role, scope);
     const decision: Decision = recordSystemDecision(
       { store, ...(deps.events ? { events: deps.events } : {}) },
       {
@@ -473,13 +487,13 @@ export function revertCalibrationAsUser(
     let previousPromptVersion: string;
     try {
       const target = usageRepos(store).calibrationVersions.get(versionId);
-      previousPromptVersion = target ? rolePromptVersion(config, target.role, scope) : '';
+      previousPromptVersion = target ? recordRolePromptVersion(store, config, target.role, scope) : '';
       result = revertCalibration(store, scope, versionId, who);
     } catch (e) {
       throw new FeedbackActionError((e as Error).message, 404);
     }
     const role = result.version.role;
-    const version = rolePromptVersion(config, role, scope);
+    const version = recordRolePromptVersion(store, config, role, scope);
     const decision = recordSystemDecision(
       { store, ...(deps.events ? { events: deps.events } : {}) },
       {
