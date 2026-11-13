@@ -899,8 +899,8 @@ Merged into `feat/learning-loop` in the order KS-1, KS-2, KS-3, then wired (no m
 
 ## KS-4 builder notes
 
-Smaller decisions taken while building KS-4 (no migration added). Three points that touch §9 are
-raised with the design thread (report) and are marked *pending confirmation* below.
+Smaller decisions taken while building KS-4 (no migration added). §7.1 / §9 were amended after the
+gate (reads by id, interviewer tools, `get_card` / `read_workspace` inputs).
 
 - **Modules:** `knowledge/tools.ts` (`knowledgeRead`: the one entry point — scope, budget, slice check,
   envelope, one `retrieval_events` row, `policy_blocked` events), `readCommon.ts` (visibility SQL,
@@ -909,17 +909,26 @@ raised with the design thread (report) and are marked *pending confirmation* bel
   dispatcher's builtins call `knowledgeRead`; `read_workspace` moved from `research/tools.ts` to a
   builtin (the old `workspaceSummary` is gone). KS-7's API calls `knowledgeRead` with `role: 'user'`.
 - **Visibility:** queries (`search`, `list_changes`, cards) use `activeIds` (node default; tree only on
-  `scope: "tree"`), always inside the SQL of the FTS query. Reads **by id** (`expand`, `read_artifact`,
-  `get_card` / `read_workspace` with a `workspace_id`) accept any id of the caller's tree and label the
-  source node: the id is the explicit request (*pending confirmation*). Unknown and other-tree ids get
+  `scope: "tree"`), always inside the SQL of the FTS query.
+- **Reads by id (design ruling after the KS-4 gate; overrules the gate's by-id finding):** `expand`,
+  `read_artifact`, `get_card` and `read_workspace` with a `workspace_id` return the NAMED item from any
+  node of the tree, labelled with its source node (`source`). Everything listed AROUND it follows the
+  request's `scope` (node by default): an entity card's facts, typed records, relations and flows; an
+  entity's neighbours in `expand`; a node card's entity index and counts (a sibling's node card shows
+  that sibling's own view, labelled). Rationale: same-tree nodes may read and cite each other, and an
+  agent only holds a sibling id because it asked tree-wide or because in-scope evidence cites it. The
+  sibling rule is ONE function, `allowByIdSiblingRead(scope, mode)` in `readCommon.ts` (used through
+  `readableById`); it is the designer's interpretation pending the user's confirmation — if the user
+  rules that such reads need `scope: "tree"`, its body becomes `return mode === 'tree';`. All four
+  by-id tools accept `scope` for that reason. A fact's own evidence and versions are part of the
+  named item (tree check only). Unknown and other-tree ids get
   the same "<kind> '<id>' not found" (`item` for `expand`, `artifact`, `entity`, `workspace`, `run`).
   A workspace with no row (legacy tests) is a one-node tree (`factScope`).
 - **Envelope and budgets:** every success carries `tokens` (= `estimateTokens` of the whole JSON as
   served), `truncated`, `more` (when truncated), `cursor`, `content_trust: "untrusted"`, `relaxed`,
   `notes`. Paging fits the items into the budget minus the header and a 48-token envelope reserve, so
   no response exceeds its budget (tested per tool). `max_tokens` is accepted on every read tool with a
-  floor of 100. `get_card` and `read_workspace` accept `cursor` / `max_tokens` too (an additive §9
-  input; needed for the "truncated → cursor" rule) (*pending confirmation*). The cursor key is
+  floor of 100. `get_card` and `read_workspace` accept `cursor` / `max_tokens` too (design §9 amended). The cursor key is
   `{tool, caller node, role, every input except cursor / max_tokens}`. An item larger than the whole
   budget is replaced by an `{ omitted: true }` placeholder and paging moves on (never stalls; its ids
   are still logged — over-listing only). If the fixed part alone exceeds a small `max_tokens`, the
@@ -956,8 +965,8 @@ raised with the design thread (report) and are marked *pending confirmation* bel
   replacements / retractions (ids only), live relations by type (≤ 10 names each), flows from captures,
   and a "left out" line. Node cards count facts / artifacts inside the node's own view.
 - **Roles:** worker, orchestrator, synthesizer get all five read tools; interviewer gets `search`,
-  `get_card`, `expand` and **keeps** `read_artifact` / `read_workspace` (its prompt reads uploads with
-  them; §9 lists three tools) (*pending confirmation*); reviewer and escalation get `expand` +
+  `get_card`, `expand` and keeps `read_artifact` / `read_workspace` (design §9 amended; usable facts
+  only); reviewer and escalation get `expand` +
   `read_artifact` on the review slice. Synthesizer / interviewer: `include_unverified` /
   `include_history` ignored with a note, non-usable facts and records answer "not found", version
   history left out, `list_changes` shows old / retracted claims as ids.
@@ -986,3 +995,16 @@ raised with the design thread (report) and are marked *pending confirmation* bel
   `policy_blocked` events, `retrieval_events` rows complete for `retrieval_uses`. KS-7 —
   `knowledgeRead(deps, { workspaceId, role: 'user' }, tool, input)` for the API search / card / fact
   / changes routes (logged as user reads, no agent run).
+- **Gate fixes (redact before every cut, sweep):** the reviewer context (`factReview.ts`) redacts
+  claims and retraction reasons whole, then cuts (300 chars); stored entity names are redacted before
+  the 200-char cut (`cleanAgentEntityName`); the quote-rejection error (80 chars) and duplicate-
+  handshake candidates (claims ≤ 500 chars) redact, then cut. Every KS-4 served path already used
+  `servedLine` / `chunkSnippet` / `serveEvidenceText` (redact → cut → fence). **Not swept (pre-KS
+  prompt sections KS-5 replaces):** `orchestrator.ts`, `businessMap.relatedSection`,
+  `synthesisFindingsSection`, `reviewLoop` outputs / `currentOutputsSection`, escalation context cut
+  findings, briefs and profiles without redacting at all — **KS-5:** build their replacements with
+  `servedLine` (redact whole, then cut).
+- **Reviewer context budget (gate):** the whole section — header, lifecycle lines (replacements first,
+  then confirmations / retractions), quotes and a footer naming up to 20 left-out fact ids to `expand`
+  — fits the reviewer `briefing` budget; `results` lists only facts and artifacts whose text is shown;
+  `factIds` (the slice) keeps every fact.

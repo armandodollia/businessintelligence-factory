@@ -20,9 +20,9 @@ import type { RetrievalRole } from '../types.js';
 import { budgetFor, cursorKey, estimateTokens, InvalidCursorError } from './budget.js';
 import { entityCard, nodeCard, type Card } from './cards.js';
 import { runListChanges } from './changes.js';
-import { artifactNotFound, expandNotFound, runExpand, runReadArtifact, type ArtifactBytes, type ReadArtifactMode } from './expand.js';
+import { artifactNotFound, assertEntityReadable, expandNotFound, runExpand, runReadArtifact, type ArtifactBytes, type ReadArtifactMode } from './expand.js';
 import {
-  anyUploadDerived, BUDGET_KIND, inSlice, pageOf, uniqueRefs, usableOnly,
+  anyUploadDerived, BUDGET_KIND, inSlice, pageOf, readableById, uniqueRefs, usableOnly,
   type ReadEnv, type ReadOutput, type ReviewSlice,
 } from './readCommon.js';
 import { recordRetrieval } from './retrievalLog.js';
@@ -155,6 +155,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     store, config: deps.config, role: caller.role, scope, now: deps.now ?? new Date(),
     ...(caller.model ? { provider: caller.model.provider } : {}),
     ...(deps.slice ? { slice: deps.slice } : {}),
+    mode: input.scope ?? 'node',
   };
   const budget = budgetFor(deps.config, caller.role, caller.model?.provider, BUDGET_KIND[tool]!, input.max_tokens);
   // A cursor is bound to its request: tool, caller node and role, and every input except paging.
@@ -196,13 +197,18 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
       }
       case 'get_card':
       case 'read_workspace': {
+        // Read by id (design §7.1): the named entity / node of any node of the tree (the sibling rule is
+        // `allowByIdSiblingRead`); what the card lists around it follows the request's scope.
+        const mode = env.mode ?? 'node';
         if (input.entity_id && tool === 'get_card') {
-          const card = entityCard(env, scope, 'node', input.entity_id);
-          out = cardOutput(card, budget, key, cursor, `entity ${input.entity_id}`, 'node');
+          assertEntityReadable(env, input.entity_id);
+          const card = entityCard(env, scope, mode, input.entity_id);
+          out = cardOutput(card, budget, key, cursor, `entity ${input.entity_id}`, mode);
         } else {
           const view = narrowed(store, scope, input.workspace_id ?? caller.workspaceId);
-          out = cardOutput(nodeCard(env, view, 'node'), budget, key, cursor, `node ${view.workspaceId}`,
-            view.workspaceId === caller.workspaceId ? 'node' : `node:${view.workspaceId}`);
+          if (!readableById(scope, mode, scope.nodeIds.includes(view.workspaceId))) throw notFound('workspace', view.workspaceId);
+          out = cardOutput(nodeCard(env, view, mode), budget, key, cursor, `node ${view.workspaceId}`,
+            view.workspaceId === caller.workspaceId ? mode : `${mode}:${view.workspaceId}`);
         }
         break;
       }

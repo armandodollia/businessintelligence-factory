@@ -232,7 +232,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   and `list_changes` (new, replaced, retracted and newly stale facts, changed cited pages);
   `read_workspace` returns a node's card and counts. A query sees its node, the node's sub-units and
   what it inherits from its parents; the rest of the business only with `scope: "tree"`; other
-  businesses never (their ids answer exactly like unknown ids). Every response fits a token budget
+  businesses never (their ids answer exactly like unknown ids). A read by id returns the named item
+  from any part of the business, labelled with its source, while what it lists around the item (card
+  facts, relations, neighbours) follows the same node scope unless `scope: "tree"` is passed. Every response fits a token budget
   per role (`knowledge.budgets`, capped by `hardMaxTokens`) and continues with a `cursor`; evidence
   text is redacted and served inside `<<<EVIDENCE … >>>` fences as untrusted data. Reviewers (and
   escalation agents) can only `expand` / `read_artifact` the ids of their task's review slice.

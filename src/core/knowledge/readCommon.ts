@@ -17,7 +17,8 @@ import type { RetrievalResultRef, RetrievalRole } from '../types.js';
 import { encodeCursor, decodeCursor, estimateTokens, fitToBudget } from './budget.js';
 import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
-import { canonicalArtifactId } from './texts.js';
+import { artifactVisible, canonicalArtifactId } from './texts.js';
+import type { Entity } from '../types.js';
 
 /** Who reads and with what limits. */
 export type ReadEnv = {
@@ -28,6 +29,12 @@ export type ReadEnv = {
   /** The caller's scope (from its workspace). */
   scope: KnowledgeScope;
   now: Date;
+  /**
+   * The request's scope (`scope` input; default `node`): what a response lists AROUND a named item
+   * (card facts and relations, an entity's neighbours, a node card) and, through
+   * `allowByIdSiblingRead`, whether an item outside node scope may be read by id.
+   */
+  mode?: ScopeMode;
   /**
    * Reviewer / escalation runs: the only ids they may read (design §9 "reviewer"). Nested items not in
    * the slice are left out of a response. `undefined` for every other role.
@@ -178,3 +185,70 @@ export const BUDGET_KIND: Record<string, KnowledgeBudgetKind> = {
   list_changes: 'search',
   read_workspace: 'card',
 };
+
+// ---------------------------------------------------------------------------
+// Reads by id (design §7.1, ruling after the KS-4 gate)
+
+/**
+ * THE sibling rule for reads by id (`expand`, `read_artifact`, `get_card`, `read_workspace` with a
+ * `workspace_id`): may a request read an item of the caller's tree that is OUTSIDE its node scope (a
+ * sibling's or cousin's), when it names the item's id?
+ *
+ * Ruling (the designer's interpretation, pending the user's confirmation): yes, in node scope too —
+ * same-tree nodes may read and cite each other, and an agent only holds a sibling id because it asked
+ * tree-wide or because in-scope evidence cites it. The item is labelled with its source node; what
+ * the response lists AROUND it still follows the request's scope.
+ *
+ * If the user rules that such reads need `scope: "tree"`, this is the one line to change:
+ * `return mode === 'tree';`.
+ */
+export function allowByIdSiblingRead(_scope: KnowledgeScope, _mode: ScopeMode): boolean {
+  return true;
+}
+
+/** Whether an item of the caller's tree may be read by id: in node scope, or allowed by `allowByIdSiblingRead`. */
+export function readableById(scope: KnowledgeScope, mode: ScopeMode, inNodeScope: boolean): boolean {
+  return inNodeScope || allowByIdSiblingRead(scope, mode);
+}
+
+/** A fact is in node scope when one of its scope rows is a node id of the view. */
+export function factInNodeScope(store: Store, scope: KnowledgeScope, factId: string): boolean {
+  return (
+    store.db
+      .prepare(`SELECT 1 FROM item_scopes s WHERE s.item_kind = 'fact' AND s.item_id = ? AND s.workspace_id IN (SELECT value FROM json_each(?)) LIMIT 1`)
+      .get(factId, JSON.stringify(scope.nodeIds)) !== undefined
+  );
+}
+
+/** An artifact is in node scope when one of its scope rows is a node id of the view. */
+export function artifactInNodeScope(store: Store, scope: KnowledgeScope, artifactId: string): boolean {
+  return artifactVisible(store, scope, artifactId, 'node');
+}
+
+function entityGroupIds(store: Store, id: string): string[] {
+  return (
+    store.db
+      .prepare(`WITH RECURSIVE grp(id) AS (SELECT ? UNION SELECT e.id FROM entities e JOIN grp ON e.merged_into_id = grp.id) SELECT id FROM grp`)
+      .all(id) as Array<{ id: string }>
+  ).map((r) => r.id);
+}
+
+/**
+ * An entity (survivor) is visible in `mode`: always in tree mode; in node mode when its home is a node
+ * id of the view or a visible record (fact, typed record, capture) references it or a merged row.
+ */
+export function entityVisibleIn(store: Store, view: KnowledgeScope, mode: ScopeMode, e: Entity): boolean {
+  if (mode === 'tree') return view.treeIds.includes(e.workspaceId) || e.rootWorkspaceId === view.rootId;
+  if (view.nodeIds.includes(e.workspaceId)) return true;
+  const p = { ...visParams(view, mode), grp: JSON.stringify(entityGroupIds(store, e.id)) };
+  // node:sqlite rejects unused named parameters: records bind only `:ids` and `:grp`.
+  const hit = (sql: string, params: Record<string, string>) => store.db.prepare(sql).get(params) !== undefined;
+  return (
+    hit(`SELECT 1 FROM findings f WHERE f.entity_id IN (SELECT value FROM json_each(:grp)) AND ${factVisibleSql('f')} LIMIT 1`, p) ||
+    ['competitors', 'personas', 'symptoms', 'symptom_hypotheses'].some((t) =>
+      hit(`SELECT 1 FROM ${t} r WHERE r.entity_id IN (SELECT value FROM json_each(:grp)) AND ${recordVisibleSql('r')} LIMIT 1`, { ids: p.ids, grp: p.grp }),
+    ) ||
+    hit(`SELECT 1 FROM artifact_captures cap JOIN artifacts a ON a.id = cap.artifact_id
+         WHERE cap.entity_id IN (SELECT value FROM json_each(:grp)) AND ${artifactVisibleSql('a')} LIMIT 1`, p)
+  );
+}

@@ -113,6 +113,11 @@ const scopeInput = z
   .enum(['node', 'tree'])
   .optional()
   .describe('"node" (default): this part of the business, its sub-units and what it inherits from its parents; "tree": the whole business');
+/** Reads by id: the named item is returned from any node of the tree; this scope governs what is listed around it. */
+const byIdScope = z
+  .enum(['node', 'tree'])
+  .optional()
+  .describe('What is listed around the item (card facts, relations, neighbours): "node" (default) this part of the business; "tree" the whole business');
 // --- end KS-4 ---
 const findingRelationInput = z.strictObject({
   type: z.enum(RELATION_TYPES),
@@ -173,6 +178,7 @@ export const toolInputSchemas = {
   read_artifact: z.object({
     artifact_id: id,
     // Knowledge store KS-4 (design §9)
+    scope: byIdScope,
     mode: z
       .enum(['outline', 'text', 'image', 'raw'])
       .optional()
@@ -326,7 +332,8 @@ export const toolInputSchemas = {
   }),
   read_workspace: z.object({
     workspace_id: id.describe('Any workspace of this business tree (ancestors, siblings, descendants)'),
-    cursor: cursorInput, // KS-4
+    scope: byIdScope, // KS-4
+    cursor: cursorInput,
     max_tokens: maxTokens,
   }),
   // --- Knowledge store KS-4: read tools (design §9) ---
@@ -351,6 +358,7 @@ export const toolInputSchemas = {
     .object({
       entity_id: id.optional().describe('An entity: its computed card'),
       workspace_id: id.optional().describe('A node of this business tree: its card'),
+      scope: byIdScope,
       cursor: cursorInput,
       max_tokens: maxTokens,
     })
@@ -358,6 +366,7 @@ export const toolInputSchemas = {
   expand: z.object({
     id: id.describe('A fact (fnd_), artifact (art_), passage (chk_), entity (ent_) or record (cmp_, per_, sym_, hyp_, rec_) id'),
     around: z.number().int().min(0).max(3).optional().describe('Passages: also this many neighbouring passages on each side'),
+    scope: byIdScope,
     cursor: cursorInput,
     max_tokens: maxTokens,
   }),

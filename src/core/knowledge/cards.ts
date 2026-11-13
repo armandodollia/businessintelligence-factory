@@ -263,6 +263,8 @@ export function nodeCard(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode): C
       audiences: audiencesOf(node),
       ...(node.parentWorkspaceId ? { parent: node.parentWorkspaceId } : {}),
     },
+    // Another node's card (read by id): labelled with its source node; it shows that node's own view.
+    ...(node.id !== env.scope.workspaceId ? { source: node.id } : {}),
   };
   const lines: CardLine[] = [];
   const profile = store.profiles.get(node.id)?.data ?? {};

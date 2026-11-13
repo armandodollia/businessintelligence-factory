@@ -27,7 +27,7 @@ import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
 import {
-  ageDays, artifactVisibleSql, factVisibleSql, pageOf, recordVisibleSql, usableOnly, visParams,
+  ageDays, artifactVisibleSql, entityVisibleIn, factVisibleSql, pageOf, recordVisibleSql, usableOnly, visParams,
   type ReadEnv, type ReadOutput,
 } from './readCommon.js';
 import { scopeRank, type KnowledgeScope, type ScopeMode } from './scope.js';
@@ -318,23 +318,9 @@ function chunkFreeSnippet(store: Store, ws: string, artifactId: string, text: st
   return fenceEvidence(artifactId, servedLine(store, ws, text, SNIPPET_MAX_CHARS));
 }
 
-/** Whether an entity (survivor) is visible in node mode: home in the view, or a visible record references it. */
+/** Whether an entity (survivor) is visible to the search's view and mode (shared rule, readCommon.ts). */
 function entityVisible(c: Ctx, e: Entity): boolean {
-  if (c.mode === 'tree') return true;
-  const ids = new Set(c.view.nodeIds);
-  if (ids.has(e.workspaceId)) return true;
-  const grp = JSON.stringify(entityGroup(c.env.store, e.id));
-  const p = { ...visParams(c.view, c.mode), grp };
-  const db = c.env.store.db;
-  const hit = (sql: string) => db.prepare(sql).get(p) !== undefined;
-  return (
-    hit(`SELECT 1 FROM findings f WHERE f.entity_id IN (SELECT value FROM json_each(:grp)) AND ${factVisibleSql('f')} LIMIT 1`) ||
-    ['competitors', 'personas', 'symptoms', 'symptom_hypotheses'].some((t) =>
-      hit(`SELECT 1 FROM ${t} r WHERE r.entity_id IN (SELECT value FROM json_each(:grp)) AND ${recordVisibleSql('r')} LIMIT 1`),
-    ) ||
-    hit(`SELECT 1 FROM artifact_captures cap JOIN artifacts a ON a.id = cap.artifact_id
-         WHERE cap.entity_id IN (SELECT value FROM json_each(:grp)) AND ${artifactVisibleSql('a')} LIMIT 1`)
-  );
+  return entityVisibleIn(c.env.store, c.view, c.mode, e);
 }
 
 function searchEntities(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {

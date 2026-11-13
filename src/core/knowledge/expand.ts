@@ -28,8 +28,11 @@ import { entityCard, type CardLine } from './cards.js';
 import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
 import { itemIsUploadDerived } from './provenance.js';
-import { ENVELOPE_TOKENS, inSlice, pageOf, uniqueRefs, usableOnly, type ReadEnv, type ReadOutput } from './readCommon.js';
-import { notFound } from './scope.js';
+import {
+  artifactInNodeScope, ENVELOPE_TOKENS, entityVisibleIn, factInNodeScope, inSlice, pageOf, readableById, uniqueRefs, usableOnly,
+  type ReadEnv, type ReadOutput,
+} from './readCommon.js';
+import { notFound, type ScopeMode } from './scope.js';
 import { artifactChunks, canonicalArtifactId, servedChunkText, servedLine, servedTextState, type ServedTextState } from './texts.js';
 import { fenceEvidence, redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
 
@@ -55,6 +58,13 @@ function push(b: Built, item: Item, refs: RetrievalResultRef[] = [], upload = fa
   b.items.push(item);
   b.refs.set(item, refs);
   b.itemUpload.set(item, upload);
+}
+
+const modeOf = (env: ReadEnv): ScopeMode => env.mode ?? 'node';
+
+/** A typed record (no scope rows) named by id: in the tree, and in node scope or allowed by the sibling rule. */
+function recordReadable(env: ReadEnv, ws: string): boolean {
+  return inTree(env, ws) && readableById(env.scope, modeOf(env), env.scope.nodeIds.includes(ws));
 }
 
 function inTree(env: ReadEnv, ws: string | undefined): boolean {
@@ -84,7 +94,7 @@ function finish(env: ReadEnv, b: Built, budget: number, key: string, cursor: str
 
 function factById(env: ReadEnv, id: string): Finding {
   const f = env.store.findings.get(id);
-  if (!f || !inTree(env, f.workspaceId)) throw expandNotFound(id);
+  if (!f || !inTree(env, f.workspaceId) || !readableById(env.scope, modeOf(env), factInNodeScope(env.store, env.scope, f.id))) throw expandNotFound(id);
   if (usableOnly(env.role) && !isFactUsable(f)) throw expandNotFound(id);
   return f;
 }
@@ -182,7 +192,7 @@ function expandFact(env: ReadEnv, id: string): Built {
 
 function artifactById(env: ReadEnv, id: string, nf: (id: string) => Error = expandNotFound): Artifact {
   const a = env.store.artifacts.get(id);
-  if (!a || !inTree(env, a.workspaceId)) throw nf(id);
+  if (!a || !inTree(env, a.workspaceId) || !readableById(env.scope, modeOf(env), artifactInNodeScope(env.store, env.scope, a.id))) throw nf(id);
   return a;
 }
 
@@ -282,7 +292,9 @@ function chunkOwner(env: ReadEnv, chunk: TextChunk): Artifact | undefined {
   const canonical = store.artifacts.get(chunk.artifactId);
   const dupIds = (store.db.prepare('SELECT artifact_id AS id FROM artifact_texts WHERE duplicate_of = ? ORDER BY rowid').all(chunk.artifactId) as Array<{ id: string }>).map((r) => r.id);
   for (const a of [canonical, ...dupIds.map((id) => store.artifacts.get(id))]) {
-    if (a && inTree(env, a.workspaceId) && (!env.slice || env.slice.artifactIds.has(a.id) || env.slice.ids.has(a.id))) return a;
+    if (a && inTree(env, a.workspaceId) && (!env.slice || env.slice.artifactIds.has(a.id) || env.slice.ids.has(a.id))) {
+      if (readableById(env.scope, modeOf(env), artifactInNodeScope(store, env.scope, a.id))) return a;
+    }
   }
   return undefined;
 }
@@ -329,7 +341,9 @@ function expandChunk(env: ReadEnv, id: string, around: number, budget: number): 
 function expandEntity(env: ReadEnv, id: string): Built {
   let card;
   try {
-    card = entityCard(env, env.scope, 'node', id, 40);
+    assertEntityReadable(env, id);
+    // The entity is the named item; its facts and neighbours follow the request's scope.
+    card = entityCard(env, env.scope, modeOf(env), id, 40);
   } catch {
     throw expandNotFound(id);
   }
@@ -350,14 +364,14 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
   switch (type) {
     case 'competitor': {
       const c = store.competitors.get(id);
-      if (!c || !inTree(env, c.workspaceId) || (usableOnly(env.role) && !usable(c))) throw expandNotFound(id);
+      if (!c || !recordReadable(env, c.workspaceId) || (usableOnly(env.role) && !usable(c))) throw expandNotFound(id);
       home = c.workspaceId;
       header = { kind: 'record', type, id, name: red(c.name), site: c.site ? red(c.site) : undefined, threat: c.threat, directness: c.directness, comparison: c.comparison, evidence: c.evidence, status: c.status, entity_id: c.entityId };
       break;
     }
     case 'persona': {
       const p = store.personas.get(id);
-      if (!p || !inTree(env, p.workspaceId) || (usableOnly(env.role) && !usable(p))) throw expandNotFound(id);
+      if (!p || !recordReadable(env, p.workspaceId) || (usableOnly(env.role) && !usable(p))) throw expandNotFound(id);
       home = p.workspaceId;
       const profile = Object.fromEntries(Object.entries(p.profile ?? {}).map(([k, v]) => [k, { value: servedLine(store, ws, v?.value ?? '', 600), confidence: v?.confidence, evidence: v?.evidence }]));
       header = { kind: 'record', type, id, slug: p.slug, segment: red(p.segment), audience: p.audience ?? 'external', profile, status: p.status, entity_id: p.entityId };
@@ -365,21 +379,21 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
     }
     case 'symptom': {
       const s = store.symptoms.get(id);
-      if (!s || !inTree(env, s.workspaceId)) throw expandNotFound(id);
+      if (!s || !recordReadable(env, s.workspaceId)) throw expandNotFound(id);
       home = s.workspaceId;
       header = { kind: 'record', type: s.kind, id, title: red(s.title), detail: servedLine(store, ws, s.detail, 2000), criteria: red(s.criteria), evidence: s.evidence, entity_id: s.entityId };
       break;
     }
     case 'hypothesis': {
       const h = store.symptomHypotheses.get(id);
-      if (!h || !inTree(env, h.workspaceId) || (usableOnly(env.role) && !usable(h))) throw expandNotFound(id);
+      if (!h || !recordReadable(env, h.workspaceId) || (usableOnly(env.role) && !usable(h))) throw expandNotFound(id);
       home = h.workspaceId;
       header = { kind: 'record', type, id, symptom_id: h.symptomId, hypothesis: servedLine(store, ws, h.hypothesis, 2000), confidence: h.confidence, evidence: h.evidence, status: h.status, entity_id: h.entityId };
       break;
     }
     default: {
       const r = store.recommendations.get(id);
-      if (!r || !inTree(env, r.workspaceId) || (usableOnly(env.role) && !usable(r))) throw expandNotFound(id);
+      if (!r || !recordReadable(env, r.workspaceId) || (usableOnly(env.role) && !usable(r))) throw expandNotFound(id);
       home = r.workspaceId;
       header = { kind: 'record', type: 'recommendation', id, title: red(r.title), summary: servedLine(store, ws, r.summary, 3000), criteria: red(r.criteria), finding_ids: r.findingIds, priority: r.priority, status: r.status };
     }
@@ -389,6 +403,12 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
   const upload = itemIsUploadDerived(store, id);
   if (upload) header.upload = true;
   return built(header, [{ id, kind: 'record' }], upload);
+}
+
+/** Throws `notFound('entity')` unless the entity (survivor) of the tree may be read by id. */
+export function assertEntityReadable(env: ReadEnv, id: string): void {
+  const e = getEntity(env.store, env.scope, id);
+  if (!readableById(env.scope, modeOf(env), entityVisibleIn(env.store, env.scope, 'node', e))) throw notFound('entity', id);
 }
 
 // ---------------------------------------------------------------------------

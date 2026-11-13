@@ -155,6 +155,16 @@ recommendations) use their `workspace_id`.
 Results are ordered own node first, then descendants, then ancestors, then (tree
 scope only) the rest. Every hit carries its source node when it is not the caller's.
 
+Reads by id (`expand`, `read_artifact`, `get_card`, `read_workspace` with `workspace_id`) return
+the named item from any node of the tree, labelled with its source node; everything the response
+lists *around* it (an entity card's facts and relations, an entity's neighbours in `expand`, a node
+card's entity index and counts) follows node scope unless `scope: "tree"` is passed. A node card
+requested for another node shows that node's own view, labelled. Rationale: same-tree nodes may read
+and cite each other, and an agent only holds a sibling's id because it asked tree-wide or because
+in-scope evidence cites it. (Designer's interpretation pending the user's confirmation; the rule is
+one function, `allowByIdSiblingRead`, so requiring `scope: "tree"` for such reads is a one-line
+change.)
+
 Invariant: a workspace's parent never changes after creation. If re-parenting is
 ever added it must rewrite `entities.root_workspace_id`.
 
@@ -352,9 +362,9 @@ Read tools — all are scoped by `KnowledgeScope`, budgeted, and logged:
 | Tool | Input | Returns |
 |---|---|---|
 | `search` | `query`, `kinds?` (fact, passage, artifact, entity, record), `scope?` (node/tree), `workspace_id?`, `entity_id?`, `include_unverified?`, `include_history?`, `since?`, `limit?` | Hits grouped by kind, ranked within kind. Each hit: id, one-line title or snippet (≤ 200 chars), entity, source node, flags (unverified, stale, upload, history), age. No bodies. |
-| `get_card` | `entity_id` or `workspace_id` | The computed card (§10). |
-| `expand` | `id` (fact, artifact, chunk, entity, record), `around?`, `cursor?`, `max_tokens?` | Fact: full claim, criteria, evidence with quotes and captions, version history, relations. Artifact: metadata, description, captures, outline (headings with chunk ids and sizes). Chunk: its text, optionally neighbours. |
-| `read_artifact` | `artifact_id`, `mode?` (outline, text, image, raw), `cursor?`, `max_tokens?` | Default `outline` for documents, `image` for screenshots. `raw` is capped and fenced. Paged by cursor. |
+| `get_card` | `entity_id` or `workspace_id`, `scope?`, `cursor?`, `max_tokens?` | The computed card (§10). |
+| `expand` | `id` (fact, artifact, chunk, entity, record), `around?`, `scope?`, `cursor?`, `max_tokens?` | Fact: full claim, criteria, evidence with quotes and captions, version history, relations. Artifact: metadata, description, captures, outline (headings with chunk ids and sizes). Chunk: its text, optionally neighbours. |
+| `read_artifact` | `artifact_id`, `mode?` (outline, text, image, raw), `scope?`, `cursor?`, `max_tokens?` | Default `outline` for documents, `image` for screenshots. `raw` is capped and fenced. Paged by cursor. |
 | `list_changes` | `since?` or `run_id?`, `entity_id?`, `scope?` | New, replaced (old → new), retracted and newly stale facts; changed cited pages. |
 
 Write tools:
@@ -366,7 +376,7 @@ Write tools:
 | `confirm_finding` | new: `finding_id`, `evidence` (≥ 1 artifact from this task). |
 | `retract_finding` | new: `finding_id`, `reason`, `evidence`. |
 | `describe_artifact` | new: add or replace the description of an artifact that has none (or that the caller saved). |
-| `read_workspace` | Returns the node card plus counts, not every finding. |
+| `read_workspace` | Returns the node card plus counts, not every finding. Accepts `scope?`, `cursor?`, `max_tokens?` like `get_card`. |
 
 Search query handling: the agent's text is never passed to `MATCH` raw. It is
 tokenized, each token quoted, joined with AND; quoted phrases are kept. Zero hits →
@@ -381,7 +391,7 @@ Role access:
 | worker | all | may pass `include_unverified` |
 | orchestrator | all | may pass `include_unverified` |
 | synthesizer | all | usable facts only, always |
-| interviewer | `search`, `get_card`, `expand` | usable facts only |
+| interviewer | `search`, `get_card`, `expand`, `read_artifact`, `read_workspace` | usable facts only (keeps `read_artifact` / `read_workspace` to read the uploads its prompt lists) |
 | reviewer | `expand`, `read_artifact` | only ids in the task's review slice: its outputs, their evidence artifacts and chunks, and the facts they confirm/replace/retract. Anything else is "not found" and a policy event. |
 | persona | none | context is assembled by the harness |
 | escalation, retro (learning loop) | as reviewer / none | slice built by the harness |
