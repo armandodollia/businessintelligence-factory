@@ -542,6 +542,13 @@ than home) records a `Decision` with refs, like `save_finding` does today.
   references, older than a chosen age. A pruned artifact keeps its row, hash,
   description and text; only the file goes. Logged as a system decision and a
   feedback event.
+  As built (KS-7): "references" are any fact version (any lifecycle or status), fact observations,
+  competitors, symptoms, hypotheses, unit proposals, review issues, persona profile fields, relations
+  sourced by the artifact, the latest capture of a (node, flow, step), kind `upload` or a profile's
+  `uploads`, and a still-`pending` extraction. Prune is all or nothing; a request may ask for an
+  older cut than `pruneMinAgeDays`, never a younger one. A pruned file reads as 410 and comes back
+  when the same bytes are captured again. The report also counts texts from an older extractor
+  version (no re-extraction exists yet).
 - Cost: no model calls are added. The extra agent tokens are captions and the
   duplicate handshake. Prompts shrink from "all findings" to a fixed briefing.
 - Latency: FTS5 queries are milliseconds at this scale; extraction is tens of
@@ -593,6 +600,14 @@ accept/reject, fact scope change, fact retract, gc report and prune.
 UI: one Knowledge view — search box with "this part / whole business", entity list
 → card → fact history → evidence; merge suggestions; stale and conflict lists.
 Behaviour in `web/src/logic`, markup in `web/src/views`.
+
+As built (KS-7): routes under `/api/workspaces/:id/knowledge/…` (`:id` = the caller's node), every
+read taking `scope=node|tree`. Search, entity card, node card, item (`expand`), artifact text and
+changes call `knowledgeRead` with `role: 'user'` (logged, no agent run); the entity list, merge
+suggestions, stale / conflict lists and stats apply the same scope predicates without a retrieval row
+(user reads expose no agent run). Ids of another tree answer exactly like unknown ids (404). Actions
+go through `feedback/actions.ts` with the actor from config. Upload-derived items carry `uploadWhy`
+(`explainUploadDerived`).
 
 ## 18. Testing (required suites)
 
