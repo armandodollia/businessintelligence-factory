@@ -113,6 +113,8 @@ type Ctx = {
   /** Entity group (survivor + merged rows) when `entity_id` is given. */
   group?: string[];
   usableOnly: boolean;
+  /** KS-8: entity labels of this call (shared by the copies `elsewhereNote` makes; nothing is written during a read). */
+  labels: Map<string, EntityLabel>;
 };
 
 function sourceOf(c: Ctx, ws: string): string | undefined {
@@ -135,8 +137,18 @@ function bestRank(c: Ctx, kind: 'fact' | 'artifact', id: string, home: string): 
   return ranks.length ? Math.min(...ranks) : scopeRank(c.view, home);
 }
 
+type EntityLabel = { label?: { id: string; name: string }; refs: RetrievalResultRef[]; upload: boolean };
+
+/** `entityLabel`, once per entity per search call (KS-8: measured at 10 000 chunks / 1 000 facts). */
+function cachedEntityLabel(c: Ctx, id: string | undefined): EntityLabel {
+  if (!id) return { refs: [], upload: false };
+  let l = c.labels.get(id);
+  if (!l) c.labels.set(id, (l = entityLabel(c.env.store, c.env.scope, id)));
+  return l;
+}
+
 /** Entity reference shown on a hit (survivor name), with its refs and upload status. */
-function entityLabel(store: Store, scope: KnowledgeScope, id: string | undefined): { label?: { id: string; name: string }; refs: RetrievalResultRef[]; upload: boolean } {
+function entityLabel(store: Store, scope: KnowledgeScope, id: string | undefined): EntityLabel {
   if (!id) return { refs: [], upload: false };
   try {
     const e = getEntity(store, scope, id);
@@ -167,7 +179,7 @@ function factHit(c: Ctx, f: Finding, score: number): Ranked {
   else if (!usable) flags.push('unverified');
   const fresh = factFreshness(store, f, c.env.config, c.env.now);
   if (!history && fresh.stale) flags.push('stale');
-  const ent = entityLabel(store, c.env.scope, f.entityId);
+  const ent = cachedEntityLabel(c, f.entityId);
   const upload = f.uploadDerived === true || ent.upload;
   if (upload) flags.push('upload');
   const hit: SearchHit = {
@@ -233,14 +245,23 @@ function searchPassages(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
     params.grp = JSON.stringify(c.group);
   }
   // The artifact a chunk is served under: the canonical if visible, else the oldest visible duplicate.
+  // KS-8 (measured at 10 000 chunks): two lookups, the canonical by primary key first and the
+  // duplicates only when it is not visible (COALESCE stops at the first non-null). One subquery with
+  // `a.id = … OR t.duplicate_of = …` could use no index and scanned the artifacts for every match.
+  // `duplicate_of` has no index (no migration in KS-8), so the duplicate scan only runs for an
+  // artifact that has duplicates (the IN list is built once per statement).
+  const cond = `${artifactVisibleSql('a')}${extra.length ? ` AND ${extra.join(' AND ')}` : ''}`;
   const rows = store.db
     .prepare(
       `SELECT * FROM (
          SELECT c.id AS id, bm25(chunks_fts, 2.0, 1.0) AS score, c.rowid AS rid,
-           (SELECT a.id FROM artifacts a LEFT JOIN artifact_texts t ON t.artifact_id = a.id
-             WHERE (a.id = c.artifact_id OR t.duplicate_of = c.artifact_id) AND ${artifactVisibleSql('a')}
-               ${extra.length ? `AND ${extra.join(' AND ')}` : ''}
-             ORDER BY (a.id = c.artifact_id) DESC, a.rowid LIMIT 1) AS shown
+           COALESCE(
+             (SELECT a.id FROM artifacts a WHERE a.id = c.artifact_id AND ${cond}),
+             CASE WHEN c.artifact_id IN (SELECT duplicate_of FROM artifact_texts WHERE duplicate_of IS NOT NULL) THEN
+               (SELECT a.id FROM artifact_texts t JOIN artifacts a ON a.id = t.artifact_id
+                 WHERE t.duplicate_of = c.artifact_id AND ${cond} ORDER BY a.rowid LIMIT 1)
+             END
+           ) AS shown
          FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid
          WHERE chunks_fts MATCH :q
        ) WHERE shown IS NOT NULL ORDER BY score, rid LIMIT :lim`,
@@ -457,7 +478,7 @@ export function runSearch(env: ReadEnv, view: KnowledgeScope, input: SearchInput
   if (input.entityId) group = entityGroup(env.store, getEntity(env.store, env.scope, input.entityId).id);
   const { terms } = parseQuery(input.query);
   if (!terms.length && !group) throw new SearchInputError('query is empty: give query text, or an entity_id to browse by recency');
-  const c: Ctx = { env, view, mode, input, limit, usableOnly: usableOnly(env.role), ...(group ? { group } : {}) };
+  const c: Ctx = { env, view, mode, input, limit, usableOnly: usableOnly(env.role), labels: new Map(), ...(group ? { group } : {}) };
   const run = (op: 'AND' | 'OR') => kinds.flatMap((k) => rankKind(RUNNERS[k](c, terms, op), limit));
   let hits = run('AND');
   let relaxed = false;

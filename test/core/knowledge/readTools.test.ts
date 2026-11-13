@@ -113,6 +113,22 @@ describe('hits (design §9)', () => {
     expect(r.hits.filter((h) => h.kind === 'passage').map((h) => h.artifact_id)).toEqual([a1.id]);
   });
 
+  it('a passage whose canonical is out of scope is reported under the oldest visible duplicate (KS-8 query rewrite)', async () => {
+    const t = ks4(opened);
+    // Canonical in Acme Labs (a sibling of Payments); two later copies in Payments.
+    const canon = await t.page('ws_d', 'Same text about the Zephyr plan.', { title: 'Zephyr labs' });
+    const d1 = await t.page('ws_c', 'Same text about the Zephyr plan.\n', { title: 'Zephyr copy one' });
+    const d2 = await t.page('ws_c', 'Same text about the Zephyr plan.\n\n', { title: 'Zephyr copy two' });
+    for (const d of [d1, d2]) expect(knowledgeRepos(t.store).artifactTexts.get(d.id)!.duplicateOf).toBe(canon.id);
+    const node = await t.call<Hits>(t.ctx('ws_c'), 'search', { query: 'zephyr', kinds: ['passage'] });
+    expect(node.hits.map((h) => h.artifact_id)).toEqual([d1.id]);
+    const tree = await t.call<Hits>(t.ctx('ws_c'), 'search', { query: 'zephyr', kinds: ['passage'], scope: 'tree' });
+    expect(tree.hits.map((h) => h.artifact_id)).toEqual([canon.id]);
+    // Not visible at all (another tree): no passage hit.
+    const other = await t.call<Hits>(t.ctx('ws_b'), 'search', { query: 'zephyr', kinds: ['passage'], scope: 'tree' });
+    expect(other.hits).toEqual([]);
+  });
+
   it('records match their short text (v1 LIKE) and respect usability', async () => {
     const t = ks4(opened);
     t.store.competitors.insert({ id: newId('cmp'), workspaceId: 'ws_a', name: 'Quantum Rival', threat: 4, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 }, evidence: [], createdAt: T0, updatedAt: T0, status: 'verified' });
