@@ -33,6 +33,8 @@ import { acceptUnitProposal, crossCuttingSymptoms, rejectUnitProposal, rollup } 
 import { createWorkspace, workspaceTree } from '../core/workspace/tree.js';
 import { mountMcp, type McpDeps } from './mcp.js';
 import { sseResponse } from './sse.js';
+import { mountUsageRoutes } from './usageRoutes.js';
+import { actorOf, applyPromptPatchVersioned, setCalibrationDecision } from '../core/scoring/calibrationHistory.js';
 
 export type AppDeps = {
   store: Store;
@@ -530,15 +532,19 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/workspaces/:id/calibration/prompt-patch/apply', async (c) => {
     const id = workspace(c.req.param('id')).id;
     const patch = await body(c, schemas.applyPromptPatch);
-    const { path } = applyPromptPatch(
+    // Learning loop WP-B: the appendix keeps its history (calibration_versions) and can be reverted.
+    const { path, version } = applyPromptPatchVersioned(
+      store,
       { role: patch.role, patchText: patch.patchText, examples: (patch.examples ?? []) as never },
       calibrationScope(store, config.dataDir, id),
+      actorOf(config),
     );
     const decision = recordSystemDecision(
       { store, events },
       { workspaceId: id, actor: 'user', payload: { tool: 'apply_prompt_patch', role: patch.role, patchText: patch.patchText, path } },
     );
-    return c.json({ path, decisionId: decision.id });
+    setCalibrationDecision(store, version.id, decision.id); // learning loop WP-B
+    return c.json({ path, decisionId: decision.id, versionId: version.id });
   });
   app.get('/api/workspaces/:id/scoring-weights', (c) => {
     const id = workspace(c.req.param('id')).id;
@@ -629,6 +635,9 @@ export function createApp(deps: AppDeps): Hono {
       signal: c.req.raw.signal,
     });
   });
+
+  // --- learning loop WP-B: costs, runs, prompts, prompt-version metrics, calibration history ---
+  mountUsageRoutes(app, { store, config, events });
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 
