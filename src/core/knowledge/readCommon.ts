@@ -73,6 +73,25 @@ export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
 /** A call: `full` of a cut item (a `RECOVERY_KINDS` kind), or the `passage` of a quote (`expand_chunk`). */
 export type Recover = { kind: RecoveryKind | 'expand_chunk'; tool: string; input: Record<string, unknown> };
 
+/** A read request that cannot run as given (an empty query, an unparseable date): answered as an error. */
+export class ReadInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReadInputError';
+  }
+}
+
+/** An ISO date (`YYYY-MM-DD`, optionally a time and a zone): `Date.parse` alone also accepts "0000000…". */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+/** `v` as a normalized ISO date (the `since` of a read), or a `ReadInputError`. */
+export function isoDateInput(name: string, v: string): string {
+  const s = v.trim();
+  const t = ISO_DATE.test(s) ? Date.parse(s) : Number.NaN;
+  if (!Number.isFinite(t)) throw new ReadInputError(`${name} must be an ISO date, e.g. 2026-11-01`);
+  return new Date(t).toISOString();
+}
+
 /** Roles that only ever see usable facts and records (design §9). */
 export function usableOnly(role: RetrievalRole): boolean {
   return role === 'synthesizer' || role === 'interviewer';

@@ -223,6 +223,16 @@ describe('expand and read_artifact (design §9)', () => {
 });
 
 describe('list_changes (design §9, §13)', () => {
+  it('an unparseable since is refused, a parseable one echoed as a normalized ISO date (direct callers too)', async () => {
+    const t = ks4(opened);
+    const { knowledgeRead } = await import('../../../src/core/knowledge/tools.js');
+    const deps = { store: t.store, config: t.config, files: t.artifacts };
+    const bad = knowledgeRead(deps, { workspaceId: 'ws_a', role: 'user' }, 'list_changes', { since: '0'.repeat(6000) });
+    expect(bad).toEqual({ ok: false, error: expect.stringMatching(/since must be an ISO date/) });
+    const ok = knowledgeRead(deps, { workspaceId: 'ws_a', role: 'user' }, 'list_changes', { since: `2026-01-01${' '.repeat(6000)}` });
+    expect(ok.ok && ok.data.since).toBe('2026-01-01T00:00:00.000Z');
+  });
+
   it('new, replaced, retracted from applied observations; stale facts once with a stale outcome; changed cited pages', async () => {
     const t = ks4(opened, (cfg) => {
       cfg.knowledge = { ...(cfg.knowledge ?? {}), freshness: { defaultDays: 30 } };

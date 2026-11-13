@@ -106,6 +106,20 @@ describe('scope toggle: node by default, tree when asked', () => {
     expect((await s.get(s.k('ws_c', '/search?q=x&scope=all'))).status).toBe(400);
     expect((await s.get(s.k('ws_nope', '/stats'))).status).toBe(404);
   });
+
+  it('since is validated and normalized to an ISO date (changes and search); its echo is bounded', async () => {
+    const s = setup();
+    for (const path of ['/changes', '/search?q=x&']) {
+      const sep = path.includes('?') ? '' : '?';
+      const bad = await s.get(s.k('ws_c', `${path}${sep}since=${'0'.repeat(6000)}`));
+      expect(bad.status, path).toBe(400);
+      expect(bad.body.error).toMatch(/since must be an ISO date/);
+    }
+    const ok = await s.get(s.k('ws_c', `/changes?since=${encodeURIComponent(`2026-01-01${' '.repeat(6000)}`)}`));
+    expect(ok.status).toBe(200);
+    expect(ok.body.since).toBe('2026-01-01T00:00:00.000Z');
+    expect(ok.body.tokens).toBeLessThan(200);
+  });
 });
 
 describe('isolation: another tree reads exactly like unknown', () => {

@@ -16,7 +16,7 @@ import { cursorKey } from './budget.js';
 import { getEntity } from './entities.js';
 import { factFreshness, recordStaleOutcome } from './facts.js';
 import { assemblePage } from './paging.js';
-import { artifactVisibleSql, day, factVisibleSql, usableOnly, visParams, type ReadEnv, type ReadOutput } from './readCommon.js';
+import { artifactVisibleSql, day, factVisibleSql, isoDateInput, usableOnly, visParams, type ReadEnv, type ReadOutput } from './readCommon.js';
 import { notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { servedLine } from './texts.js';
 import { factUsableSql } from './usable.js';
@@ -33,7 +33,9 @@ export function runListChanges(env: ReadEnv, view: KnowledgeScope, input: Change
   const { store } = env;
   const ws = env.scope.workspaceId;
   const mode = input.scope ?? 'node';
-  let since = input.since;
+  // Normalized (and so bounded) before it is used or echoed: the tool schema does this for agents; the
+  // API and direct callers get the same rule here (an unparseable date is refused).
+  let since = input.since !== undefined ? isoDateInput('since', input.since) : undefined;
   if (input.runId) {
     const run = store.researchRuns.get(input.runId);
     if (!run || !env.scope.treeIds.includes(run.workspaceId)) throw notFound('run', input.runId);

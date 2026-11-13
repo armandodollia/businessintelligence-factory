@@ -28,7 +28,7 @@ import { getEntity } from './entities.js';
 import { factFreshness, isFactUsable } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
 import {
-  ageDays, artifactVisibleSql, entityVisibleIn, factVisibleSql, recordVisibleSql, usableOnly, visParams,
+  ageDays, artifactVisibleSql, entityVisibleIn, factVisibleSql, ReadInputError, recordVisibleSql, usableOnly, visParams,
   type ReadEnv, type ReadOutput,
 } from './readCommon.js';
 import { scopeRank, type KnowledgeScope, type ScopeMode } from './scope.js';
@@ -546,7 +546,7 @@ function elsewhereNote(c: Ctx, kinds: readonly SearchKind[], terms: string[], op
 }
 
 /** A search request that cannot run (empty query without an entity). */
-export class SearchInputError extends Error {
+export class SearchInputError extends ReadInputError {
   constructor(message: string) {
     super(message);
     this.name = 'SearchInputError';

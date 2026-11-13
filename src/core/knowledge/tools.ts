@@ -24,13 +24,13 @@ import { runListChanges } from './changes.js';
 import { artifactNotFound, assertEntityReadable, expandNotFound, runExpand, runReadArtifact, type ArtifactBytes, type ReadArtifactMode } from './expand.js';
 import { assemblePage, type PageItem } from './paging.js';
 import {
-  anyUploadDerived, BUDGET_KIND, inSlice, readableById, usableOnly,
+  anyUploadDerived, BUDGET_KIND, inSlice, ReadInputError, readableById, usableOnly,
   type ReadEnv, type ReadOutput, type Recover, type ReviewSlice,
 } from './readCommon.js';
 import { recordRetrieval } from './retrievalLog.js';
 import { factScope } from './facts.js';
 import { KnowledgeNotFoundError, narrowTo, notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
-import { runSearch, SearchInputError, type SearchKind } from './search.js';
+import { runSearch, type SearchKind } from './search.js';
 
 /**
  * Smallest response budget of any knowledge read (tokens): every tool's floor (`READ_FLOOR_TOKENS`) is at
@@ -261,7 +261,7 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
       for (const id of namedIds(tool, input)) if (err.message.includes(`'${id}'`) && inOtherTree(store, scope, id)) blocked(id, 'out_of_tree');
       return { ok: false, error: err.message };
     }
-    if (err instanceof InvalidCursorError || err instanceof SearchInputError) return { ok: false, error: err.message };
+    if (err instanceof InvalidCursorError || err instanceof ReadInputError) return { ok: false, error: err.message };
     throw err;
   }
 

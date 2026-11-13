@@ -33,6 +33,7 @@ import { actorOf } from '../core/feedback/events.js';
 import { gcReport, PruneError } from '../core/knowledge/gc.js';
 import { scopeFor, activeIds, type KnowledgeScope, type ScopeMode } from '../core/knowledge/scope.js';
 import { SEARCH_KINDS, type SearchKind } from '../core/knowledge/search.js';
+import { isoDateInput } from '../core/knowledge/readCommon.js';
 import { knowledgeRead, type KnowledgeReadInput, type KnowledgeReadTool } from '../core/knowledge/tools.js';
 import { explainUploadDerived } from '../core/knowledge/uploadCause.js';
 import { conflictFacts, knowledgeStats, staleFacts, visibleEntities, visibleMergeSuggestions, type ViewEnv } from '../core/knowledge/userViews.js';
@@ -73,6 +74,17 @@ function scopeParam(c: Context): ScopeMode {
   if (s === undefined || s === '' || s === 'node') return 'node';
   if (s === 'tree') return 'tree';
   throw new BadRequest(`scope must be "node" or "tree"`);
+}
+
+/** An ISO date query parameter (`since`), normalized; 400 when unparseable. */
+function isoParam(c: Context, name: string): string | undefined {
+  const v = c.req.query(name);
+  if (v === undefined || v === '') return undefined;
+  try {
+    return isoDateInput(name, v);
+  } catch (e) {
+    throw new BadRequest((e as Error).message);
+  }
 }
 
 function intParam(c: Context, name: string): number | undefined {
@@ -145,7 +157,7 @@ export function mountKnowledgeRoutes(app: Hono, deps: KnowledgeRouteDeps): void 
     const limit = intParam(c, 'limit');
     const q = c.req.query('q');
     const entityId = c.req.query('entity_id');
-    const since = c.req.query('since');
+    const since = isoParam(c, 'since');
     const data = read(c, 'search', {
       ...(q !== undefined ? { query: q } : {}),
       ...(kinds ? { kinds: kinds as SearchKind[] } : {}),
@@ -198,7 +210,7 @@ export function mountKnowledgeRoutes(app: Hono, deps: KnowledgeRouteDeps): void 
 
   /** Changes feed (`since`, `run_id`, `entity_id`). */
   app.get(`${base}/changes`, wrap((c) => {
-    const since = c.req.query('since');
+    const since = isoParam(c, 'since');
     const runId = c.req.query('run_id');
     const entityId = c.req.query('entity_id');
     return c.json(read(c, 'list_changes', { ...(since ? { since } : {}), ...(runId ? { run_id: runId } : {}), ...(entityId ? { entity_id: entityId } : {}) }));
