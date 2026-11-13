@@ -426,3 +426,11 @@ export function applyPromptPatch(patch: PromptPatch, scope: CalibrationScope): {
   writeFileSync(path, text);
   return { path, text };
 }
+
+// --- learning loop WP-G: one rating's delta, by the same rule as `calibrationReport` -------------
+/** Normalized user − agent delta of one rating (0 for an agree); undefined when not comparable. */
+export function ratingDelta(r: Rating): number | undefined {
+  const def = criterionDef(r.targetType, r.criterion);
+  return def ? normalizedDelta(def, r.agentValue, r.verdict === 'agree' ? r.agentValue : r.userValue) : signalDelta(r);
+}
+// --- end WP-G -----------------------------------------------------------------------------------

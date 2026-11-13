@@ -188,3 +188,10 @@ export function promptVersionMetrics(store: Store, workspaceId: string, opts: { 
   out.sort((x, y) => x.role.localeCompare(y.role) || x.firstSeen.localeCompare(y.firstSeen) || x.promptVersion.localeCompare(y.promptVersion));
   return out;
 }
+
+// --- learning loop WP-G: the rating → producing-run index, for callers rating many values ---------
+/** Index for `originRunOfRating` (build once per workspace, pass to every call). */
+export function ratingOriginIndex(store: Store, workspaceId: string): Map<string, string> {
+  return originIndex(store, workspaceId);
+}
+// --- end WP-G -----------------------------------------------------------------------------------
