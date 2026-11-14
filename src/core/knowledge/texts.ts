@@ -14,7 +14,7 @@
  */
 import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
-import type { ArtifactText, ExtractionState, TextChunk } from '../types.js';
+import type { ArtifactText, ExtractionState, OcrState, TextChunk } from '../types.js';
 import { activeIds, notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { CONTENT_TRUST, fenceEvidence, redactRange, redactServed, treeSecrets } from './trust.js';
 
@@ -108,6 +108,12 @@ export type ServedTextState = {
   chunkCount: number;
   /** The artifact's flag (or the canonical's): covers the error text and every chunk served for it. */
   uploadDerived: boolean;
+  /**
+   * Two-pass OCR state when a model has (or had) something to read: `pending` — more text is coming;
+   * `done` — passages with a `(ocr)` locator were transcribed by a model; `failed` / `skipped` — the
+   * scanned parts are not in the text.
+   */
+  ocr?: Exclude<OcrState, 'none'>;
   /** Extraction error: redacted, fence-stripped, capped and fenced. */
   error?: string;
   /** `untrusted` whenever `error` is present. */
@@ -136,6 +142,7 @@ export function servedTextState(store: Store, scope: KnowledgeScope, artifactId:
   };
   if (row?.extractor !== undefined) out.extractor = row.extractor;
   if (row?.duplicateOf !== undefined) out.duplicateOf = row.duplicateOf;
+  if (row?.ocrStatus && row.ocrStatus !== 'none') out.ocr = row.ocrStatus;
   if (row?.error) {
     out.error = serveEvidenceText(store, scope.workspaceId, artifactId, row.error, SERVED_ERROR_MAX_CHARS);
     out.contentTrust = CONTENT_TRUST;

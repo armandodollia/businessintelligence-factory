@@ -26,6 +26,7 @@ import type {
 import type {
   ArtifactCapture,
   ArtifactText,
+  OcrRun,
   Entity,
   EntityMergeSuggestion,
   FactObservation,
@@ -516,8 +517,18 @@ export const knowledgeSpecs = {
     fields: {
       artifactId: 'text', workspaceId: 'text', status: 'text', extractor: 'text', error: 'text', charCount: 'int',
       tokenEstimate: 'int', contentSha256: 'text', duplicateOf: 'text', extractedAt: 'text',
+      ocrStatus: 'text', ocrPlan: 'json', ocrError: 'text', ocrAt: 'text',
     },
   } satisfies TableSpec<ArtifactText>,
+  ocrRuns: {
+    table: 'ocr_runs',
+    key: 'id',
+    fields: {
+      id: 'text', artifactId: 'text', workspaceId: 'text', target: 'text', pages: 'json', pagesRead: 'int', provider: 'text',
+      model: 'text', status: 'text', error: 'text', inputTokens: 'int', outputTokens: 'int', cacheReadTokens: 'int',
+      cacheWriteTokens: 'int', costUsd: 'real', cliReportedCostUsd: 'real', priceVersion: 'text', durationMs: 'int', createdAt: 'text',
+    },
+  } satisfies TableSpec<OcrRun>,
   chunks: {
     table: 'chunks',
     key: 'id',
@@ -593,6 +604,7 @@ function createKnowledgeRepos(db: DatabaseSync) {
     artifactCaptures: new Repo<ArtifactCapture, 'id'>(db, knowledgeSpecs.artifactCaptures),
     artifactTexts: new Repo<ArtifactText, 'artifactId'>(db, knowledgeSpecs.artifactTexts),
     chunks: new Repo<TextChunk, 'id'>(db, knowledgeSpecs.chunks),
+    ocrRuns: new Repo<OcrRun, 'id'>(db, knowledgeSpecs.ocrRuns),
     findingEvidence: new LinkRepo<FindingEvidence>(db, knowledgeSpecs.findingEvidence),
     factObservations: new Repo<FactObservation, 'id'>(db, knowledgeSpecs.factObservations),
     itemScopes: new LinkRepo<ItemScope>(db, knowledgeSpecs.itemScopes),

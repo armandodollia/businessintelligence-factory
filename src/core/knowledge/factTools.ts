@@ -105,7 +105,8 @@ async function artifactText(env: FactToolEnv, artifactId: string): Promise<Artif
     return { row, chunks };
   };
   let { row, chunks } = load();
-  if (!chunks.length && (!row || row.status === 'pending') && env.ensureExtracted) {
+  // Pending extraction, or scanned parts a model is still reading (two-pass OCR): wait for the text.
+  if (((!chunks.length && (!row || row.status === 'pending')) || row?.ocrStatus === 'pending') && env.ensureExtracted) {
     await env.ensureExtracted(artifactId);
     ({ row, chunks } = load());
   }

@@ -39,7 +39,9 @@ the agent CLIs call into, and a small React web app. Design spec:
      `chunkTokens` 400, `maxChunkTokens` 600, `xlsxMaxRows`, `inlineMaxBytes`, `concurrency`),
      `captions` (`required`, `minChars` 20), `dedupe` (`candidateLimit` 3, `similarityFloor` 0.5 —
      Jaccard overlap of the word sets of the two normalized claims, 0–1; full-text bm25 only picks
-     which stored facts are compared), `retention` (`pruneMinAgeDays`).
+     which stored facts are compared), `retention` (`pruneMinAgeDays`), `ocr` (`enabled` true, `model`
+     "haiku", `images` "all" | "uploads" | "none", `minPageChars` 40, `maxPages` 30 per document,
+     `pagesPerCall` 8, `maxFileBytes`, `timeoutSeconds` 180, `concurrency` 2, `rateLimitPauseMinutes` 15).
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -229,6 +231,14 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   an earlier one of the business tree points at it instead of being indexed twice. Screenshots and
   images saved by agents need a `description` (≥ `knowledge.captions.minChars`, default 20
   characters); images without one (e.g. uploads) can be described later with `describe_artifact`.
+- **Scans and images: two-pass OCR (knowledge store).** A PDF page with a usable text layer is
+  settled by rules, with no model call. Pages without one, and images, are read in the background
+  by a small model (Haiku, through your Claude CLI, with no tools and no access to anything but the
+  file). The transcription is appended as passages marked `(ocr)`, so it is searchable and quotable
+  like other evidence text and keeps the upload flag of its artifact. Each model call is logged
+  with its tokens and cost (`ocr_runs`, shown in the knowledge metrics). This sends those files to
+  the model provider; set `knowledge.ocr.enabled: false` (or `images: "none"`) to keep them local.
+  It runs only when the `claude` provider is enabled.
 - **Knowledge read tools (knowledge store).** Agents read the store through `search` (facts,
   document passages, artifacts, entity names, records; FTS ranking, labelled hits with ids, no
   bodies), `get_card` (a card computed from reviewed records for an entity or a node), `expand`

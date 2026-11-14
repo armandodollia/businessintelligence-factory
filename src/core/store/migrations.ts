@@ -1242,4 +1242,38 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX audit_schedules_root ON audit_schedules (root_workspace_id);
   `,
+  // 21: two-pass OCR (knowledge store). Pass 1 (rules, `knowledge/ocr/rules.ts`) plans what a model
+  // has to read; pass 2 (`knowledge/ocr/haiku.ts`) reads it. `ocr_status`: NULL = never planned,
+  // none | pending | done | failed | skipped. `ocr_runs`: one row per model call (tokens and cost).
+  `
+  ALTER TABLE artifact_texts ADD COLUMN ocr_status TEXT;
+  ALTER TABLE artifact_texts ADD COLUMN ocr_plan TEXT;
+  ALTER TABLE artifact_texts ADD COLUMN ocr_error TEXT;
+  ALTER TABLE artifact_texts ADD COLUMN ocr_at TEXT;
+  CREATE INDEX artifact_texts_ocr ON artifact_texts (ocr_status);
+
+  CREATE TABLE ocr_runs (
+    id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    pages TEXT NOT NULL DEFAULT '[]',
+    pages_read INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL,
+    cli_reported_cost_usd REAL,
+    price_version TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX ocr_runs_art ON ocr_runs (artifact_id);
+  CREATE INDEX ocr_runs_ws ON ocr_runs (workspace_id, created_at);
+  `,
 ];

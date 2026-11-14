@@ -34,6 +34,18 @@ export type KnowledgeSettings = {
   captions: { required: boolean; minChars: number };
   dedupe: { candidateLimit: number; similarityFloor: number };
   retention: { pruneMinAgeDays: number };
+  ocr: {
+    enabled: boolean;
+    model: string;
+    images: 'uploads' | 'all' | 'none';
+    minPageChars: number;
+    maxPages: number;
+    pagesPerCall: number;
+    maxFileBytes: number;
+    timeoutSeconds: number;
+    concurrency: number;
+    rateLimitPauseMinutes: number;
+  };
 };
 
 /** Drops `undefined` entries so spreading never overwrites a default with `undefined`. */
@@ -65,5 +77,6 @@ export function knowledgeSettings(config: Pick<BifConfig, 'knowledge'>): Knowled
     captions: { ...d.captions, ...defined(k.captions) },
     dedupe: { ...d.dedupe, ...defined(k.dedupe) },
     retention: { ...d.retention, ...defined(k.retention) },
+    ocr: { ...d.ocr, ...defined(k.ocr) },
   };
 }

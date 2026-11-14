@@ -267,6 +267,33 @@ export const knowledgeConfigSchema = z.strictObject({
       pruneMinAgeDays: z.number().int().min(0).optional(),
     })
     .optional(),
+  /**
+   * Two-pass OCR. Pass 1 is rules (no model): a PDF page with a usable text layer is settled. Pass 2
+   * sends what is left (image-only PDF pages, images) to a small model through the Claude CLI
+   * (`providers.claude`); it runs only when that provider is enabled.
+   */
+  ocr: z
+    .strictObject({
+      enabled: z.boolean().optional(),
+      /** Model of the Claude CLI for pass 2 (alias or full name). */
+      model: z.string().min(1).optional(),
+      /** Images read by the model: uploads only, every image (agent screenshots too), or none. */
+      images: z.enum(['uploads', 'all', 'none']).optional(),
+      /** A PDF page with fewer non-space characters than this has no text layer worth keeping. */
+      minPageChars: z.number().int().min(1).optional(),
+      /** Pages of one document read by the model; the rest stay unread (the artifact says how many). */
+      maxPages: z.number().int().min(1).max(100).optional(),
+      /** Pages asked for in one model call. */
+      pagesPerCall: z.number().int().min(1).max(20).optional(),
+      /** Files larger than this are never sent (images are also capped at 5 MB). */
+      maxFileBytes: z.number().int().min(1).max(20_000_000).optional(),
+      timeoutSeconds: z.number().int().min(5).optional(),
+      /** Model calls running at once. */
+      concurrency: z.number().int().min(1).max(10).optional(),
+      /** How long the queue waits after a rate limit before trying again. */
+      rateLimitPauseMinutes: z.number().int().min(1).optional(),
+    })
+    .optional(),
 });
 export type KnowledgeConfig = z.infer<typeof knowledgeConfigSchema>;
 
@@ -290,6 +317,18 @@ export const KNOWLEDGE_DEFAULTS = {
   captions: { required: true, minChars: 20 },
   dedupe: { candidateLimit: 3, similarityFloor: 0.5 },
   retention: { pruneMinAgeDays: 90 },
+  ocr: {
+    enabled: true,
+    model: 'haiku',
+    images: 'all',
+    minPageChars: 40,
+    maxPages: 30,
+    pagesPerCall: 8,
+    maxFileBytes: 20_000_000,
+    timeoutSeconds: 180,
+    concurrency: 2,
+    rateLimitPauseMinutes: 15,
+  },
 } as const;
 // --- end knowledge store KS-0 config ---------------------------------------------------------
 

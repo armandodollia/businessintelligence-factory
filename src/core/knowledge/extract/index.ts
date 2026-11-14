@@ -208,7 +208,10 @@ export async function extract(bytes: Uint8Array, mime: string, opts: ExtractOpti
       return { status: 'too_large', extractor, blocks: [], error: `input is ${bytes.byteLength} bytes; the limit is ${maxInput}` };
     }
     const raw = await run(kind, bytes, parseMime(mime ?? '').charset, opts);
-    return finish(raw, extractor, opts.maxTextChars);
+    const out = finish(raw, extractor, opts.maxTextChars);
+    // One raw block per PDF page (`extractPdf`), text or not.
+    if (kind === 'pdf') out.pages = raw.map((b) => normalizeText(b.text));
+    return out;
   } catch (e) {
     if (e instanceof ExtractTooLargeError) return { status: 'too_large', extractor, blocks: [], error: errorMessage(e) };
     return { status: 'failed', extractor, blocks: [], error: errorMessage(e) };

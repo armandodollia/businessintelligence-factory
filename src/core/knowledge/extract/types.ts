@@ -7,7 +7,17 @@ export type ExtractStatus = 'ok' | 'empty' | 'unsupported' | 'too_large' | 'fail
 /** A structural unit of a document: a section under a heading, a page, a slide or a sheet. */
 export type Block = { headingPath: string; locator?: string; text: string };
 
-export type Extracted = { status: ExtractStatus; extractor: string; blocks: Block[]; error?: string };
+export type Extracted = {
+  status: ExtractStatus;
+  extractor: string;
+  blocks: Block[];
+  error?: string;
+  /**
+   * PDF only (when it parsed): the normalized text of every page in order, `''` for a page without
+   * a text layer. `blocks` drops the empty pages; OCR pass 1 (`ocr/rules.ts`) needs them all.
+   */
+  pages?: string[];
+};
 
 export type ExtractOptions = {
   /** Cap on the normalized text of one artifact (config `knowledge.extraction.maxTextChars`). */

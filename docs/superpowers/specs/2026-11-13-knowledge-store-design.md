@@ -78,7 +78,8 @@ Made by the designer (correct any of these):
 6. **Computed cards.** Entity summaries are assembled by code from reviewed facts at
    query time. No agent writes summaries, so no unreviewed claim enters the store.
 7. **Captions at capture.** The agent that takes a screenshot must describe it when
-   saving. No OCR or vision pipeline in v1.
+   saving. No OCR or vision pipeline in v1. (Amended 2026-11-14: two-pass OCR was added, §20.
+   Captions stay required.)
 8. **Sameness is decided at save time** by the saving agent, prompted by the tool
    with likely matches (confirm / replace / new), and checked by the reviewer.
 9. **Graph = two SQLite tables** (`entities`, `relations`). Every edge is backed by
@@ -104,7 +105,7 @@ Goals
   was used).
 
 Non-goals (v1)
-- Embeddings / vector search, OCR, perceptual image hashing, chunk-level diffs of a
+- Embeddings / vector search, OCR (added later, §20), perceptual image hashing, chunk-level diffs of a
   changed page, LLM-written summaries, multi-user access control, cross-tree
   knowledge of any kind.
 - Per-item restriction or confidentiality inside a tree (decision 13): every node of a
@@ -690,7 +691,7 @@ than home) records a `Decision` with refs, like `save_finding` does today.
   included, its count capped at `ELSEWHERE_COUNT_CAP` = 50 per kind, shown as `50+`) and 24 / 30 ms
   tree-wide; a 29 MB database plus 18 MB of stored files.
 - Later, without changing tools: a vector ranking signal for `search`; OCR for
-  image-only PDFs and uploaded screenshots; a merge-proposer agent.
+  image-only PDFs and uploaded screenshots (built 2026-11-14, §20); a merge-proposer agent.
 
 ## 15. Data model (one migration)
 
@@ -723,7 +724,7 @@ Exact DDL is in the build plan.
 `budgets` (default / roles / providers), `hardMaxTokens`, `freshness` (defaultDays,
 byEntityKind), `extraction` (maxTextChars, chunkTokens, maxChunkTokens,
 xlsxMaxRows, inlineMaxBytes, concurrency), `captions` (required, minChars),
-`dedupe` (candidateLimit, similarityFloor), `retention` (pruneMinAgeDays).
+`dedupe` (candidateLimit, similarityFloor), `retention` (pruneMinAgeDays), `ocr` (§20).
 `similarityFloor` applies to the Jaccard overlap of the word-token sets of the two normalized claims
 (0–1); FTS5 bm25 only selects the candidates it is computed on.
 
@@ -774,3 +775,62 @@ go through `feedback/actions.ts` with the actor from config. Upload-derived item
 Library picks within §5; exact ranking weights; cache for cards; internal module
 layout under `src/core/knowledge/`; UI layout. Anything that changes a decision in
 §3, a tool contract in §9 or a privacy rule in §12 goes back to the design thread.
+
+## 20. Two-pass OCR (added 2026-11-14)
+
+Scanned PDF pages and images had no text: they were findable only by title and caption. They are
+now read in two passes. Rules settle everything they can for free; a small model reads only the rest.
+
+**Pass 1: rules (no model).** Runs inside `ingestArtifact`, on the extractor's result
+(`src/core/knowledge/ocr/rules.ts`, pure).
+- A PDF page is settled by its text layer. It goes to pass 2 only when the layer is missing (fewer
+  than `minPageChars` non-space characters) or garbled (under half letters or digits, or over a
+  tenth U+FFFD).
+- An image has no text layer. `images` says which are read: `all` (default), `uploads`, `none`.
+- Never sent: images under 1 KB or over 5 MB, image formats other than png / jpeg / gif / webp, files
+  over `maxFileBytes`, PDFs over 100 pages (the whole file is sent). The artifact is `skipped` with
+  the reason. Pages over `maxPages` stay unread and are counted.
+- Text duplicates are not read (their canonical is).
+
+**Pass 2: a small model.** `OcrQueue` (`ocr/worker.ts`) runs in the background, so a save never
+waits for it. It calls Haiku through the local Claude CLI (`ocr/haiku.ts`), `pagesPerCall` pages
+per call.
+- The file is untrusted. The call gives the model no tools, no MCP servers, no user or project
+  settings and no saved session; the bytes go in as an image or document block on stdin. All the
+  model can do is answer.
+- The answer is validated by rules: only pages that were asked for, once each, unreadable and empty
+  pages dropped, each page capped at 20,000 characters.
+- The text is appended, never merged: chunks from pass 1 keep their ids, `seq` and offsets (findings
+  cite them). Model text follows them with locator `page N (ocr)` or `image (ocr)`, so a reader
+  always sees which text a model transcribed.
+- It is evidence text like any other: redacted, fence-stripped, capped at `maxTextChars`,
+  upload-derived when the artifact is (§12), served fenced as untrusted.
+- It takes no part in text-duplicate detection: two transcriptions of one scan need not match.
+- A quote on an artifact whose OCR is still pending waits for the transcription (§7.3).
+- A rate limit leaves the artifact `pending` and pauses the queue for `rateLimitPauseMinutes`.
+
+**State.** `artifact_texts.ocr_status`: NULL (never planned), `none`, `pending`, `done`, `failed`,
+`skipped`; `ocr_plan`, `ocr_error`, `ocr_at`. `extractor` gains `+ocr@1` once model text was
+added. Read tools report `extraction.ocr` and a note; `save_artifact` reports `ocr: "pending"`.
+
+**Tracking.** Every model call is a row in `ocr_runs` (pages, model, status, tokens, computed and
+CLI-reported cost, duration), failed calls too. `knowledgeMetrics().ocr` reports the totals and the
+artifacts by OCR state.
+
+**Availability.** Pass 2 exists only when the server entry point starts it
+(`BootOptions.ocrReader: 'claude-cli'`), `knowledge.ocr.enabled` is true and `providers.claude` is
+enabled. Otherwise nothing is planned and no file leaves the machine for OCR. At startup, `pending`
+artifacts are read, and PDFs and images ingested earlier are planned once.
+
+**Privacy.** Pass 2 sends the file to the model provider through the user's own Claude CLI, the
+same path agent runs already use. Set `knowledge.ocr.enabled: false`, or `images: "none"`, to keep
+scans and images on the machine.
+
+**Config** `knowledge.ocr`: `enabled` (true), `model` ("haiku"), `images` ("all"), `minPageChars`
+(40), `maxPages` (30), `pagesPerCall` (8), `maxFileBytes` (20,000,000), `timeoutSeconds` (180),
+`concurrency` (2), `rateLimitPauseMinutes` (15).
+
+**Limits.** Only the Claude CLI is supported for pass 2. No local OCR engine: a page without a
+usable text layer is unread until a model reads it. A transcription can contain model errors;
+the `(ocr)` locator marks it.
+

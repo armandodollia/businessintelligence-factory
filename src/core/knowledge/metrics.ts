@@ -27,6 +27,7 @@
  *   cached input on later turns, so the share is a lower bound of retrieval's weight in the bill.
  */
 import { statSync } from 'node:fs';
+import { ocrArtifactStates, ocrTotals, type OcrTotals } from './ocr/totals.js';
 import { join } from 'node:path';
 import type { SQLInputValue } from 'node:sqlite';
 import type { BifConfig } from '../config/schema.js';
@@ -111,6 +112,11 @@ export type KnowledgeMetrics = {
   rootWorkspaceId: string;
   workspaceIds: string[];
   window: { since: string | null; until: string | null };
+  /**
+   * Two-pass OCR: model calls of pass 2 in the window (pages, tokens, cost), and the artifacts of
+   * the scope by OCR state now (`pending`: waiting for the model; `skipped`: a rule forbids sending).
+   */
+  ocr: OcrTotals & { artifacts: { pending: number; done: number; failed: number; skipped: number } };
   store: {
     facts: { candidate: number; current: number; replaced: number; retracted: number; total: number };
     observations: number;
@@ -522,5 +528,6 @@ export function knowledgeMetrics(store: Store, filter: KnowledgeMetricsFilter): 
     retrieval: retrievalOf(rows),
     usage: usageOf(store, s, rows),
     signals: signalsOf(store, s, rows),
+    ocr: { ...ocrTotals(store, { workspaceIds: s.ids, since: s.window.since, until: s.window.until }), artifacts: ocrArtifactStates(store, s.ids) },
   };
 }

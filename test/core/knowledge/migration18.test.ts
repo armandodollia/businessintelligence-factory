@@ -69,7 +69,8 @@ describe('migration 18 (knowledge store KS-0)', () => {
     for (const t of ['competitors', 'personas', 'symptoms', 'symptom_hypotheses']) expect(cols(s, t)).toContain('entity_id');
     const tables: Record<string, string[]> = {
       artifact_captures: ['id', 'artifact_id', 'workspace_id', 'agent_run_id', 'task_id', 'run_id', 'source_url', 'url_key', 'title', 'flow', 'step', 'note', 'description', 'entity_id', 'captured_at'],
-      artifact_texts: ['artifact_id', 'workspace_id', 'status', 'extractor', 'error', 'char_count', 'token_estimate', 'content_sha256', 'duplicate_of', 'extracted_at'],
+      // The last four columns are migration 21 (two-pass OCR).
+      artifact_texts: ['artifact_id', 'workspace_id', 'status', 'extractor', 'error', 'char_count', 'token_estimate', 'content_sha256', 'duplicate_of', 'extracted_at', 'ocr_status', 'ocr_plan', 'ocr_error', 'ocr_at'],
       chunks: ['id', 'artifact_id', 'workspace_id', 'seq', 'heading_path', 'locator', 'text', 'char_start', 'char_end', 'token_estimate', 'upload_derived'],
       finding_evidence: ['finding_id', 'seq', 'artifact_id', 'chunk_id', 'quote', 'char_start', 'char_end'],
       fact_observations: ['id', 'workspace_id', 'lineage_id', 'finding_id', 'prior_finding_id', 'kind', 'run_id', 'task_id', 'agent_run_id', 'task_round', 'evidence', 'reason', 'status', 'created_at', 'applied_at'],

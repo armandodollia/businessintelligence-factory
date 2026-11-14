@@ -10,6 +10,11 @@
  * flag a duplicate as upload-derived when its canonical is (now or later); a duplicate that is
  * itself an upload is flagged by its kind — so a duplicate is upload-derived if either copy is.
  *
+ * Two-pass OCR: when an `OcrQueue` is registered for the artifact store (`ocr/registry.ts`) and
+ * `knowledge.ocr.enabled`, the rules of pass 1 (`ocr/rules.ts`) run here on the extractor's result
+ * and write `ocr_status`; an artifact left `pending` is handed to the queue, whose model pass
+ * (`ocr/worker.ts`) APPENDS chunks later. Without a queue nothing is planned (`ocr_status` NULL).
+ *
  * `Ingestor` runs ingestion inline for files ≤ `extraction.inlineMaxBytes`, otherwise on an
  * in-process queue (`extraction.concurrency`). `requeuePending()` re-queues `pending` rows at
  * startup. One ingestor per `ArtifactStore` (`ingestorFor`), shared by tools and uploads.
@@ -19,11 +24,14 @@ import type { BifConfig } from '../config/schema.js';
 import type { ArtifactStore } from '../evidence/artifacts.js';
 import type { Store } from '../store/db.js';
 import { knowledgeRepos, newId } from '../store/repos.js';
-import type { ExtractionState } from '../types.js';
+import type { ExtractionState, OcrState } from '../types.js';
 import { descendants, rootOf } from '../workspace/tree.js';
 import { knowledgeSettings, type KnowledgeSettings } from './config.js';
 import { blocksText, capBlocks, chunk, contentHash, estimateTokens, extract, normalizeText } from './extract/index.js';
+import type { ExtractKind } from './extract/index.js';
 import type { Block, Extracted, ExtractOptions } from './extract/types.js';
+import { ocrSinkFor } from './ocr/registry.js';
+import { planOcr, type OcrPlan } from './ocr/rules.js';
 import { capText, chunkCount, SERVED_ERROR_MAX_CHARS, textTruncated } from './texts.js';
 import { redactServed, stripFences, stripSecretTail, treeSecrets } from './trust.js';
 
@@ -45,6 +53,8 @@ export type ExtractionSummary = {
   /** Queued (larger than `inlineMaxBytes`); `status` stays `pending` until it ran. */
   queued?: true;
   uploadDerived?: true;
+  /** OCR state when a model has (or had) something to read: text may still be coming while `pending`. */
+  ocr?: Exclude<OcrState, 'none'>;
 };
 
 /** Every node id of `workspaceId`'s tree (the workspace alone when unknown). */
@@ -62,11 +72,12 @@ export function extractionSummary(store: Store, artifactId: string): ExtractionS
   if (textTruncated(row)) out.truncated = true;
   if (row.duplicateOf) out.duplicateOf = row.duplicateOf;
   if (store.artifacts.get(artifactId)?.uploadDerived) out.uploadDerived = true;
+  if (row.ocrStatus && row.ocrStatus !== 'none') out.ocr = row.ocrStatus;
   return out;
 }
 
 /** Identity secrets of the tree redacted, fence sequences stripped, re-normalized; empty blocks dropped. */
-function sanitizeBlocks(store: Store, workspaceId: string, blocks: Block[]): Block[] {
+export function sanitizeBlocks(store: Store, workspaceId: string, blocks: Block[]): Block[] {
   const out: Block[] = [];
   for (const b of redactServed(store, workspaceId, blocks)) {
     const text = normalizeText(stripFences(b.text));
@@ -78,7 +89,7 @@ function sanitizeBlocks(store: Store, workspaceId: string, blocks: Block[]): Blo
   return out;
 }
 
-const sanitizeError = (store: Store, workspaceId: string, e: string | undefined): string | undefined => {
+export const sanitizeError = (store: Store, workspaceId: string, e: string | undefined): string | undefined => {
   if (!e) return undefined;
   // KS-1a cuts its message at 300 chars (marked `…`) before any redaction: drop a secret cut there.
   const raw = e.endsWith('…') ? `${stripSecretTail(e.slice(0, -1), treeSecrets(store, workspaceId))}…` : e;
@@ -147,6 +158,7 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
     const secrets = treeSecrets(store, art.workspaceId);
     const margin = secrets.reduce((m, x) => Math.max(m, x.length), 0);
     let extracted: Extracted;
+    let plan: OcrPlan | undefined;
     try {
       const bytes = readFileSync(artifacts.filePath(art));
       const filename = art.title && /\.[A-Za-z0-9]{1,10}$/.test(art.title) ? art.title : art.path;
@@ -155,6 +167,12 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
         xlsxMaxRows: settings.xlsxMaxRows,
         filename,
       });
+      // OCR pass 1 (rules): what, if anything, a model has to read. Only when OCR is available.
+      const ocr = knowledgeSettings(deps.config ?? {}).ocr;
+      if (ocr.enabled && ocrSinkFor(artifacts)) {
+        const kind = extracted.extractor.split('@')[0] as ExtractKind;
+        plan = planOcr({ kind, pages: extracted.pages, bytes, artifactKind: art.kind }, ocr);
+      }
     } catch (e) {
       extracted = { status: 'failed', extractor: 'none@1', blocks: [], error: messageOf(e) };
     }
@@ -169,6 +187,7 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
     const pieces = hasText ? chunk(blocks, { chunkTokens: settings.chunkTokens, maxChunkTokens: settings.maxChunkTokens }) : [];
     const error = sanitizeError(store, art.workspaceId, served.error);
 
+    let ocrPending = false;
     store.transaction(() => {
       const cur = k.artifactTexts.get(artifactId);
       if (cur && cur.status !== 'pending') return; // ingested concurrently
@@ -185,6 +204,16 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
         duplicateOf,
         extractedAt: new Date().toISOString(),
       });
+      if (plan) {
+        // A text duplicate has no chunks of its own: its canonical is the one that gets read.
+        const p: OcrPlan = duplicateOf ? { action: 'none' } : plan;
+        ocrPending = p.action === 'read';
+        k.artifactTexts.update(artifactId, {
+          ocrStatus: p.action === 'read' ? 'pending' : p.action === 'skip' ? 'skipped' : 'none',
+          ocrPlan: p.action === 'read' ? p : undefined,
+          ocrError: p.action === 'skip' ? p.reason : undefined,
+        });
+      }
       store.db.prepare('DELETE FROM chunks WHERE artifact_id = ?').run(artifactId);
       if (duplicateOf) return;
       for (const c of pieces) {
@@ -203,6 +232,7 @@ export async function ingestArtifact(deps: IngestDeps, artifactId: string, opts:
         });
       }
     });
+    if (ocrPending) ocrSinkFor(artifacts)?.enqueue(artifactId);
     return extractionSummary(store, artifactId) ?? failedSummary;
   } catch (e) {
     // Last resort (e.g. the database went away): record what we can, never throw to the caller.

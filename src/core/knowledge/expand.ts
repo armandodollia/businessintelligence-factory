@@ -274,6 +274,7 @@ function extractionInfo(state: ServedTextState): Record<string, unknown> {
   const x: Record<string, unknown> = { status: state.status, chunks: state.chunkCount };
   if (state.truncated) x.truncated = true;
   if (state.duplicateOf) x.duplicate_of = state.duplicateOf;
+  if (state.ocr) x.ocr = state.ocr;
   if (state.error) x.error = state.error;
   return x;
 }
@@ -282,7 +283,11 @@ function extractionNotes(state: ServedTextState): string[] {
   const notes: string[] = [];
   if (state.status === 'pending') notes.push('text extraction is still pending for this artifact; expand it again shortly');
   if (state.truncated) notes.push('the document was cut at the extraction cap (maxTextChars): only its start is indexed and served');
-  if (state.status === 'unsupported') notes.push('no text is extracted from this type: it is searchable by its title and description');
+  if (state.status === 'unsupported' && state.ocr !== 'pending') notes.push('no text is extracted from this type: it is searchable by its title and description');
+  // Two-pass OCR: what a model has read, is reading, or could not read of a scan or image.
+  if (state.ocr === 'pending') notes.push('a model is still transcribing the scanned parts of this artifact (ocr: pending); read it again shortly');
+  else if (state.ocr === 'done' && state.chunkCount > 0) notes.push('passages with an "(ocr)" locator were transcribed by a model from a scan or image');
+  else if (state.ocr === 'failed' || state.ocr === 'skipped') notes.push(`the scanned parts of this artifact are not in its text (ocr: ${state.ocr})`);
   return notes;
 }
 

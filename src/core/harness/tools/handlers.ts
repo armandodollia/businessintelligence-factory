@@ -17,6 +17,7 @@ import { findReplay } from './idempotency.js';
 import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave, linkArtifactCapture } from '../../knowledge/artifactTools.js';
 import type { CaptureResult } from '../../evidence/artifacts.js';
 import { ingestorFor } from '../../knowledge/ingest.js';
+import { ocrSinkFor } from '../../knowledge/ocr/registry.js';
 import { observeFact, saveFindingFact, type FactToolEnv } from '../../knowledge/factTools.js'; // KS-2
 // knowledge store KS-3
 import { findingEntity, linkFindingRelations, peekFindingEntity, relinkFinding } from '../../knowledge/entityLinks.js';
@@ -130,6 +131,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     store, artifacts, config: deps.config, events, recordDecision,
     ensureExtracted: async (artifactId) => {
       await ingestorFor({ store, artifacts, config: deps.config }).ensure(artifactId);
+      // Two-pass OCR: a quote may be on a scanned page a model is still reading.
+      await ocrSinkFor(artifacts)?.ensure(artifactId);
     },
   };
 

@@ -30,6 +30,8 @@ import { registerFeedbackOutcomes } from '../core/learning/feedbackOutcomes.js';
 import { backfillChanged, backfillKnowledge } from '../core/knowledge/backfill.js';
 // Knowledge store KS-1: extraction queue (one per artifact store).
 import { ingestorFor } from '../core/knowledge/ingest.js';
+import { configuredOcrReader, type OcrReader } from '../core/knowledge/ocr/haiku.js'; // two-pass OCR
+import { OcrQueue } from '../core/knowledge/ocr/worker.js';
 import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
 import { retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
 import { recordLessonsPromptVersions } from '../core/learning/lessons/switch.js'; // ruling R1
@@ -49,6 +51,12 @@ export type BootOptions = {
   port?: number;
   /** Built web app; default `<repo>/web/dist`. */
   webDist?: string;
+  /**
+   * OCR pass 2 (knowledge store). Default: none — no model is called and no OCR is planned.
+   * `'claude-cli'`: the Claude CLI of `providers.claude` with `knowledge.ocr.model` (the server
+   * entry point passes this). A reader object is used as given (tests).
+   */
+  ocrReader?: OcrReader | 'claude-cli';
 };
 
 export type Runtime = {
@@ -163,6 +171,8 @@ export type Booted = {
   recorders: EventRecorders;
   /** WP-D: escalation agent on unverified / failed tasks, re-runs on answers. */
   escalations: EscalationService;
+  /** Two-pass OCR: the queue of pass 2, when `BootOptions.ocrReader` gave a reader. */
+  ocr?: OcrQueue;
   close(): Promise<void>;
 };
 
@@ -201,6 +211,18 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
   // KS-1: artifacts whose text is still `pending` (saved before a restart, or by older code paths)
   // are extracted in the background.
   const ingestor = ingestorFor({ store: runtime.store, artifacts: runtime.artifacts, config: runtime.config });
+  // Two-pass OCR: registered before the re-queue below, so artifacts extracted now are planned too.
+  // Artifacts left `pending` by the last process are read; PDFs and images ingested while OCR was
+  // unavailable are planned in the background.
+  const ocrReader = opts.ocrReader === 'claude-cli' ? configuredOcrReader(runtime.config) : opts.ocrReader;
+  const ocr = ocrReader ? new OcrQueue({ store: runtime.store, artifacts: runtime.artifacts, config: runtime.config }, ocrReader) : undefined;
+  if (ocr) {
+    const waiting = ocr.requeuePending();
+    if (waiting) console.log(`[bif] knowledge store: ${waiting} artifacts queued for OCR`);
+    void ocr.planExisting().then((planned) => {
+      if (planned) console.log(`[bif] knowledge store: ${planned} earlier artifacts queued for OCR`);
+    });
+  }
   const requeued = ingestor.requeuePending();
   if (requeued) console.log(`[bif] knowledge store: ${requeued} artifacts queued for text extraction`);
   let closed = false;
@@ -217,9 +239,10 @@ export async function boot(opts: BootOptions = {}): Promise<Booted> {
     // The shared browser server lives in its own process group: stop it explicitly.
     await runtime.supervisor.close();
     await ingestor.stop(); // KS-1: drop the queue, finish running extractions before the store closes
+    await ocr?.stop(); // after the ingestor, which may still hand it artifacts
     runtime.store.close();
   };
-  return { runtime, server, scheduler, recorders, escalations, close };
+  return { runtime, server, scheduler, recorders, escalations, close, ...(ocr ? { ocr } : {}) };
 }
 
 const isEntry = import.meta.main || (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url));
@@ -230,6 +253,7 @@ if (isEntry) {
   if (process.env.BIF_CONFIG) opts.configPath = process.env.BIF_CONFIG;
   if (process.env.BIF_DATA_DIR) opts.dataDir = process.env.BIF_DATA_DIR;
   if (envPort && Number.isInteger(envPort)) opts.port = envPort;
+  opts.ocrReader = 'claude-cli'; // the real server reads scans and images with the configured Claude CLI
   boot(opts)
     .then((b) => {
       const { port, dataDir } = b.runtime;

@@ -56,6 +56,10 @@ describe('config.knowledge (KS-0)', () => {
       captions: { required: true, minChars: 20 },
       dedupe: { candidateLimit: 3, similarityFloor: 0.5 },
       retention: { pruneMinAgeDays: 90 },
+      ocr: {
+        enabled: true, model: 'haiku', images: 'all', minPageChars: 40, maxPages: 30, pagesPerCall: 8,
+        maxFileBytes: 20_000_000, timeoutSeconds: 180, concurrency: 2, rateLimitPauseMinutes: 15,
+      },
     });
   });
 

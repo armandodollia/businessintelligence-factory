@@ -23,7 +23,7 @@ describe('extract: pdf', () => {
 
   it('reports empty for a pdf without a text layer', async () => {
     const r = await extract(makePdf([null, null]), 'application/pdf', O);
-    expect(r).toEqual({ status: 'empty', extractor: 'pdf@1', blocks: [] });
+    expect(r).toEqual({ status: 'empty', extractor: 'pdf@1', blocks: [], pages: ['', ''] });
   });
 
   it('fails cleanly on a corrupt pdf', async () => {

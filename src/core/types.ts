@@ -646,6 +646,45 @@ export interface ArtifactText {
   /** Canonical artifact with the same text in the tree; this artifact then has no chunks (design §8.4). */
   duplicateOf?: string;
   extractedAt?: string;
+  // Two-pass OCR (migration 21)
+  /** Absent: never planned (OCR unavailable when the artifact was ingested). */
+  ocrStatus?: OcrState;
+  /** What pass 1 decided the model has to read (`OcrPlan` of `knowledge/ocr/rules.ts`). */
+  ocrPlan?: unknown;
+  /** Why OCR was skipped or failed, or what a finished OCR left unread. */
+  ocrError?: string;
+  ocrAt?: string;
+}
+
+/**
+ * `artifact_texts.ocr_status`: `none` — pass 1 settled it, nothing for a model to read; `pending` —
+ * waiting for pass 2; `done` — pass 2 ran (its text, if any, is appended); `failed`; `skipped` — a
+ * rule forbids sending the file.
+ */
+export type OcrState = 'none' | 'pending' | 'done' | 'failed' | 'skipped';
+
+/** One model call of OCR pass 2 (`ocr_runs`). Token columns are disjoint, like `agent_usage`. */
+export interface OcrRun {
+  id: string;
+  artifactId: string;
+  workspaceId: string;
+  target: 'image' | 'pdf';
+  /** Pages asked for (an image is `[1]`). */
+  pages: number[];
+  pagesRead: number;
+  provider: string;
+  model: string;
+  status: 'ok' | 'failed' | 'rate_limited';
+  error?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd?: number;
+  cliReportedCostUsd?: number;
+  priceVersion?: string;
+  durationMs: number;
+  createdAt: string;
 }
 
 /** A passage of extracted text (design §8.3). Named `TextChunk` to avoid clashing with KS-1a's `Chunk`. */
