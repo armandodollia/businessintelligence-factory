@@ -396,7 +396,8 @@ describe('scope and audiences', () => {
       version: 1, audience: 'internal', status: 'pending',
     };
     store.personas.insert(persona);
-    expect(store.personas.get(persona.id)).toEqual(persona);
+    // Migration 25 defaults: an open segment persona.
+    expect(store.personas.get(persona.id)).toEqual({ ...persona, kind: 'segment', disclosure: 'open' });
     store.personas.update(persona.id, { audience: 'external' });
     expect(store.personas.get(persona.id)!.audience).toBe('external');
   });

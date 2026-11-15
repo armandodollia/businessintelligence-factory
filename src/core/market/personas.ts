@@ -10,7 +10,7 @@ import { newId } from '../store/repos.js';
 import type { Decision, Persona, PersonaProfileField } from '../types.js';
 import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { activeAdjustments } from '../personas/store.js';
-import { compileAgentMd } from './agentMd.js';
+import { compileAgentMd, compileStakeholderMd } from './agentMd.js';
 // knowledge store KS-3
 import { linkPersona } from '../knowledge/entityLinks.js';
 
@@ -46,11 +46,18 @@ export function versionedAgentMdPath(latestPath: string, version: number): strin
 /**
  * Compiles the persona's agent.md (framed to its workspace scope, with its active adjustments) and writes it as
  * `<slug>.v<version>.md` (kept per version, spec §8b.3) and as `persona.agentMdPath` (`<slug>.md`,
- * a copy of the latest version, so CLIs always load one stable path).
+ * a copy of the latest version, so CLIs always load one stable path). A stakeholder persona compiles with
+ * `compileStakeholderMd` (stakeholder design §6), named after its competitor when it has one.
  */
 export function writeAgentMd(store: Store, persona: Persona): string {
   const ws = store.workspaces.get(persona.workspaceId);
-  const md = compileAgentMd(persona, { ...(ws ? { scopeName: scopeOf(ws).name } : {}), adjustments: activeAdjustments(store, persona.id) });
+  const scope = ws ? { scopeName: scopeOf(ws).name } : {};
+  const adjustments = activeAdjustments(store, persona.id);
+  const competitor = persona.subjectId ? store.competitors.get(persona.subjectId) : undefined;
+  const md =
+    persona.kind === 'stakeholder'
+      ? compileStakeholderMd(persona, { ...scope, ...(competitor ? { competitorName: competitor.name } : {}), adjustments })
+      : compileAgentMd(persona, { ...scope, adjustments });
   mkdirSync(dirname(persona.agentMdPath), { recursive: true });
   writeFileSync(versionedAgentMdPath(persona.agentMdPath, persona.version), md);
   writeFileSync(persona.agentMdPath, md);

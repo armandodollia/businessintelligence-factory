@@ -7,6 +7,8 @@ import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type
 import { calibrationScope } from '../scoring/calibration.js';
 import { PERSONA_FEEDBACK_KEYS } from '../scoring/criteria.js';
 import type { Decision, Persona, PersonaFeedback, Recommendation } from '../types.js';
+import { segmentPersonas } from '../stakeholders/personas.js';
+import { runStakeholderReads, type ReadsReport } from '../stakeholders/reads.js';
 import { scopeOf } from '../workspace/tree.js';
 import { writeAgentMd } from './personas.js';
 
@@ -18,6 +20,8 @@ export type PanelReport = {
   feedback: number;
   /** Pairs whose persona never called `submit_persona_feedback` (after retry). */
   missing: Array<{ recommendationId: string; personaId: string; reason: string }>;
+  /** The stakeholder reads that follow the segment personas (stakeholder design §10). */
+  stakeholderReads?: ReadsReport;
 };
 
 type FeedbackKey = (typeof PERSONA_FEEDBACK_KEYS)[number];
@@ -144,17 +148,35 @@ function attach(deps: ResearchDeps, recId: string, fb: PersonaFeedback): void {
  * `persona_panel.md`. The run must call `submit_persona_feedback` (the dispatcher logs the
  * `persona_feedback` Decision); its feedback is attached to `Recommendation.personaFeedback` with
  * `simulated: true`, replacing that persona's earlier feedback. A run without feedback is retried
- * once, then logged as a harness Decision and skipped. Usable as the `persona_panel` phase runner.
+ * once, then logged as a harness Decision and skipped. Then the stakeholder reads run
+ * (`runStakeholderReads`, stakeholder design §10), with or without segment personas. Usable as the
+ * `persona_panel` phase runner.
  */
 export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): Promise<PanelReport> {
-  const { store, config } = deps;
+  const { store } = deps;
   const report: PanelReport = { feedback: 0, missing: [] };
   const ws = store.workspaces.get(workspaceId);
   const scope = ws ? scopeOf(ws).name : workspaceId;
   // Only reviewed outputs go to the panel (spec §7.2): verified, or included by the user.
-  const personas = store.personas.list({ workspaceId }).filter(isOutputUsable);
+  // Audience segments only: stakeholder personas give stakeholder reads instead (stakeholder design §10).
+  const personas = segmentPersonas(store, workspaceId).filter(isOutputUsable);
   const recs = store.recommendations.list({ workspaceId }).filter(isOutputUsable);
-  if (!personas.length || !recs.length) return report;
+  if (personas.length && recs.length) await segmentPanel(workspaceId, deps, personas, recs, scope, report);
+  // Then each open stakeholder persona reads each recommendation (stakeholder design §10).
+  report.stakeholderReads = await runStakeholderReads(workspaceId, deps);
+  return report;
+}
+
+/** The segment personas' feedback on every recommendation (one run per pair, concurrently). */
+async function segmentPanel(
+  workspaceId: string,
+  deps: ResearchDeps,
+  personas: Persona[],
+  recs: Recommendation[],
+  scope: string,
+  report: PanelReport,
+): Promise<void> {
+  const { store, config } = deps;
   const template = loadPrompt('persona_panel');
   const model = config.roles.persona;
 
@@ -198,7 +220,6 @@ export async function runPersonaPanel(workspaceId: string, deps: ResearchDeps): 
   const results = await Promise.allSettled(jobs);
   const err = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
   if (err) throw err.reason;
-  return report;
 }
 
 /** `runPersonaPanel` as the `persona_panel` phase runner: `phaseRunners: { persona_panel: personaPanelRunner }`. */

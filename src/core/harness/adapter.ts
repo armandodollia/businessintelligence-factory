@@ -34,6 +34,13 @@ export type SpawnSpec = {
   extraMcpServers: Record<string, unknown>;
   cwd: string;
   env?: Record<string, string>;
+  /**
+   * Offline run (stakeholder design §6, §16: own stakeholder research): the agent must not reach the
+   * web. The adapter denies the CLI's own web fetch, web search and shell in the command it builds; only
+   * the harness MCP server (and none other) stays reachable. An adapter with `offline: false` cannot
+   * enforce this and refuses (the supervisor fails such a run before start).
+   */
+  offline?: boolean;
 };
 
 export type BuiltCommand = {
@@ -53,6 +60,8 @@ export type BuiltCommand = {
  */
 export interface CliAdapter {
   id: ProviderId;
+  /** Whether `buildCommand` enforces `SpawnSpec.offline`; when false, offline runs are refused. */
+  readonly offline: boolean;
   buildCommand(spec: SpawnSpec): BuiltCommand;
   /** Parses one stdout line. Unknown or malformed lines yield `[]`. */
   parseLine(line: string): RunEvent[];
@@ -63,6 +72,9 @@ export type ToolClient = { call(name: string, input: unknown): Promise<unknown> 
 
 /** In-process agent used by tests / the supervisor's fake mode instead of a CLI subprocess. */
 export type FakeScript = (tools: ToolClient) => Promise<void>;
+
+/** Reason an offline run is refused on a provider whose adapter cannot enforce offline. */
+export const offlineRefusal = (provider: ProviderId) => `provider '${provider}' cannot run offline tasks`;
 
 // ---------------------------------------------------------------------------
 // helpers shared by adapters

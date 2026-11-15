@@ -1,5 +1,6 @@
 import type { PersonaAdjustment } from '../personas/types.js';
-import { PERSONA_FIELDS, type PersonaField } from '../scoring/criteria.js';
+import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, type PersonaField, type StakeholderField } from '../scoring/criteria.js';
+import { OWN_STANCES, RIVAL_STANCES } from '../stakeholders/types.js';
 import type { Persona } from '../types.js';
 
 /** Section heading in agent.md for each persona profile field (spec §8b). */
@@ -111,6 +112,108 @@ export function compileAgentMd(persona: Persona, opts: AgentMdOptions = {}): str
       'Where the profile is silent or low-confidence, say you are unsure rather than making things up.',
     '- When asked to evaluate a recommendation, answer by calling `submit_persona_feedback` exactly once ' +
       '(scores 1–5: appeal, adoption, willingness_to_pay, friction — higher friction = more friction).',
+    '',
+  );
+  return out.join('\n');
+}
+
+/** Section heading in a stakeholder's agent.md for each stakeholder profile field (stakeholder design §5). */
+export const STAKEHOLDER_AGENT_MD_HEADINGS: Record<StakeholderField, string> = {
+  role_mandate: 'Role and mandate',
+  goals_incentives: 'Goals and incentives',
+  decision_criteria: 'Decision criteria',
+  constraints: 'Constraints',
+  risk_tolerance: 'Risk tolerance',
+  dependencies: 'Dependencies (what you and this business need from each other)',
+  known_positions: 'Known positions (past decisions and their reasons)',
+  objections: 'Typical objections',
+  information_needs: 'Information you need to decide',
+  communication_style: 'Communication style (how you talk)',
+  influence: 'Influence',
+};
+
+export type StakeholderMdOptions = {
+  /** Name of the workspace scope (the node) the stakeholder relates to. */
+  scopeName?: string;
+  /** Name of the competitor, for a competitor's stakeholder. */
+  competitorName?: string;
+  adjustments?: AgentMdOptions['adjustments'];
+};
+
+const stances = (xs: readonly string[]) => xs.map((x) => `\`${x}\``).join(', ');
+
+/**
+ * Compiles a stakeholder persona (`kind: 'stakeholder'`) into its agent.md (stakeholder design §6):
+ * frontmatter (`name`, `description`, `version`, `simulated: true`, `kind: stakeholder`,
+ * `stakeholder_type`, `subject`), an opening paragraph (own: "a stakeholder of <scope>: <relation>",
+ * judging as someone who must approve, fund or supply; competitor: "at <competitor>, a rival of
+ * <scope>", judging how they would respond), one section per `STAKEHOLDER_FIELDS` entry, the
+ * corrections section of persona learning, then instructions to answer with `submit_stakeholder_read`.
+ */
+export function compileStakeholderMd(persona: Persona, opts: StakeholderMdOptions = {}): string {
+  const scope = opts.scopeName?.trim() || 'the business';
+  const rival = persona.subjectKind === 'competitor';
+  const competitor = opts.competitorName?.trim() || 'a competitor';
+  const label = persona.segment;
+  const relation = (persona.relation ?? '').replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+  const description = rival
+    ? `Simulated stakeholder persona of ${competitor}, a rival of ${scope}: ${label}`
+    : `Simulated stakeholder persona of ${scope}: ${label}`;
+
+  const out: string[] = [
+    '---',
+    `name: ${yamlScalar(persona.slug)}`,
+    `description: ${yamlScalar(description)}`,
+    `version: ${persona.version}`,
+    'simulated: true',
+    'kind: stakeholder',
+    ...(persona.stakeholderType ? [`stakeholder_type: ${persona.stakeholderType}`] : []),
+    `subject: ${rival ? 'competitor' : 'own'}`,
+    '---',
+    '',
+    `# ${label}`,
+    '',
+    rival
+      ? `You are ${label} at ${competitor}, a rival of ${scope}${relation ? `: ${relation}` : ''}. You judge proposals of ` +
+        `${scope} as someone at ${competitor} who decides how ${competitor} responds to them: ignore them, watch them, ` +
+        'copy them or counter them.'
+      : `You are ${label}, a stakeholder of ${scope}${relation ? `: ${relation}` : ''}. You judge proposals as someone who ` +
+        'must approve, fund or supply them.',
+    '',
+    'You are a simulated stakeholder built from researched evidence. The profile below is who you are; ' +
+      'confidence and evidence notes tell you how sure the research is about each part.',
+  ];
+
+  for (const field of STAKEHOLDER_FIELDS) {
+    const f = persona.profile[field];
+    out.push('', `## ${STAKEHOLDER_AGENT_MD_HEADINGS[field]}`, '');
+    if (!f) {
+      out.push('(unknown — not researched)');
+      continue;
+    }
+    out.push(f.value.trim());
+    const ev = f.evidence.length ? f.evidence.join(', ') : 'none';
+    out.push('', `_Confidence: ${f.confidence} · Evidence: ${ev}_`);
+  }
+
+  out.push(...correctionsSection(opts.adjustments));
+
+  out.push(
+    '',
+    '## Instructions',
+    '',
+    '- Stay in character at all times. Speak in the first person, in the style of your "Communication style" ' +
+      'section. Never say you are an AI or describe the research behind you.',
+    '- Be candid, not agreeable. Judge every proposal against your mandate, goals, decision criteria, constraints and ' +
+      'risk tolerance above; say plainly what you would refuse and why.',
+    '- Where the profile is silent or low-confidence, say you are unsure rather than making things up.',
+    rival
+      ? `- When asked to read a recommendation of ${scope}, answer by calling \`submit_stakeholder_read\` exactly once: ` +
+        `how ${competitor} would respond (stance: ${stances(RIVAL_STANCES)}), what would worry you, your reasoning and ` +
+        'what would change your mind.'
+      : '- When asked to read a recommendation, answer by calling `submit_stakeholder_read` exactly once: your stance ' +
+        `(${stances(OWN_STANCES)}), the conditions you would set, your concerns, your reasoning and what would change ` +
+        'your mind. Say `not_my_call` when the decision is not yours.',
     '',
   );
   return out.join('\n');

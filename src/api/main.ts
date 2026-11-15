@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve, type ServerType } from '@hono/node-server';
 import type { Hono } from 'hono';
-import { loadConfig } from '../core/config/load.js';
+import { configWarnings, loadConfig } from '../core/config/load.js';
 import type { BifConfig } from '../core/config/schema.js';
 import { EventBus } from '../core/events.js';
 import { ArtifactStore } from '../core/evidence/artifacts.js';
@@ -17,6 +17,8 @@ import { flowRankingRunner, flowRoundToolHandlers } from '../core/flows/round.js
 import { flowToolHandlers } from '../core/flows/tools.js';
 import { personaPanelRunner } from '../core/market/panel.js';
 import { marketToolHandlers } from '../core/market/personas.js';
+import { stakeholderToolHandlers } from '../core/stakeholders/personas.js';
+import { submitStakeholderReadHandler } from '../core/stakeholders/reads.js';
 import type { PhaseRunner, ResearchDeps } from '../core/research/deps.js';
 import { resumeInterrupted } from '../core/research/orchestrator.js';
 import { researchToolHandlers } from '../core/research/tools.js';
@@ -128,6 +130,8 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...personaLearningToolHandlers(), // persona learning (retro role)
       ...flowRoundToolHandlers(), // flow ranking: persona verdicts
       ...flowToolHandlers(), // flow records: worker tools
+      ...stakeholderToolHandlers({ dataDir }), // stakeholder personas: save_stakeholder
+      submit_stakeholder_read: submitStakeholderReadHandler, // stakeholder personas: reads in the panel
     },
   });
   const supervisorDeps: SupervisorDeps = {
@@ -189,6 +193,7 @@ export type Booted = {
 export async function boot(opts: BootOptions = {}): Promise<Booted> {
   const runtime = createRuntime(opts);
   for (const w of browserStartupWarnings(runtime.config)) console.warn(`[bif] warning: ${w}`);
+  for (const w of configWarnings(runtime.config)) console.warn(`[bif] warning: ${w}`); // stakeholder personas: offline providers
   const server = await new Promise<ServerType>((ok, fail) => {
     const s = serve({ fetch: runtime.app.fetch, port: runtime.port, hostname: '127.0.0.1' }, () => ok(s));
     s.once('error', fail);

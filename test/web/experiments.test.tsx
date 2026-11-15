@@ -151,6 +151,23 @@ describe('audits & experiments page', () => {
     expect(screen.getAllByText('$0.1000')).toHaveLength(2); // cost and cost per task of arm B
   });
 
+  it('an audit the API marks withheld (own-stakeholder research while a stakeholder is hidden) says so instead of its result', async () => {
+    routes['GET /api/workspaces/ws_1'] = () => ({ id: 'ws_1', name: 'Acme', sector: 'saas' });
+    // As GET /audits serves it (servedAudit): no reason, no issues, `withheld: true`.
+    const withheld = { ...audit('aud_w', 'miss'), taskType: 'own_stakeholders', auditIssues: [], withheld: true };
+    routes['GET /api/workspaces/ws_1/audits'] = () => ({
+      rootWorkspaceId: 'ws_1', summary: { total: 2, agree: 1, miss: 1, invalid: 0, skipped: 0, running: 0, missRate: 0.5 },
+      audits: [withheld, audit('aud_1', 'agree')], schedules: [],
+    });
+    window.location.hash = '#/w/ws_1/experiments';
+    render(<App />);
+    const row = (await screen.findByText('Withheld until you answer the stakeholder questions')).closest('tr')!;
+    expect(row.textContent).toContain('own_stakeholders');
+    expect(row.textContent).not.toMatch(/MISS/);
+    expect(row.className).not.toContain('flag');
+    expect(screen.getAllByText('Withheld until you answer the stakeholder questions')).toHaveLength(1);
+  });
+
   it('R4: picking a browser task states that real-world actions repeat, and asks for a confirm', async () => {
     routes['GET /api/workspaces/ws_1'] = () => ({ id: 'ws_1', name: 'Acme', sector: 'saas' });
     routes['GET /api/workspaces/ws_1/audits'] = () => ({ rootWorkspaceId: 'ws_1', summary: { total: 0, agree: 0, miss: 0, invalid: 0, skipped: 0, running: 0, missRate: null }, audits: [], schedules: [] });

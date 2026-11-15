@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { canRunOffline, NO_OFFLINE_MODEL, offlineModel } from '../harness/offline.js';
 import {
   PROVIDER_IDS,
   bifConfigSchema,
@@ -83,9 +84,28 @@ export function loadConfig(path?: string): BifConfig {
 /**
  * Picks the reviewer model for a worker: the configured reviewer, unless it shares the
  * worker's provider and another enabled provider (with at least one model) exists — then
- * that provider's first model, to reduce shared blind spots.
+ * that provider's first model, to reduce shared blind spots. With `offline` (the review of an
+ * offline task), the pick must be able to run offline: the pick itself, else the configured reviewer,
+ * else another offline-capable model, preferring a provider other than the worker's and never the
+ * worker's own model unless it is the only one; the pick is kept when no provider can (the run is
+ * then refused, as the worker's was).
  */
-export function reviewerFor(worker: ModelRef, cfg: BifConfig): ModelRef {
+export function reviewerFor(worker: ModelRef, cfg: BifConfig, opts: { offline?: boolean } = {}): ModelRef {
+  const reviewer = pickReviewer(worker, cfg);
+  if (!opts.offline) return reviewer;
+  const same = (a: ModelRef | undefined, b: ModelRef) => !!a && a.provider === b.provider && a.model === b.model;
+  // The pick, else the configured reviewer, when it can run offline as it is and is not the worker's own model.
+  for (const m of [reviewer, cfg.roles.reviewer]) {
+    if (same(offlineModel(cfg, m, { exclude: worker }), m)) return m;
+  }
+  return (
+    offlineModel(cfg, undefined, { avoidProvider: worker.provider, exclude: worker }) ??
+    offlineModel(cfg, undefined, { avoidProvider: worker.provider }) ??
+    reviewer
+  );
+}
+
+function pickReviewer(worker: ModelRef, cfg: BifConfig): ModelRef {
   const reviewer = cfg.roles.reviewer;
   if (reviewer.provider !== worker.provider) return reviewer;
   for (const id of PROVIDER_IDS) {
@@ -95,4 +115,17 @@ export function reviewerFor(worker: ModelRef, cfg: BifConfig): ModelRef {
     if (p.enabled && model !== undefined) return { provider: id, model };
   }
   return reviewer;
+}
+
+/**
+ * Problems with a valid config worth printing at startup: stakeholder personas are on but no enabled
+ * provider can run offline, so own-stakeholder research, its reads and its learning never run.
+ */
+export function configWarnings(cfg: BifConfig): string[] {
+  const out: string[] = [];
+  const stakeholders = cfg.stakeholders?.enabled ?? true;
+  if (stakeholders && !PROVIDER_IDS.some((id) => canRunOffline(cfg, id) && cfg.providers[id].models.length > 0)) {
+    out.push(`stakeholders: ${NO_OFFLINE_MODEL}; own-stakeholder research, its reads and its learning are skipped (or set stakeholders.enabled: false)`);
+  }
+  return out;
 }

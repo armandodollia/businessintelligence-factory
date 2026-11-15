@@ -103,6 +103,55 @@ reactions:
 
 No refused call, no failed tool call.
 
+## Stakeholder personas smoke (`feat/stakeholders`, 2026-11-15)
+
+Run three times on 2026-11-15 (once before the final fixes, twice after) with `BIF_SMOKE_TIMEOUT_MS=300000 npm run smoke -- stakeholders claude`
+(macOS, Node 25.8.1; claude 2.1.322). Claude only, on the cheapest model (haiku). Codex and OpenCode
+were not run as workers (Codex refuses offline runs by design).
+
+How to run it: `npm run smoke -- stakeholders [providers]` (default `claude`; the mode runs only when
+named). The script boots the real server and, per provider, seeds a node of a fictional freight
+company with three internal notes (uploads: org notes on the CFO, the billing platform team, board
+minutes), runs one `own_stakeholders` task through the real review loop (worker and reviewer
+offline, no browser), then the phase-end step that creates the question round (`ensureQuestions`).
+Judged from the store and each run's files:
+
+- **S1** every run of the task offline: no tool call in `events.jsonl` outside the harness tools, and
+  for a Claude run the tools its CLI offered (the `system/init` line of `stdout.log`) are all
+  `mcp__bif__*`; a run on a provider that cannot run offline must be refused before it starts;
+- **S2** at least one own stakeholder, all hidden, at most `maxOwn`, each citing the seeded notes;
+- **S3** four open template questions per hidden stakeholder (text = template + label) and the two
+  node questions;
+- **S4** the task's research withheld while the stakeholders are hidden.
+
+| Check | Result | Detail |
+|---|---|---|
+| stakeholders/claude (haiku), run 1 (before the final fixes) | **FAIL** as printed (S1); S2–S4 PASS | 52.5 s, $0.0163; reviewer routed to Codex and refused three times; task `unverified` |
+| stakeholders/claude (haiku), run 2 (after the final fixes, default providers) | **PASS** S1–S4 | 138.4 s, 48 bif tool calls, $0.0378, `promptStoreGaps` `[]`; task `unverified` after 3 rounds |
+| stakeholders/claude (haiku), run 3 (same build, files kept) | **PASS** S1–S4 | 81.5 s, 26 bif tool calls, $0.0212, `promptStoreGaps` `[]`; task `verified` in round 2 |
+| stakeholders/codex, opencode | not run | not attempted |
+
+What happened:
+
+- **Run 1** found the defect the final fixes closed: with every provider enabled the reviewer was
+  moved to Codex, which cannot run offline, so each review was refused before it started and the
+  task ended `unverified`. Its S1 printed FAIL because the check judged the refused Codex runs by the
+  Claude rule.
+- **Runs 2 and 3 (after the fixes).** Providers are enabled as on a default install. Worker and
+  reviewer both ran on claude/haiku, offline: each worker run's CLI offered 28 tools and each
+  reviewer run's 5, all `mcp__bif__*`, with no built-in tool offered or called. No run was refused
+  and every prompt version was stored.
+- **S2:** three hidden own stakeholders, each citing the notes: Chief financial officer (leader),
+  Board of directors (board), Billing platform team (team).
+- **S3:** 14 questions: four per stakeholder, all equal to their template with the label, and the two
+  node questions.
+- **S4:** the task was withheld.
+- **Review outcome differs between the two runs.** In run 2 the haiku reviewer still had open issues
+  after three rounds, so the task and its stakeholders ended `unverified`. In run 3 the reviewer
+  raised two substantive issues in round 1 (a "sole approver" claim and a 5% threshold the notes do
+  not support), the worker fixed them, and the task was `verified` in round 2 with nits left open.
+  Both are the review loop working as built; the difference is the model's variance on haiku.
+
 ## Results (2026-11-12)
 
 | Check | Result | Time | Detail |

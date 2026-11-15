@@ -288,3 +288,46 @@ Unit tests per module; a leak test (no hidden persona content in any response of
 a no-browser test for `own_stakeholders`; end to end (research → hidden → answers → open → retro →
 proposal citing an answer → accept → agent.md); decision record against a read gives the right signal;
 isolation across two trees; a smoke mode `stakeholders` for the real CLIs.
+
+## 19. As built: where the build differs from this design
+
+Reviews during the build found gaps in the sections above. The build follows these rules; where they
+conflict with an earlier section, this one holds.
+
+- **Offline, not only "no browser" (§3, §6, §16).** The agent CLIs have their own web, shell and file
+  tools, so removing the browser was not enough. A run of an `own_stakeholders` task (worker, reviewer,
+  reviewer audit) is `offline`: the Claude CLI is started with no built-in tools, OpenCode with every
+  tool denied except the harness tools, and Codex refuses offline runs. The same applies to a read by
+  an own stakeholder and to a learning run for an own stakeholder persona. Competitor stakeholder work
+  is not offline.
+- **Model choice for offline work.** One helper (`src/core/harness/offline.ts`) picks the model. A
+  configured model whose provider cannot run offline is swapped for one that can; the reviewer is the
+  usual pick or the configured reviewer when it can run offline, else another capable model, and the
+  worker's own model only when it is the only one. When no enabled provider can run offline the task is
+  not planned (reads and learning runs are skipped) with a recorded Decision, and the server prints a
+  warning at startup.
+- **Withheld activity (§7).** While an `own_stakeholders` task is unfinished, or its node has a hidden
+  stakeholder, its runs, run events, task detail, Decisions, requests and review audits are served in a
+  withheld form on every route and on the live event stream (`src/core/stakeholders/withheld.ts`).
+  Hidden content is also kept out of knowledge search results, entity cards, lessons quotes and the
+  opt-in export. A hidden stakeholder cannot be included or excluded.
+- **What own-stakeholder research may do.** It may save only stakeholders, cannot ask the user
+  anything, and is not escalated. `save_stakeholder` is accepted only from the two stakeholder task
+  types. Labels and relations are one line; labels are at most 80 characters. The caps count only
+  stakeholders that are not failed or superseded.
+- **Questions (§8).** A round holds the four template questions for every hidden own stakeholder that
+  is not failed or superseded (verified or not), plus the two node questions. Node questions close with
+  the round. A stakeholder whose questions were all skipped stays hidden until the user opens it.
+- **Interview (§9).** The interviewer sees own stakeholders as id, label and type only, and records
+  what the user says about one with `note_stakeholder` (quote of at least 12 characters).
+- **Switching it off (§13).** `stakeholders.enabled: false` skips the phase and records that. Hidden
+  stakeholders that already exist can still be opened from the page.
+- **Export (§16).** Exclusion reason `internal` covers adjustments and proposals that rest on a
+  statement, every `stakeholder_*` feedback event, and every Decision of an `own_stakeholders` task
+  with the feedback that targets it.
+- **Reads (§10).** A reaction to a read that was later replaced is not shown on the new read. A recorded
+  decision is compared with the persona's current read of that recommendation.
+- **Known gaps.** An `own_stakeholders` task left unfinished with nothing to finish it stays withheld
+  (it fails safe). An experiment arm on a Codex model for such a task is refused when it runs. Agents
+  with shell access on the machine can read files under the data directory, as was already true for
+  uploads.

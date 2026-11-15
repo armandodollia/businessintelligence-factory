@@ -63,6 +63,11 @@ const EXCLUDED: Record<string, string> = {
   persona_learning_accept: 'persona learning proposal decision; covered in test/api/personaLearningRoutes.test.ts (persona learning task 5)',
   persona_learning_reject: 'persona learning proposal decision; covered in test/api/personaLearningRoutes.test.ts (persona learning task 5)',
   persona_adjustment_retire: 'persona adjustment retirement; covered in test/api/personaLearningRoutes.test.ts (persona learning task 5)',
+  stakeholder_answers: 'stakeholder question round; covered in test/core/stakeholders/questions.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 3)',
+  stakeholder_reveal: 'stakeholder reveal; covered in test/core/stakeholders/questions.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 3)',
+  stakeholder_note: 'stakeholder note; covered in test/core/stakeholders/statements.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 3)',
+  stakeholder_decision_record: 'stakeholder decision record; covered in test/core/stakeholders/statements.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 3)',
+  stakeholder_read_reaction: 'stakeholder read reaction; covered in test/core/stakeholders/reads.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 4)',
 };
 
 describe('human knowledge actions write feedback events with the configured actor (KS-6)', () => {

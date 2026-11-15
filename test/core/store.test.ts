@@ -233,7 +233,7 @@ describe('store', () => {
     expect(store.ratings.get(rating.id)).toEqual(rating);
     expect(store.ratings.get(ratingNull.id)).toEqual(ratingNull);
     expect(store.recommendations.get(recommendation.id)).toEqual(recommendation);
-    expect(store.personas.get(persona.id)).toEqual({ ...persona, audience: 'external' });
+    expect(store.personas.get(persona.id)).toEqual({ ...persona, audience: 'external', kind: 'segment', disclosure: 'open' });
     expect(store.symptoms.get(symptom.id)).toEqual(symptom);
     expect(store.schedules.get(schedule.id)).toEqual(schedule);
     expect(store.interview.get(turn.id)).toEqual(turn);

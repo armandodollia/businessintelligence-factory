@@ -24,6 +24,7 @@ import type { ResearchDeps } from '../core/research/deps.js';
 import type { Store } from '../core/store/db.js';
 import type { Workspace } from '../core/types.js';
 import { rootOf } from '../core/workspace/tree.js';
+import { withholding } from '../core/stakeholders/withheld.js';
 
 export type WpfRouteDeps = { store: Store; config: BifConfig; research: ResearchDeps };
 
@@ -82,7 +83,8 @@ export function mountWpfRoutes(app: Hono, deps: WpfRouteDeps, workspace: (id: st
   app.get('/api/workspaces/:id/audits', (c) => {
     const root = rootOf(store, workspace(c.req.param('id')).id);
     const audits = listAudits(store, { rootWorkspaceId: root });
-    return c.json({ rootWorkspaceId: root, summary: auditSummary(audits), audits: [...audits].reverse(), schedules: listAuditSchedules(store, root) });
+    const w = withholding(store); // stakeholder design §7: audits of withheld research lose their issues
+    return c.json({ rootWorkspaceId: root, summary: auditSummary(audits), audits: [...audits].reverse().map((a) => w.servedAudit(a)), schedules: listAuditSchedules(store, root) });
   });
 
   /** Starts an audit of the N most recently verified tasks of the tree (or `taskIds`); runs in the background. */
@@ -106,7 +108,8 @@ export function mountWpfRoutes(app: Hono, deps: WpfRouteDeps, workspace: (id: st
   app.get('/api/workspaces/:id/audit-misses', (c) => {
     const root = rootOf(store, workspace(c.req.param('id')).id);
     const since = c.req.query('since');
-    return c.json(auditMisses(store, { rootWorkspaceId: root, ...(since ? { since } : {}) }));
+    const w = withholding(store);
+    return c.json(auditMisses(store, { rootWorkspaceId: root, ...(since ? { since } : {}) }).map((a) => w.servedAuditMiss(a)));
   });
 
   app.post('/api/workspaces/:id/audit-schedules', async (c) => {
@@ -136,7 +139,16 @@ export function mountWpfRoutes(app: Hono, deps: WpfRouteDeps, workspace: (id: st
   });
 
   // --- experiments -------------------------------------------------------------------------------
-  app.get('/api/workspaces/:id/experiments', (c) => c.json(listExperiments(store, workspace(c.req.param('id')).id)));
+  app.get('/api/workspaces/:id/experiments', (c) => {
+    const w = withholding(store); // stakeholder design §7: an experiment on withheld research loses its failure text
+    return c.json(
+      listExperiments(store, workspace(c.req.param('id')).id).map((x) => {
+        if (!w.task(store.tasks.get(x.sourceTaskId))) return x;
+        const { failureReason: _reason, ...rest } = x;
+        return rest;
+      }),
+    );
+  });
 
   /** Starts an A/B experiment on a finished task of this workspace; runs in the background. */
   app.post('/api/workspaces/:id/experiments', async (c) => {
@@ -165,6 +177,17 @@ export function mountWpfRoutes(app: Hono, deps: WpfRouteDeps, workspace: (id: st
   /** An experiment with its per-arm comparison. */
   app.get('/api/experiments/:id', (c) => {
     const cmp = compareExperiment(store, c.req.param('id'));
-    return cmp ? c.json(cmp) : c.json({ error: `experiment '${c.req.param('id')}' not found` }, 404);
+    if (!cmp) return c.json({ error: `experiment '${c.req.param('id')}' not found` }, 404);
+    // Stakeholder design §7: arm tasks of withheld research lose their failure text.
+    const w = withholding(store);
+    const plain = <T extends { failureReason?: string }>(x: T, withheld: boolean): T => {
+      if (!withheld) return x;
+      const { failureReason: _reason, ...rest } = x;
+      return rest as T;
+    };
+    return c.json({
+      experiment: plain(cmp.experiment, w.task(store.tasks.get(cmp.experiment.sourceTaskId))),
+      arms: cmp.arms.map((a) => ({ ...a, tasks: a.tasks.map((t) => plain(t, w.task(store.tasks.get(t.taskId)))) })),
+    });
   });
 }

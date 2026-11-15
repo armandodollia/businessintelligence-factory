@@ -16,6 +16,14 @@ import {
 
 export const OPENCODE_CONFIG_FILE = '.bif-opencode.json';
 
+/**
+ * Permission of offline runs: every tool denied except the harness MCP tools (`bif_*`). OpenCode
+ * merges the config's `permission` last into every agent's rules (subagents included) and drops a tool
+ * whose last matching rule is `deny` for pattern `*`, so web fetch, web search, code search, shell and
+ * subagents are not offered at all.
+ */
+export const OPENCODE_OFFLINE_PERMISSION = { '*': 'deny', 'bif_*': 'allow' } as const;
+
 /** OpenCode's MCP request timeout defaults to 5 s and also bounds tool calls. */
 const BIF_TIMEOUT_MS = 86_400_000;
 
@@ -62,9 +70,13 @@ function toOpenCodeMcp(server: unknown): unknown {
  *   `step_start` | `step_finish` | `reasoning` | `error`. There is no terminal event: the CLI
  *   exits when the session goes idle, and it exits 0 even after an `error` — so `error` maps to
  *   error + done(1). Permission prompts are auto-rejected in `run` mode.
+ * - Offline runs (`spec.offline`): `permission: OPENCODE_OFFLINE_PERMISSION` in the generated config
+ *   (rule order and merge checked in the 1.2.27 bundle: `PermissionNext.fromConfig`, `disabled`,
+ *   agent rules = defaults, agent rules, then the config's rules).
  */
 export class OpenCodeAdapter implements CliAdapter {
   readonly id = 'opencode' as const;
+  readonly offline = true;
   private failed = false;
 
   constructor(private readonly command = 'opencode') {}
@@ -74,7 +86,11 @@ export class OpenCodeAdapter implements CliAdapter {
       bif: { type: 'remote', url: spec.mcpUrl, enabled: true, oauth: false, timeout: BIF_TIMEOUT_MS },
     };
     for (const [name, server] of Object.entries(spec.extraMcpServers)) mcp[name] = toOpenCodeMcp(server);
-    const config = { $schema: 'https://opencode.ai/config.json', mcp };
+    const config = {
+      $schema: 'https://opencode.ai/config.json',
+      mcp,
+      ...(spec.offline ? { permission: OPENCODE_OFFLINE_PERMISSION } : {}),
+    };
     const path = join(spec.cwd, OPENCODE_CONFIG_FILE);
     const env: Record<string, string> = { OPENCODE_CONFIG: path, OPENCODE_DISABLE_PROJECT_CONFIG: '1' };
     if (spec.stateDir) env.XDG_CONFIG_HOME = join(spec.stateDir, 'opencode-config');

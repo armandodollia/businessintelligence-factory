@@ -51,6 +51,12 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   persona_learning_accept: 'persona proposal accepted',
   persona_learning_reject: 'persona proposal rejected',
   persona_adjustment_retire: 'persona adjustment retired',
+  // stakeholder personas
+  stakeholder_answers: 'stakeholder questions answered',
+  stakeholder_reveal: 'stakeholder opened',
+  stakeholder_note: 'stakeholder note added',
+  stakeholder_decision_record: 'real decision recorded',
+  stakeholder_read_reaction: 'stakeholder read reaction',
 };
 
 const short = (v: unknown, max = 80): string => {

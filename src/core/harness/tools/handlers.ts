@@ -12,6 +12,7 @@ import type { RunContext } from '../tokens.js';
 import { browserConfigured } from '../browser.js';
 import { isAllowedRunFile } from '../paths.js';
 import { taskOutputEvidence } from '../../research/outputs.js';
+import { taskNeedsBrowser, taskToolRefusal } from '../../research/phases.js'; // stakeholder personas
 import { findReplay } from './idempotency.js';
 // Knowledge store KS-1: captures, captions, entity / applies_to, extraction, describe_artifact.
 import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave, linkArtifactCapture } from '../../knowledge/artifactTools.js';
@@ -45,8 +46,9 @@ export type ToolCallOptions = { signal?: AbortSignal };
 
 /**
  * Handler for a tool implemented outside this section. Receives the zod-validated input
- * (`ToolInput<name>`). For `propose_tasks` / `submit_persona_feedback` / `submit_flow_verdicts` the
- * dispatcher records the Decision row (kind `task_proposal` / `persona_feedback` / `flow_verdicts`)
+ * (`ToolInput<name>`). For `propose_tasks` / `submit_persona_feedback` / `submit_flow_verdicts` /
+ * `submit_stakeholder_read` the dispatcher records the Decision row (kind `task_proposal` /
+ * `persona_feedback` / `flow_verdicts` / `persona_feedback`)
  * after a successful call — extra handlers must not insert it themselves.
  */
 export type ExtraToolHandler = (
@@ -89,6 +91,8 @@ const EXTRA_DECISION_KIND: Partial<Record<ToolName, Decision['kind']>> = {
   propose_tasks: 'task_proposal',
   submit_persona_feedback: 'persona_feedback',
   submit_flow_verdicts: 'flow_verdicts',
+  // Stakeholder personas: a stakeholder read is recorded like persona feedback (stamped by `runStakeholderReads`).
+  submit_stakeholder_read: 'persona_feedback',
 };
 
 const fail = (error: string): ToolResult => ({ ok: false, error });
@@ -496,6 +500,11 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     if (!ROLE_TOOLS[ctx.role].includes(name)) {
       return announce(fail(`tool '${name}' is not available to role '${ctx.role}'`));
     }
+    // Stakeholder personas (design §7, task 6 fix round 2): a run of a private task (own stakeholder
+    // research) cannot ask the user anything and may store only stakeholders.
+    const privateTask = taskOf(ctx);
+    const refusal = privateTask ? taskToolRefusal(privateTask.type, ctx.role, name) : '';
+    if (refusal) return announce(fail(refusal));
     const parsed = toolInputSchemas[name].safeParse(input ?? {});
     if (!parsed.success) return announce(fail(`invalid input for ${name}: ${formatZodError(parsed.error)}`));
 
@@ -516,8 +525,9 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       const extra = deps.extraHandlers?.[name];
       if (!extra) return announce(fail(`tool '${name}' is not available yet in this build`));
       if (name === 'propose_tasks' && !browserConfigured(deps.config)) {
-        const tasks = (parsed.data as { tasks: Array<{ needs_browser?: boolean }> }).tasks;
-        const idx = tasks.flatMap((t, i) => (t.needs_browser ? [i] : []));
+        const tasks = (parsed.data as ToolInput<'propose_tasks'>).tasks;
+        // Stakeholder personas: a task type that never gets a browser is not refused for asking for one.
+        const idx = tasks.flatMap((t, i) => (taskNeedsBrowser(t.type, t.needs_browser) ? [i] : []));
         if (idx.length) {
           return announce(
             fail(

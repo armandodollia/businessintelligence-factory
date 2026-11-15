@@ -55,6 +55,7 @@ import type { Store } from '../core/store/db.js';
 import { knowledgeRepos } from '../core/store/repos.js';
 import type { Workspace } from '../core/types.js';
 import { rootOf } from '../core/workspace/tree.js';
+import { isHidden } from '../core/stakeholders/personas.js';
 
 export type FlowRouteDeps = { store: Store; config: BifConfig; artifacts: ArtifactStore };
 
@@ -145,7 +146,10 @@ export function mountFlowRoutes(app: Hono, deps: FlowRouteDeps, workspace: (id: 
   };
   const personaOf = (id: string) => {
     const p = store.personas.get(id);
-    return p ? { id: p.id, slug: p.slug, segment: p.segment, version: p.version } : { id };
+    if (!p) return { id };
+    // A hidden stakeholder (stakeholder design §7): id, label and type only.
+    if (isHidden(p)) return { id: p.id, label: p.segment, stakeholderType: p.stakeholderType ?? 'other', disclosure: 'hidden' as const };
+    return { id: p.id, slug: p.slug, segment: p.segment, version: p.version };
   };
   const servedVerdict = (v: FlowVerdict) => ({ ...v, simulated: true as const, persona: personaOf(v.personaId) });
   /** "Subject — variant" of a stored flow id; when the row is gone, of the current flow of the lineage that id started. */

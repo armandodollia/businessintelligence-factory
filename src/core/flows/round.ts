@@ -42,6 +42,7 @@ import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type
 import { isOutputUsable } from '../research/outputs.js';
 import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
+import { segmentPersonas } from '../stakeholders/personas.js';
 import type { ModelRef, Persona, RetrievalResultRef } from '../types.js';
 import { rootOf } from '../workspace/tree.js';
 import { activeChecklists, flowTypeByKey, listFlowTypes } from './catalog.js';
@@ -412,7 +413,8 @@ export async function runFlowRanking(workspaceId: string, deps: ResearchDeps): P
   // Rulings whose flows have a new version since: still applied, but the user is asked again.
   refreshOverrides(store, workspaceId);
 
-  const personas = store.personas.list({ workspaceId }).filter(isOutputUsable);
+  // Audience segments only (stakeholder design §5).
+  const personas = segmentPersonas(store, workspaceId).filter(isOutputUsable);
   const usable = new Set(personas.map((p) => p.id));
   const model = settings.model ?? config.roles.persona;
   const scope = calibrationScope(store, config, workspaceId);

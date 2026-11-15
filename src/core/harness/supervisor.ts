@@ -13,7 +13,7 @@ import { recordUsage, resolveRunScope } from '../metrics/usage.js';
 import { recordRunPrompt } from '../prompts/store.js';
 import { usageRepos } from '../store/usageRepos.js';
 import { enforceBudget } from './budget.js';
-import { isRateLimitText, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
+import { isRateLimitText, offlineRefusal, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
 import { browserServersFor, effectiveMaxBrowserRuns, SharedBrowser } from './browser.js';
 import { runCwdOf, runDirOf } from './paths.js';
@@ -53,6 +53,12 @@ export type RunOptions = {
   prompt: string;
   systemPrompt: string;
   needsBrowser: boolean;
+  /**
+   * Stakeholder personas (design §6, §16): the agent must not reach the web. Passed to the adapter
+   * (`SpawnSpec.offline`), which denies the CLI's web and shell tools; a provider whose adapter cannot
+   * enforce it fails the run before start. Offline runs get no extra MCP servers.
+   */
+  offline?: boolean;
   /** Run in-process with this script instead of spawning the provider CLI. */
   fake?: FakeScript;
   /**
@@ -218,6 +224,9 @@ export class Supervisor {
     const dataDir = this.dataDir;
     const runDir = runDirOf(dataDir, ctx.workspaceId, ctx.agentRunId);
     const cwd = runCwdOf(dataDir, ctx.workspaceId, ctx.agentRunId);
+    // Stakeholder personas: an offline run never starts on a provider that cannot enforce it (the
+    // throw fails the run with this reason, see `execute`).
+    if (opts.offline && !opts.fake && !getAdapter(ctx.model.provider).offline) throw new Error(offlineRefusal(ctx.model.provider));
     mkdirSync(cwd, { recursive: true });
     const eventsPath = join(runDir, 'events.jsonl');
     writeFileSync(eventsPath, '');
@@ -453,9 +462,10 @@ export class Supervisor {
       model: ctx.model.model,
       mcpUrl: `${base}/mcp/${token}`,
       mcpBearer: { url: `${base}/mcp`, token },
-      extraMcpServers: opts.needsBrowser ? await browserServersFor(config, this.browser) : {},
+      extraMcpServers: opts.needsBrowser && !opts.offline ? await browserServersFor(config, this.browser) : {},
       cwd,
       stateDir: join(this.dataDir, 'cli-state'),
+      ...(opts.offline ? { offline: true } : {}),
     };
     const built = adapter.buildCommand(spec);
     for (const f of built.files) {

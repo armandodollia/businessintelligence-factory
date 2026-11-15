@@ -154,7 +154,7 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   model, customers, what is going well, what is going badly) and records symptoms with
   severity/trend/confidence. Uploads (CSV, PDFs, decks) are optional evidence.
 - **Phases.** `mapping` (optional) → `market_research` → `competitor_discovery` → `deep_dives` →
-  `flow_ranking` → `synthesis` → `persona_panel` → `scoring`. Each research phase is a fresh orchestrator run that
+  `stakeholders` → `flow_ranking` → `synthesis` → `persona_panel` → `scoring`. Each research phase is a fresh orchestrator run that
   proposes tasks; the program validates them against the config limits and runs the workers. A task
   without a `model` uses the configured default for its type (`roles.workers.<type>`, else
   `roles.workers.default`; recommendation synthesis uses `roles.synthesizer`); explicit overrides are
@@ -372,8 +372,8 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
     `/api/workspaces/:id/flows` (`types`, `rankings/:flowTypeId`, `checklists`, `compare`, `:flowId`,
     and the reaction, override, decision and `checklists/:checklistId/edit` routes).
   - *Not built yet.* Personas change only through persona learning in the weekly retro (below), never
-    at the moment you react; there are no stakeholder personas, and only web flows are walked, not
-    mobile apps.
+    at the moment you react; stakeholder personas (below) do not judge flows, and only web flows are
+    walked, not mobile apps.
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.
@@ -527,6 +527,109 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   - API: `GET /api/workspaces/:id/persona-learning`, `GET …/personas/:personaId/signals`,
     `POST …/persona-proposals/:proposalId/accept` (`{text?, reason?}`), `POST …/persona-proposals/:proposalId/reject`
     and `POST …/persona-adjustments/:adjustmentId/retire` (`{reason?}`).
+- **Stakeholder personas.** A proposal only matters if the people and systems it depends on say yes.
+  For each node BIF keeps simulated personas of its stakeholders, learns them from what you say, and
+  shows how each would read a recommendation.
+  - *Who counts.* Everyone whose approval, decision or data the node depends on: the people who run
+    the company (leaders, managers), investors, the board and other owners, regulators and partners,
+    and, lower in the tree, the team or system above and sister teams and systems (types `leader`,
+    `manager`, `investor`, `board`, `owner`, `team`, `system`, `regulator`, `partner`, `other`). They
+    are built for your own node (*own*) and for the most important competitors (*competitor*: leaders,
+    owners, investors, parent company). A stakeholder is a persona of kind `stakeholder` with a label
+    (a role, team or system; a person's name only when it is in public evidence), a relation ("approves
+    pricing changes") and eleven profile fields (`role_mandate`, `goals_incentives`,
+    `decision_criteria`, `constraints`, `risk_tolerance`, `dependencies`, `known_positions`,
+    `objections`, `information_needs`, `communication_style`, `influence`), each with a value, a
+    confidence and evidence. Segment personas are unaffected: the persona panel, flow verdicts, the
+    Personas page and persona ratings read segment personas only.
+  - *How they are built.* The `stakeholders` phase (after `deep_dives`; existing schedules gained it)
+    plans two task types, both saving with `save_stakeholder` (at most `maxOwn` own, `maxPerCompetitor`
+    per competitor, counting those not failed or superseded), with review and status as for personas.
+    Only runs of these two task types may save a stakeholder; a label is one line of at most 80
+    characters (newlines and tabs become spaces, as in the relation). `competitor_stakeholders` uses the
+    browser, public sources only, and never searches for a person not named in public evidence; it is
+    planned only when the tree has competitors. `own_stakeholders` works from what the store already
+    holds (captured public pages, internal uploads, the interview, the business tree: parent and
+    sibling nodes are offered as `team` or `system` stakeholders, and your statements not yet tied to
+    a stakeholder) and runs **offline**, enforced in code whatever the planner asked: no browser; a
+    Claude run gets no built-in tools at all (`--tools ""`, only the harness tools), an OpenCode run a
+    deny-all permission config except the harness tools, and Codex refuses such runs (it cannot shut
+    its built-in web access off with certainty). Its reviewer and audit runs are offline too. Offline
+    work always goes to a provider that can run offline: a Codex worker model (override or
+    `roles.workers`) is swapped for a Claude or OpenCode model, and the reviewer and the reviewer audit
+    are picked among those providers (another provider than the worker's when one can, else the same
+    one); when no enabled provider can run offline, no `own_stakeholders` task is created and a harness
+    decision records why (the server also warns at startup).
+    These runs may save only stakeholders (plus finish, answer review and read), cannot ask you
+    anything and are never escalated. The company audit and filings prompts also capture public
+    leadership, ownership and investor pages as artifacts (they do not save stakeholders). Each stakeholder gets an agent.md ("You are <label>, a
+    stakeholder of <scope>…"; for a competitor's, "…at <competitor>, a rival of <scope>").
+  - *Hidden until you answer: the question round.* A first save of an own stakeholder is **hidden**.
+    When the `stakeholders` phase ends, every hidden own stakeholder that is not superseded or failed
+    and has no questions yet gets four questions from fixed templates filled with its label only (one
+    set for people, one for teams and systems), plus two for the node ("Is anyone missing…", "Is
+    anyone on this list not relevant…"). No model writes or picks a question, so a question cannot
+    reveal what research found. Answers come first so that they are your own, not an echo of the
+    research. While a stakeholder is hidden, every API response shows only its id, label, type and
+    number of open questions: never its profile, relation, evidence, agent.md, adjustments, proposals,
+    signals or reads; it gives no reads and is skipped by learning. While own-stakeholder research
+    runs, and while its node has any hidden stakeholder, the raw activity of that research (run events,
+    prompts, result summaries, review decisions, evidence refs, lessons quotes, audit issues) is
+    withheld from every API response and the live event stream, and shown again once the task has
+    finished and none is hidden; the pages say "Withheld until you answer the
+    stakeholder questions", and the decision log shows only the save's label, type and confidences. On
+    the **Stakeholders** page you answer (every answer optional, at most 4,000 characters, redacted),
+    skip one stakeholder, skip all, or press "Show what the tool found" (a skip). A stakeholder you
+    answered or skipped opens for good; one you left blank stays hidden and in the round. The node
+    questions close with the round. Later stakeholders get a new round the same way. With
+    `stakeholders.enabled: false` the `stakeholders` phase is skipped (no tasks, no round; a harness
+    decision `phase_skipped` records it), no reads run, and the page shows no round: hidden
+    stakeholders found earlier are listed with only "Show what the tool found", so none stays hidden.
+  - *Statements.* Everything you say about a stakeholder is an append-only, internal statement:
+    question answers, notes ("Add a note" on a card), real decisions ("Record the real decision" on a
+    recommendation: stakeholder, `approved` / `approved_with_conditions` / `rejected` / `deferred`, and
+    your reasoning) and what the interviewer records with `note_stakeholder` when you mention a
+    stakeholder (it sees the node's stakeholders as id, label and type only; the quote, at least 12
+    characters, must be text you typed in the interview). Storing a statement changes no persona.
+  - *Reads.* In the `persona_panel` phase, after the segment personas, each open, usable stakeholder
+    reads each usable recommendation of its node (own stakeholders first, at most `maxReadsPerPanel`
+    runs): an own stakeholder answers `approve`, `approve_with_conditions`, `reject` or `not_my_call`,
+    a competitor's `ignore`, `watch`, `copy` or `counter`, with conditions, concerns, reasoning and what
+    would change its mind. Reads are shown on the recommendation, labelled simulated, and never change
+    its priority; a new read replaces the stakeholder's earlier one. You can agree or disagree with a
+    read, with a reason; the page shows your latest reaction after a reload and you can change it.
+    An own stakeholder's read runs offline (its agent.md is internal) on the persona model, or on a
+    model that can run offline when that one cannot; with none, its reads are skipped and a harness
+    decision says why. A competitor's stakeholder reads as before.
+  - *What the retro does.* Only the weekly retro changes a stakeholder, through persona learning
+    (above). A stakeholder goes to a learning run when the gate qualifies or it has a statement no run
+    has consumed; the run is shown its open statements (fenced, with ids) besides its reactions:
+    your reactions to its reads and your recorded decisions compared with its read of the same
+    recommendation (approved against approve agrees, rejected against reject agrees, anything else
+    disagrees; `deferred` and `not_my_call` give no signal). A proposal citing a statement needs no
+    further evidence; one resting only on reactions keeps the usual rule. A finished run consumes the
+    statements it was shown. You accept or reject each proposal as for segment personas; an accept
+    makes a new persona version whose agent.md carries the correction. The learning run of an own
+    stakeholder is offline, on the learning model or one that can run offline (skipped, with a harness
+    decision, when none can).
+  - *Export.* An adjustment that rests on a statement is internal. Internal proposals, adjustments and
+    their decisions, every decision of an `own_stakeholders` task (worker, reviewer, harness) and
+    feedback on it, and all stakeholder statements, questions, reads and stakeholder feedback events
+    stay out of the default training export (exclusion reason `internal`); `?includeUploads=1`
+    includes them.
+  - *Isolation.* Stakeholders, questions, statements and reads are keyed by business tree; an id of
+    another tree answers 404. Hiding applies to what BIF serves: an agent with shell access on the
+    machine can read files under the data directory (agent.md files, run logs), as was already true
+    for uploads.
+  - *Settings* (`stakeholders`, all optional): `enabled` (true), `maxOwn` (8), `maxCompetitors` (3),
+    `maxPerCompetitor` (3), `maxReadsPerPanel` (40).
+  - API (under `/api/workspaces/:id`): `GET …/stakeholders`, `GET …/stakeholder-questions`,
+    `POST …/stakeholder-questions/answers` (`{answers: [{questionId, text}], skip?: [personaId], skipAll?}`),
+    `POST …/stakeholders/:personaId/reveal`, `POST …/stakeholders/:personaId/notes` (`{text, field?}`),
+    `GET …/stakeholders/:personaId/statements`, `POST …/recommendations/:recId/stakeholder-decisions`
+    (`{personaId, decision, reasoning}`), `GET …/recommendations/:recId/stakeholder-reads` and
+    `POST …/stakeholder-reads/:readId/reaction` (`{reaction, reason?}`). The persona learning routes
+    serve open stakeholders too, never hidden ones.
 - **Reviewer audits and experiments (learning loop WP-F).** *Audits:* a different model (another
   enabled provider than the original reviewer when there is one; `audit.model` in config overrides)
   re-reviews the N most recently verified tasks of one business tree that were not audited yet, with
@@ -602,6 +705,11 @@ of that business tree — another company's prompts never see them. Nothing is w
   reactions (five disagree) to a seeded persona's verdicts, then the real retro with that provider as
   the learning model; it checks one `submit_persona_learning` call and the stored run and proposals,
   and that the persona did not change.
+- the **stakeholder personas smoke** (`stakeholders`, default claude, only when named): a node with
+  three internal notes, one `own_stakeholders` task through the real review loop (offline) and the
+  phase-end question round; it checks that no run of the task offered or called a built-in tool, that
+  at least one hidden own stakeholder cites the notes, that each has its four template questions (and
+  the node its two), and that the task's research is withheld.
 
 It then does an interview round-trip over HTTP with the claude CLI as interviewer.
 
@@ -622,7 +730,7 @@ Each step is judged from the store and the run's tool calls. The check covers:
 - a replay of the paged reads, which checks that every passage was served whole;
 - tokens and cost from `agent_usage`.
 
-Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning` or `interview`, optionally followed by providers
+Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning`, `stakeholders` or `interview`, optionally followed by providers
 (`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
 and `BIF_SMOKE_OPENCODE_MODEL`, the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
 smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).
@@ -636,6 +744,9 @@ smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md
   the idle watchdog ends the run (default 10 minutes), the run is marked failed (not rate-limit
   retried) and the task's one retry applies. Rate-limit text that OpenCode does print on stderr is
   detected, but it does not shorten the hang. Lower `idleTimeoutMs` if you use OpenCode's free tier.
+- **Own-stakeholder work needs a provider that can run offline.** Codex refuses offline runs, so
+  own-stakeholder research, reviews, audits, reads and learning go to Claude or OpenCode; with neither
+  enabled they are skipped and a harness decision records why (see Stakeholder personas).
 - **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth.
 - **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
   overrides are runtime-only and are not written into `bif.config.json` when you save settings.)

@@ -10,6 +10,10 @@ import { evidenceOf as recordEvidenceOf, itemIsUploadDerived } from '../knowledg
 import { runIsUploadExposed } from '../knowledge/retrievalLog.js'; // KS-6
 import { knowledgeRepos } from '../store/repos.js'; // KS-6
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
+import { personaLearningRepos } from '../personas/store.js';
+import { isHidden } from '../stakeholders/personas.js';
+import { withholding } from '../stakeholders/withheld.js';
+import { stakeholderRepos } from '../stakeholders/store.js';
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId', 'flowId'] as const;
@@ -46,6 +50,67 @@ function outputOf(store: Store, id: string): { status?: string | undefined } | u
 function isPersonaLearningRecord(d: Decision): boolean {
   const tool = (d.payload as { tool?: unknown } | null)?.tool;
   return tool === 'persona_learning' || tool === 'submit_persona_learning';
+}
+
+/**
+ * Internal stakeholder records (stakeholder design §9, §11): the user's statements and what rests on
+ * them follow the export rule for upload-derived text (left out unless `includeUploads`). Decisions:
+ * every Decision of an `own_stakeholders` task (`isOwnResearch`), `note_stakeholder` (a statement),
+ * `submit_stakeholder_read` (a read), the `submit_persona_learning`
+ * of a run that was shown statements, and the user's `persona_learning` decision on an internal
+ * proposal or adjustment.
+ */
+function isInternalRecord(store: Store, d: Decision): boolean {
+  const p = (d.payload ?? {}) as { tool?: unknown; runId?: unknown; proposalId?: unknown; adjustmentId?: unknown };
+  if (p.tool === 'note_stakeholder' || p.tool === 'submit_stakeholder_read') return true;
+  if (isOwnResearch(store, d)) return true;
+  const repos = personaLearningRepos(store);
+  if (p.tool === 'submit_persona_learning') return typeof p.runId === 'string' && (repos.runs.get(p.runId)?.shownStatementIds.length ?? 0) > 0;
+  if (p.tool === 'persona_learning') {
+    return (
+      (typeof p.proposalId === 'string' && repos.proposals.get(p.proposalId)?.internal === true) ||
+      (typeof p.adjustmentId === 'string' && repos.adjustments.get(p.adjustmentId)?.internal === true)
+    );
+  }
+  return false;
+}
+
+const OWN_RESEARCH = 'own_stakeholders';
+
+/** Whether the agent run belongs to an `own_stakeholders` task. */
+function isOwnResearchRun(store: Store, agentRunId: string | undefined): boolean {
+  const run = agentRunId ? store.agentRuns.get(agentRunId) : undefined;
+  if (!run) return false;
+  const task = run.taskId ? store.tasks.get(run.taskId) : undefined;
+  return (task?.type ?? run.taskType) === OWN_RESEARCH;
+}
+
+/**
+ * Own-stakeholder research (final review item 6): every Decision of an `own_stakeholders` task — its
+ * worker, reviewer and audit runs, and the harness Decisions about it (on its runs, or naming the task).
+ */
+function isOwnResearch(store: Store, d: Decision): boolean {
+  if (isOwnResearchRun(store, d.agentRunId)) return true;
+  if ((d.payload as { tool?: unknown } | null)?.tool !== 'harness') return false;
+  return d.refs.some((id) => id.startsWith('tsk_') && store.tasks.get(id)?.type === OWN_RESEARCH);
+}
+
+/**
+ * Feedback events that are internal (stakeholder design §9, §11): every stakeholder action, decisions on
+ * internal proposals and adjustments, and feedback on own-stakeholder research (a target produced by
+ * one of its runs, one of its Decisions, or the task itself).
+ */
+function isInternalFeedback(store: Store, e: FeedbackEvent): boolean {
+  if (e.kind.startsWith('stakeholder_')) return true;
+  if (isOwnResearchRun(store, e.agentRunId)) return true;
+  if (e.targetId.startsWith('dec_')) {
+    const d = store.decisions.get(e.targetId);
+    if (d && isOwnResearch(store, d)) return true;
+  }
+  if (e.targetId.startsWith('tsk_') && store.tasks.get(e.targetId)?.type === OWN_RESEARCH) return true;
+  if (e.targetType === 'persona_proposal') return personaLearningRepos(store).proposals.get(e.targetId)?.internal === true;
+  if (e.targetType === 'persona_adjustment') return personaLearningRepos(store).adjustments.get(e.targetId)?.internal === true;
+  return false;
 }
 
 /**
@@ -181,6 +246,8 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  * persona verdicts and the round's own records) are never exported. Decisions whose primary subject was
  * superseded (replaced in a later review round) are excluded. Reuse records (`isReuseRecord`) are
  * neither judgments nor lines: they only feed provenance filtering (via the task's decisions).
+ * Internal stakeholder records (`isInternalRecord`, `isInternalFeedback`, `stakeholderLines`) are
+ * excluded unless `includeUploads`, like upload-derived ones.
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   return exportTrainingDataWithSummary(workspaceId, deps, includeUploads).jsonl;
@@ -198,7 +265,9 @@ export function exportTrainingDataWithSummary(
 ): { jsonl: string; summary: ExportSummary } {
   const { store } = deps;
   const ratings = store.ratings.list({ workspaceId });
-  const decisions = store.decisions.list({ workspaceId });
+  // Stakeholder design §7: withheld own-stakeholder research is exported as served (payload withheld).
+  const w = withholding(store);
+  const decisions = store.decisions.list({ workspaceId }).map((d) => w.servedDecision(d));
   // KS-2: + materialized / resolved flags; KS-6: + upload-exposed runs and what they produced.
   const uploads = includeUploads ? undefined : exportExclusion(store);
   const tally = new ExclusionTally(includeUploads);
@@ -224,8 +293,11 @@ export function exportTrainingDataWithSummary(
   const lines: string[] = [];
   for (const decision of decisions) {
     if (isReuseRecord(decision) || isFlowRankingRecord(decision)) continue;
-    // Upload provenance (WP-A, KS-2) and upload exposure (KS-6), with the cause counted (§12 ruling).
-    const cause = uploads ? judgmentCause(store, decision, uploads, taskEvidenceOf) : undefined;
+    // Upload provenance (WP-A, KS-2) and upload exposure (KS-6), with the cause counted (§12 ruling);
+    // `internal` (stakeholder records) last, as `EXCLUSION_CAUSES` orders them.
+    const cause = uploads
+      ? (judgmentCause(store, decision, uploads, taskEvidenceOf) ?? (isInternalRecord(store, decision) ? 'internal' : undefined))
+      : undefined;
     if (cause) {
       tally.judgment(cause);
       continue;
@@ -256,6 +328,7 @@ export function exportTrainingDataWithSummary(
   }
   lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf, tally));
   lines.push(...knowledgeLines(store, workspaceId, uploads, tally)); // KS-6
+  lines.push(...stakeholderLines(store, workspaceId, !!uploads, tally));
   return { jsonl: lines.length ? `${lines.join('\n')}\n` : '', summary: tally.summary() };
 }
 
@@ -387,7 +460,7 @@ function humanFeedbackLines(
   }
 
   for (const e of listFeedback(store, { workspaceId })) {
-    const cause = causeOf(feedbackPseudoDecision(store, e));
+    const cause = causeOf(feedbackPseudoDecision(store, e)) ?? (uploads && isInternalFeedback(store, e) ? 'internal' : undefined);
     if (cause) {
       tally.other(cause);
       continue;
@@ -500,7 +573,7 @@ export function uploadExclusionSet(store: Store): Set<string> {
 // observation}`, under the same rules (see `knowledgeLines`).
 
 /** Why the export leaves a line out by default, in precedence order (first match counts). */
-export type ExclusionCause = 'cites_upload' | 'exposed_run' | 'exposed_task' | 'exposed_output';
+export type ExclusionCause = 'cites_upload' | 'exposed_run' | 'exposed_task' | 'exposed_output' | 'internal';
 
 /** The causes in precedence order, with their labels (shown by the API and the web export UI). */
 export const EXCLUSION_CAUSES: ReadonlyArray<{ cause: ExclusionCause; label: string }> = [
@@ -508,6 +581,7 @@ export const EXCLUSION_CAUSES: ReadonlyArray<{ cause: ExclusionCause; label: str
   { cause: 'exposed_run', label: 'exposed run' },
   { cause: 'exposed_task', label: 'task of an exposed run' },
   { cause: 'exposed_output', label: 'references an output of such a task' },
+  { cause: 'internal', label: 'internal stakeholder statements and what rests on them' },
 ];
 
 const CAUSE_RANK = new Map(EXCLUSION_CAUSES.map((c, i) => [c.cause, i]));
@@ -738,3 +812,29 @@ function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclus
   return lines;
 }
 // --- end knowledge store KS-6 ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Stakeholder personas (design 2026-11-15-stakeholder-personas-design.md §9, §11): the user's
+// statements, the question round and the simulated reads are internal. Like upload-derived text they
+// are left out by default (counted under `internal`) and exported only with `includeUploads`, as
+// `{type: 'stakeholder_statement', statement}`, `{type: 'stakeholder_question', question}` and
+// `{type: 'stakeholder_read', read}` lines (after the knowledge lines).
+
+function stakeholderLines(store: Store, workspaceId: string, excluded: boolean, tally: ExclusionTally): string[] {
+  const repos = stakeholderRepos(store);
+  const rows: Array<Record<string, unknown>> = [
+    ...repos.statements.list({ workspaceId }).map((statement) => ({ type: 'stakeholder_statement', statement })),
+    ...repos.questions.list({ workspaceId }).map((question) => ({ type: 'stakeholder_question', question })),
+    // A hidden stakeholder's read is never served, not even with the switch (design §7).
+    ...repos.reads
+      .list({ workspaceId })
+      .filter((read) => {
+        const p = store.personas.get(read.personaId);
+        return !p || !isHidden(p);
+      })
+      .map((read) => ({ type: 'stakeholder_read', read })),
+  ];
+  if (!excluded) return rows.map((r) => JSON.stringify(r));
+  for (let i = 0; i < rows.length; i++) tally.other('internal');
+  return [];
+}

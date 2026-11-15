@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { BifConfig } from '../../src/core/config/schema.js';
 import {
+  ESCALATION_SKIPPED_ACTOR,
   answerEscalation,
   EscalationError,
   escalationToolHandlers,
@@ -190,6 +191,28 @@ describe('runEscalation', () => {
     const t3 = addTask(off.store, { status: 'failed' });
     expect(await runEscalation(off.deps, t3.id)).toEqual([]);
     expect(off.requests).toEqual([]);
+  });
+
+  it('an own_stakeholders task is never escalated: skipped with one harness Decision per round, no run, no request', async () => {
+    const s = setup((r) => (r.kind === 'escalate' ? escalate() : undefined));
+    const task = addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', brief: 'map stakeholders', status: 'unverified' });
+    expect(await runEscalation(s.deps, task.id)).toEqual([]);
+    expect(await runEscalation(s.deps, task.id)).toEqual([]);
+    expect(s.requests).toEqual([]);
+    expect(s.store.agentRuns.list({ taskId: task.id })).toEqual([]);
+    expect(s.store.userRequests.list({ taskId: task.id })).toEqual([]);
+    const skipped = s.store.decisions.list({ agentRunId: ESCALATION_SKIPPED_ACTOR });
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({
+      role: 'escalation', refs: [task.id],
+      payload: { tool: 'harness', event: 'escalation_skipped', reason: 'private_task', taskId: task.id, taskType: 'own_stakeholders', round: 1 },
+    });
+    // Through the event bus as well (the service listens to task_status).
+    const svc = startEscalations(s.deps);
+    services.push(svc);
+    s.events.emit({ type: 'task_status', workspaceId: task.workspaceId, taskId: task.id, status: 'unverified' });
+    await svc.idle();
+    expect(s.requests).toEqual([]);
   });
 
   it('a replayed submit_escalation (rate-limit retry) does not ask twice', async () => {

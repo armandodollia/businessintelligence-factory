@@ -33,6 +33,9 @@ export const TASK_TYPES = [
   'synthesize_recommendations',
   'persona_panel',
   'map_business_units',
+  // Stakeholder personas: of the node itself (never with a browser) and of its main competitors
+  'own_stakeholders',
+  'competitor_stakeholders',
 ] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
@@ -74,6 +77,8 @@ function perTaskType<T extends z.ZodType>(item: T) {
     synthesize_recommendations: opt,
     persona_panel: opt,
     map_business_units: opt,
+    own_stakeholders: opt,
+    competitor_stakeholders: opt,
   });
 }
 
@@ -430,6 +435,24 @@ export const personaLearningConfigSchema = z.strictObject({
 });
 // --- end persona learning config ---------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Stakeholder personas (design 2026-11-15-stakeholder-personas-design.md §13). Optional; read it
+// through `stakeholdersSettings` (src/core/stakeholders/settings.ts), which applies the defaults.
+
+export const stakeholdersConfigSchema = z.strictObject({
+  /** Stakeholder personas (default true). */
+  enabled: z.boolean().optional(),
+  /** Own stakeholders per node (default 8). */
+  maxOwn: z.number().int().min(1).optional(),
+  /** Competitors whose stakeholders are researched (default 3). */
+  maxCompetitors: z.number().int().min(1).optional(),
+  /** Stakeholders per competitor (default 3). */
+  maxPerCompetitor: z.number().int().min(1).optional(),
+  /** Stakeholder read runs per persona panel (default 40). */
+  maxReadsPerPanel: z.number().int().min(1).optional(),
+});
+// --- end stakeholders config -----------------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -512,6 +535,8 @@ export const bifConfigSchema = z
     flows: flowsConfigSchema.optional(),
     /** Persona learning: gates, caps and the model (all defaulted). */
     personaLearning: personaLearningConfigSchema.optional(),
+    /** Stakeholder personas: on / off and caps (all defaulted). */
+    stakeholders: stakeholdersConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.

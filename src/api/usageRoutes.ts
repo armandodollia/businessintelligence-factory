@@ -17,6 +17,7 @@ import { calibrationHistory } from '../core/scoring/calibrationHistory.js';
 import type { Store } from '../core/store/db.js';
 import { usageRepos } from '../core/store/usageRepos.js';
 import type { AgentRun, Role } from '../core/types.js';
+import { withholding } from '../core/stakeholders/withheld.js';
 
 export type UsageRouteDeps = { store: Store; config: BifConfig; events: EventBus };
 
@@ -51,15 +52,17 @@ export function mountUsageRoutes(app: Hono, deps: UsageRouteDeps): void {
       .list({ workspaceId: id })
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, limit);
-    return c.json(runs.map((r) => ({ ...publicRun(r), usage: usageTotals(store, { runId: r.id }) })));
+    const w = withholding(store); // stakeholder design §7: withheld research runs lose their failure text
+    return c.json(runs.map((r) => ({ ...w.servedRun(publicRun(r)), usage: usageTotals(store, { runId: r.id }) })));
   });
 
   app.get('/api/runs/:id', (c) => {
     const run = store.agentRuns.get(c.req.param('id'));
     if (!run) return c.json(notFound(`agent run '${c.req.param('id')}'`), 404);
+    const w = withholding(store);
     return c.json({
-      run: publicRun(run),
-      attempts: usageRepos(store).agentRunAttempts.list({ runId: run.id }),
+      run: w.servedRun(publicRun(run)),
+      attempts: usageRepos(store).agentRunAttempts.list({ runId: run.id }).map((a) => w.servedAttempt(a)),
       usage: usageTotals(store, { runId: run.id }),
       usageRows: usageRepos(store).agentUsage.list({ runId: run.id }),
     });
@@ -69,6 +72,10 @@ export function mountUsageRoutes(app: Hono, deps: UsageRouteDeps): void {
   app.get('/api/runs/:id/events', (c) => {
     const run = store.agentRuns.get(c.req.param('id'));
     if (!run) return c.json(notFound(`agent run '${c.req.param('id')}'`), 404);
+    // Stakeholder design §7: a withheld research run's events (tool inputs, model text) are not served.
+    if (withholding(store).run(run.id)) {
+      return c.json({ runId: run.id, total: 0, offset: 0, limit: 0, events: [], withheld: true });
+    }
     return c.json(
       readRunEvents(config.dataDir, run, { offset: intParam(c.req.query('offset'), 0), limit: intParam(c.req.query('limit'), 200) }),
     );

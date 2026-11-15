@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { shortDate } from '../logic/format.js';
 import { auditLabel, modelLabel, useAudits, useExperimentComparison, useExperiments } from '../logic/experiments.js';
+import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import { formatRate } from '../logic/usage.js';
 
 /** Learning loop WP-F: reviewer audits and A/B experiments (minimal views). */
@@ -58,7 +59,7 @@ function Audits({ wsId }: { wsId: string }) {
           </thead>
           <tbody>
             {a.view.audits.map((x) => (
-              <tr key={x.id} className={x.verdict === 'miss' ? 'flag' : ''}>
+              <tr key={x.id} className={x.verdict === 'miss' && !isWithheld(x) ? 'flag' : ''}>
                 <td className="small">{shortDate(x.createdAt)}</td>
                 <td className="small">
                   {x.taskType} <span className="muted">{x.taskId}</span>
@@ -68,8 +69,9 @@ function Audits({ wsId }: { wsId: string }) {
                 <td className="small">{modelLabel(x.auditModel)}</td>
                 <td>{x.auditScore ?? '—'}</td>
                 <td>
-                  {auditLabel(x)}
-                  {x.verdict === 'miss' && x.auditIssues.length > 0 && (
+                  {/* Stakeholder design §7: an audit of own-stakeholder research while a stakeholder is hidden. */}
+                  {isWithheld(x) ? <span className="muted">{WITHHELD_TEXT}</span> : auditLabel(x)}
+                  {!isWithheld(x) && x.verdict === 'miss' && x.auditIssues.length > 0 && (
                     <ul className="small">
                       {x.auditIssues.map((i, k) => (
                         <li key={k}>

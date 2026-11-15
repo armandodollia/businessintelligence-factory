@@ -84,11 +84,11 @@ describe('GET /persona-learning', () => {
     });
     s.repos.adjustments.insert({ ...adjustment, id: 'pad_2', marker: 'A-000000', status: 'retired', endedAt: '2026-01-02T00:00:00.000Z' });
     s.repos.runs.insert({
-      id: 'plr_old', rootWorkspaceId: 'ws_a', personaId: s.smb.id, status: 'failed', signalsThrough: '2026-01-01T00:00:00.000Z', shownSignalIds: [],
+      id: 'plr_old', rootWorkspaceId: 'ws_a', personaId: s.smb.id, status: 'failed', signalsThrough: '2026-01-01T00:00:00.000Z', shownSignalIds: [], shownStatementIds: [],
       stats: STATS, createdAt: '2026-01-01T00:00:00.000Z',
     });
     s.repos.runs.insert({
-      id: 'plr_new', rootWorkspaceId: 'ws_a', personaId: s.smb.id, status: 'running', signalsThrough: '2026-01-01T00:00:00.000Z', shownSignalIds: ['x'],
+      id: 'plr_new', rootWorkspaceId: 'ws_a', personaId: s.smb.id, status: 'running', signalsThrough: '2026-01-01T00:00:00.000Z', shownSignalIds: ['x'], shownStatementIds: [],
       stats: STATS, assumption: 'Overrates short sign-up forms.', createdAt: '2026-11-10T00:00:00.000Z',
     });
 
@@ -127,7 +127,7 @@ describe('GET /persona-learning', () => {
   it('lastRun is the newest run with an assumption (a later failed run does not hide it); else the newest run', async () => {
     const s = setup();
     const run = (id: string, createdAt: string, extra: Record<string, unknown> = {}) =>
-      s.repos.runs.insert({ id, rootWorkspaceId: 'ws_a', personaId: s.smb.id, status: 'failed', signalsThrough: createdAt, shownSignalIds: [], stats: STATS, createdAt, ...extra });
+      s.repos.runs.insert({ id, rootWorkspaceId: 'ws_a', personaId: s.smb.id, status: 'failed', signalsThrough: createdAt, shownSignalIds: [], shownStatementIds: [], stats: STATS, createdAt, ...extra });
     run('plr_1', '2026-11-01T00:00:00.000Z');
     run('plr_2', '2026-11-02T00:00:00.000Z');
     const lastOf = async () => (await s.call('GET', '/api/workspaces/ws_a/persona-learning')).body.personas.find((p: any) => p.personaId === s.smb.id).lastRun;
@@ -149,6 +149,23 @@ describe('GET /persona-learning', () => {
     expect((await s.call('GET', '/api/workspaces/ws_a/persona-learning')).body.pendingInTree).toBe(2);
     expect((await s.call('GET', '/api/workspaces/ws_a_eu/persona-learning')).body.pendingInTree).toBe(2);
     expect((await s.call('GET', '/api/workspaces/ws_b/persona-learning')).body.pendingInTree).toBe(1);
+  });
+
+  it('an open stakeholder persona is served and counted; a hidden one is not (stakeholder design §7, §14)', async () => {
+    const s = setup();
+    const stakeholder = (id: string, disclosure: 'open' | 'hidden') =>
+      s.store.personas.insert({
+        ...s.smb, id, slug: `stk-${id}`, segment: 'Chief financial officer', kind: 'stakeholder', stakeholderType: 'leader',
+        subjectKind: 'own', relation: 'Approves budgets', disclosure,
+      });
+    const open = stakeholder('per_stk_open', 'open');
+    const hidden = stakeholder('per_stk_hidden', 'hidden');
+    s.proposal(s.smb);
+    s.proposal(open);
+    s.proposal(hidden);
+    const r = await s.call('GET', '/api/workspaces/ws_a/persona-learning');
+    expect(r.body.personas.map((p: any) => p.personaId).sort()).toEqual([s.ops.id, open.id, s.smb.id].sort());
+    expect(r.body.pendingInTree).toBe(2);
   });
 
   it('serves personas of the requested node only; an unknown node answers 404', async () => {

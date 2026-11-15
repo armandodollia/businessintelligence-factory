@@ -51,14 +51,15 @@ describe('migration 23: existing schedules run the flow ranking step', () => {
     opened.push(s);
     expect(s.schemaVersion()).toBe(MIGRATIONS.length);
     const phases = (id: string) => (s.db.prepare('SELECT phases FROM schedules WHERE id = ?').get(id) as { phases: string }).phases;
-    expect(JSON.parse(phases('sch_default'))).toEqual(['market_research', 'competitor_discovery', 'deep_dives', 'flow_ranking', 'synthesis', 'persona_panel', 'scoring']);
-    expect(JSON.parse(phases('sch_last'))).toEqual(['deep_dives', 'flow_ranking']);
-    expect(JSON.parse(phases('sch_mapping'))).toEqual(['mapping', 'deep_dives', 'flow_ranking', 'scoring']);
+    // Migration 26 then puts `stakeholders` directly after the first deep_dives (test/core/stakeholders/schema.test.ts).
+    expect(JSON.parse(phases('sch_default'))).toEqual(['market_research', 'competitor_discovery', 'deep_dives', 'stakeholders', 'flow_ranking', 'synthesis', 'persona_panel', 'scoring']);
+    expect(JSON.parse(phases('sch_last'))).toEqual(['deep_dives', 'stakeholders', 'flow_ranking']);
+    expect(JSON.parse(phases('sch_mapping'))).toEqual(['mapping', 'deep_dives', 'stakeholders', 'flow_ranking', 'scoring']);
     // Only after the first deep_dives.
-    expect(JSON.parse(phases('sch_twice'))).toEqual(['deep_dives', 'flow_ranking', 'synthesis', 'deep_dives']);
-    // Untouched: already has flow_ranking (wherever), no deep_dives, or a shape that is not a list of names.
-    expect(phases('sch_has')).toBe('["deep_dives","flow_ranking","scoring"]');
-    expect(phases('sch_has_elsewhere')).toBe('["flow_ranking","deep_dives"]');
+    expect(JSON.parse(phases('sch_twice'))).toEqual(['deep_dives', 'stakeholders', 'flow_ranking', 'synthesis', 'deep_dives']);
+    // Untouched by migration 23: already has flow_ranking (wherever), no deep_dives, or a shape that is not a list of names.
+    expect(JSON.parse(phases('sch_has'))).toEqual(['deep_dives', 'stakeholders', 'flow_ranking', 'scoring']);
+    expect(JSON.parse(phases('sch_has_elsewhere'))).toEqual(['flow_ranking', 'deep_dives', 'stakeholders']);
     expect(phases('sch_none')).toBe('["market_research","synthesis"]');
     expect(phases('sch_odd')).toBe('[{"phase":"deep_dives"},"deep_dives"]');
     expect(phases('sch_broken')).toBe('not json');

@@ -1,14 +1,16 @@
 import { formatValue } from '../logic/format.js';
-import { useFindingIndex, useRecommendations, useScoringWeights } from '../logic/hooks.js';
+import { useFindingIndex, useRecommendations, useScoringWeights, useStakeholderList } from '../logic/hooks.js';
 import type { PersonaFeedback, RecommendationView, TreeFindingView } from '../logic/types.js';
 import { CriteriaRatings, CriterionRating } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
 import { LastReviewNote } from './LastReviewNote.js';
+import { StakeholderReads } from './stakeholders/Reads.js';
 
 export function Strategy({ wsId }: { wsId: string }) {
   const recs = useRecommendations(wsId);
   const { recommendations, loading, error, reload } = recs;
   const index = useFindingIndex(wsId);
+  const stakeholders = useStakeholderList(wsId);
   return (
     <div>
       <h2>Strategy</h2>
@@ -97,6 +99,7 @@ export function Strategy({ wsId }: { wsId: string }) {
                 {r.personaFeedback.map((pf) => (
                   <PersonaFeedbackCell key={pf.personaId} wsId={wsId} recId={r.id} feedback={pf} />
                 ))}
+                <StakeholderReads wsId={wsId} recId={r.id} owners={stakeholders.ownOpen} />
               </td>
             </tr>
           ))}

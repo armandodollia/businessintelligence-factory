@@ -263,6 +263,30 @@ describe('ranking round', () => {
     ]);
   });
 
+  it('a stakeholder persona gives no verdicts and does not count as a persona of the ranking', async () => {
+    const t = setup((c) => void (c.flows = { maxFocusedComparisons: 0 }));
+    t.persona('smb');
+    t.persona('stk-cfo', { kind: 'stakeholder', stakeholderType: 'leader', subjectKind: 'own', relation: 'Approves budgets', disclosure: 'open' });
+    t.flow('Acme');
+    t.flow('Globex');
+    t.answer(firstWins);
+    const report = await runFlowRanking('ws_a', t.deps);
+    expect(report.sittings).toBe(1);
+    expect(t.personaRuns().map(slugOf)).toEqual(['smb']);
+    expect(new Set(t.verdictRows().map((v) => v.personaId))).toEqual(new Set(['per_smb']));
+  });
+
+  it('a node whose only usable persona is a stakeholder ranks on the checklist alone', async () => {
+    const t = setup();
+    t.persona('stk-cfo', { kind: 'stakeholder', stakeholderType: 'leader', subjectKind: 'own', relation: 'Approves budgets', disclosure: 'open' });
+    t.flow('Acme');
+    t.flow('Globex');
+    t.answer(firstWins);
+    await runFlowRanking('ws_a', t.deps);
+    expect(t.personaRuns()).toHaveLength(0);
+    expect(nodeRanking(t.store, t.config, 'ws_a', t.typeId).noPersonas).toBe(true);
+  });
+
   it('a flow type with one flow starts no run', async () => {
     const t = setup();
     t.persona('smb');
@@ -547,8 +571,8 @@ describe('ranking round', () => {
     expect(e.afterJson).toMatchObject({ ranked: false });
   });
 
-  it('flow_ranking is a runner phase placed after deep_dives', async () => {
-    expect(ALL_PHASES.indexOf('flow_ranking')).toBe(ALL_PHASES.indexOf('deep_dives') + 1);
+  it('flow_ranking is a runner phase placed after deep_dives (and the stakeholders phase)', async () => {
+    expect(ALL_PHASES.slice(ALL_PHASES.indexOf('deep_dives'), ALL_PHASES.indexOf('deep_dives') + 3)).toEqual(['deep_dives', 'stakeholders', 'flow_ranking']);
     expect(RUNNER_PHASES.has('flow_ranking')).toBe(true);
     expect(PHASE_TASK_TYPES.flow_ranking).toEqual([]);
     expect(ROLE_TOOLS.persona).toContain('submit_flow_verdicts');

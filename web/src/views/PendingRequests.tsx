@@ -1,5 +1,6 @@
 import { shortDate } from '../logic/format.js';
 import { useForm, useRequests } from '../logic/hooks.js';
+import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import type { UserRequest } from '../logic/types.js';
 import { EscalationRow } from './EscalationRow.js';
 
@@ -39,7 +40,7 @@ function RequestRow(props: {
         <span className="tag strong">{r.kind}</span> {r.site && <b>{r.site}</b>}{' '}
         <span className="muted">{shortDate(r.createdAt)}</span>
       </div>
-      <div className="request-details">{r.details}</div>
+      <div className="request-details">{isWithheld(r) ? WITHHELD_TEXT : r.details}</div>
       <div className="row">
         <input
           placeholder={isApproval ? 'note (optional)' : 'what you did / notes (optional)'}

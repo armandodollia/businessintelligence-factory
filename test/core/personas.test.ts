@@ -295,6 +295,21 @@ describe('persona panel', () => {
     expect(t.store.decisions.list({ workspaceId: 'ws_a' }).filter((d) => d.kind === 'persona_feedback')).toHaveLength(8);
   });
 
+  it('a stakeholder persona takes no part in the segment panel', async () => {
+    const t = await seeded();
+    const [smb] = t.store.personas.list({ workspaceId: 'ws_a' });
+    t.store.personas.insert({
+      ...smb!, id: 'per_stk', slug: 'stk-cfo', segment: 'Chief financial officer', kind: 'stakeholder', stakeholderType: 'leader',
+      subjectKind: 'own', relation: 'Approves budgets', disclosure: 'open', status: 'verified',
+    });
+    await runPersonaPanel('ws_a', t.deps);
+    // Segment panel runs only (the stakeholder gives stakeholder reads instead, stakeholders/reads.test.ts).
+    expect(t.requests.filter((r) => r.role === 'persona' && r.prompt.startsWith('# Persona panel'))).toHaveLength(4);
+    for (const id of ['rec_1', 'rec_2']) {
+      expect(t.store.recommendations.get(id)!.personaFeedback.map((f) => f.personaId)).not.toContain('per_stk');
+    }
+  });
+
   it('panel summary highlights segment disagreement', async () => {
     const t = await seeded();
     await runPersonaPanel('ws_a', t.deps);

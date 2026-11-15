@@ -8,6 +8,7 @@
  *   npx tsx scripts/smoke.ts knowledge [providers] # knowledge-store flow (KS-8), per provider
  *   npx tsx scripts/smoke.ts flows [providers]     # flow records and ranking, per provider
  *   npx tsx scripts/smoke.ts persona-learning [providers] # persona learning in the retro (default: claude)
+ *   npx tsx scripts/smoke.ts stakeholders [providers]     # offline own-stakeholder research (default: claude)
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
  *            spawns one real worker run through the Supervisor. The agent must call
@@ -41,6 +42,16 @@
  *            from the store: exactly one learning run and one successful `submit_persona_learning` call, the run row
  *            (`proposed` or `no_change`, with its assumption), the stored proposals (pending, evidence among the
  *            signals shown, the evidence and text limits) and an unchanged persona (version 1, no adjustment).
+ * stakeholders: stakeholder personas (design 2026-11-15 §18). Per provider, seeds a node with three internal notes
+ *            (uploads) about a fictional company, then runs one `own_stakeholders` task through the real review loop
+ *            (worker and reviewer offline, no browser) and the phase-end step that creates the question round
+ *            (`ensureQuestions`). Judged from the store and the runs' files: every run of the task offline with no
+ *            built-in tool (the CLI's offered tools in `stdout.log` and the tool calls in `events.jsonl` are harness
+ *            tools only), at least one hidden own stakeholder citing the notes, four template questions per hidden
+ *            stakeholder plus the two node questions, and the task's research withheld while they are hidden.
+ *            Providers are enabled as in the default config (plus those named), so the reviewer is picked as
+ *            on a default install. Codex refuses offline runs, so the codex worker is expected to fail with
+ *            that refusal.
  * codex isolation (with the codex worker smoke): `codex mcp list --json` under the exact env and
  *            `-c` overrides the adapter gives a run must list only `bif`.
  *
@@ -50,13 +61,14 @@
  * temp dir (data dir with bif.db and each run's events.jsonl) for inspection.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boot, type Booted } from '../src/api/main.js';
 import { defaultConfig, type BifConfig, type ModelRef, type ProviderId } from '../src/core/config/schema.js';
 import { ArtifactStore } from '../src/core/evidence/artifacts.js';
+import { offlineRefusal } from '../src/core/harness/adapter.js';
 import { CodexAdapter } from '../src/core/harness/adapters/codex.js';
 import { browserPromptNote } from '../src/core/harness/browser.js';
 import { getRunOutputs } from '../src/core/harness/tools/handlers.js';
@@ -81,6 +93,15 @@ import { recordVerdicts } from '../src/core/flows/verdicts.js';
 import { runRetro } from '../src/core/learning/lessons/retro.js';
 import { personaLearningRepos } from '../src/core/personas/store.js';
 import { ADJUSTMENT_TEXT_MAX } from '../src/core/personas/adjustments.js';
+import { runDirOf } from '../src/core/harness/paths.js';
+import { TOOL_NAMES } from '../src/core/harness/tools/registry.js';
+import { uploadInternal } from '../src/core/internal/uploads.js';
+import { runTaskWithReview } from '../src/core/research/reviewLoop.js';
+import { isHidden, stakeholderPersonas } from '../src/core/stakeholders/personas.js';
+import { ensureQuestions, NODE_QUESTIONS, PEOPLE_TEMPLATES, questionText, SYSTEM_TEMPLATES } from '../src/core/stakeholders/questions.js';
+import { stakeholdersSettings } from '../src/core/stakeholders/settings.js';
+import { stakeholderRepos } from '../src/core/stakeholders/store.js';
+import { withholding } from '../src/core/stakeholders/withheld.js';
 
 const MODELS: Record<ProviderId, string> = {
   claude: process.env.BIF_SMOKE_CLAUDE_MODEL ?? 'haiku',
@@ -104,10 +125,17 @@ function freePort(): Promise<number> {
   });
 }
 
-/** Config with every provider enabled (only the smoke model each) and all roles on claude. */
-function smokeConfig(dataDir: string, port: number): BifConfig {
+/**
+ * Config with every provider enabled (only the smoke model each) and all roles on claude. With
+ * `defaultEnabled` (stakeholders mode), a provider is enabled as in the default config or when it is
+ * one of `providers`, so offline work is routed as it would be on a default install.
+ */
+function smokeConfig(dataDir: string, port: number, opts: { defaultEnabled?: boolean; providers?: ProviderId[] } = {}): BifConfig {
   const cfg = structuredClone(defaultConfig) as BifConfig;
-  for (const p of PROVIDERS) cfg.providers[p] = { ...cfg.providers[p], enabled: true, models: [MODELS[p]] };
+  for (const p of PROVIDERS) {
+    const enabled = !opts.defaultEnabled || defaultConfig.providers[p].enabled || (opts.providers ?? []).includes(p);
+    cfg.providers[p] = { ...cfg.providers[p], enabled, models: [MODELS[p]] };
+  }
   const claude = { provider: 'claude' as const, model: MODELS.claude };
   cfg.roles = {
     ...cfg.roles,
@@ -128,11 +156,11 @@ function smokeConfig(dataDir: string, port: number): BifConfig {
   return cfg;
 }
 
-async function startServer(label: string): Promise<{ booted: Booted; dir: string; base: string }> {
+async function startServer(label: string, opts: Parameters<typeof smokeConfig>[2] = {}): Promise<{ booted: Booted; dir: string; base: string }> {
   const dir = mkdtempSync(join(tmpdir(), `bif-smoke-${label}-`));
   const port = await freePort();
   const configPath = join(dir, 'bif.config.json');
-  writeFileSync(configPath, JSON.stringify(smokeConfig(join(dir, 'data'), port), null, 2));
+  writeFileSync(configPath, JSON.stringify(smokeConfig(join(dir, 'data'), port, opts), null, 2));
   const booted = await boot({ configPath, dataDir: join(dir, 'data'), port });
   return { booted, dir, base: `http://127.0.0.1:${port}` };
 }
@@ -1018,9 +1046,158 @@ async function personaLearningSmoke(provider: ProviderId, booted: Booted): Promi
   }
 }
 
+// ---------------------------------------------------------------------------
+// stakeholder personas smoke (stakeholder design 2026-11-15 §18)
+
+const SH_COMPANY = 'Larkspur Freight';
+/** Internal notes about a fictional company (uploads: the own-stakeholder task reads what the store holds, never the web). */
+const SH_NOTES: Array<{ name: string; text: string }> = [
+  {
+    name: 'org-notes.txt',
+    text: `${SH_COMPANY} org notes. The chief financial officer approves every spend above 10,000 EUR and asks for the payback period first; ` +
+      'last quarter she turned down a new routing tool because it paid back in three years.',
+  },
+  {
+    name: 'platform-notes.txt',
+    text: 'The billing platform team runs invoicing for every product line. Any change to invoices needs two weeks of notice and a slot ' +
+      'on their quarterly roadmap; they refuse changes during the month-end close.',
+  },
+  {
+    name: 'board-minutes.txt',
+    text: `Board minutes, ${SH_COMPANY}: the board approves new markets and any price change above 5%. It asked for a churn forecast ` +
+      'before the next price proposal.',
+  },
+];
+
+/** Names of the tools a run's CLI offered (Claude's stream-json `system/init` line in stdout.log); undefined when not found. */
+function offeredTools(dataDir: string, wsId: string, agentRunId: string): string[] | undefined {
+  const path = join(runDirOf(dataDir, wsId, agentRunId), 'stdout.log');
+  if (!existsSync(path)) return undefined;
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    try {
+      const d = JSON.parse(line) as { type?: string; subtype?: string; tools?: unknown };
+      if (d.type === 'system' && d.subtype === 'init' && Array.isArray(d.tools)) return d.tools.map(String);
+    } catch {
+      // not JSON
+    }
+  }
+  return undefined;
+}
+
+/** Tool names in a run's events.jsonl (`tool_call` events; MCP prefixes already stripped by the adapter). */
+function calledTools(dataDir: string, wsId: string, agentRunId: string): string[] {
+  const path = join(runDirOf(dataDir, wsId, agentRunId), 'events.jsonl');
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .flatMap((l) => {
+      const e = JSON.parse(l) as { t?: string; name?: string };
+      return e.t === 'tool_call' && typeof e.name === 'string' ? [e.name] : [];
+    });
+}
+
+async function stakeholdersSmoke(provider: ProviderId, booted: Booted): Promise<FlResult> {
+  const { store, artifacts, config, events, research, dataDir } = booted.runtime;
+  const name = `stakeholders/${provider} (${MODELS[provider]})`;
+  const startedAt = Date.now();
+  const short = (s: string, n = 140) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS * 3);
+  const wsId = `ws_smoke_stakeholders_${provider}`;
+  let runIds: string[] = [];
+  try {
+    const now = new Date().toISOString();
+    store.workspaces.insert({
+      id: wsId, name: SH_COMPANY, sector: 'logistics', createdAt: now, scope: { level: 'company', name: SH_COMPANY, description: 'a fictional freight company' },
+    });
+    const notes = SH_NOTES.map((n) => uploadInternal(wsId, { name: n.name, bytes: new TextEncoder().encode(n.text), mime: 'text/plain' }, { store, artifacts, config }).id);
+    const rr = store.researchRuns.insert({ id: newId('rrun'), workspaceId: wsId, phase: 'stakeholders', status: 'running', startedAt: now });
+    const task = store.tasks.insert({
+      id: newId('tsk'), workspaceId: wsId, runId: rr.id, phase: 'stakeholders', type: 'own_stakeholders', round: 1, createdAt: now,
+      model: { provider, model: MODELS[provider] }, needsBrowser: false, status: 'queued',
+      acceptanceCriteria: ['each stakeholder cites the internal notes it rests on'],
+      brief: `Identify the people, teams and boards whose approval, budget or data ${SH_COMPANY} depends on, from its internal notes.`,
+    });
+    const bus: ToolCallLog[] = [];
+    const off = events.on((e) => {
+      if (e.type === 'tool_call' && e.workspaceId === wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+    });
+    let final: Awaited<ReturnType<typeof runTaskWithReview>>;
+    try {
+      final = await runTaskWithReview(task, { ...research, signal: abort.signal });
+    } finally {
+      off();
+    }
+    // The phase-end step of the `stakeholders` phase (orchestrator `afterPhase`).
+    const created = ensureQuestions(store, wsId);
+    store.researchRuns.update(rr.id, { status: 'done', endedAt: new Date().toISOString() });
+
+    const runs = store.agentRuns.list({ workspaceId: wsId }).filter((r) => r.taskId === task.id);
+    runIds = runs.map((r) => r.id);
+    const harness = new Set<string>(TOOL_NAMES);
+    const perRun = runs.map((r) => {
+      // A run on a provider that cannot enforce offline is refused before its CLI starts (no tools at all).
+      const refused = (r.failureReason ?? '').includes(offlineRefusal(r.model.provider));
+      const offered = offeredTools(dataDir, wsId, r.id);
+      const builtInOffered = offered?.filter((t) => !t.startsWith('mcp__bif__')) ?? [];
+      const builtInCalled = calledTools(dataDir, wsId, r.id).filter((t) => !harness.has(t));
+      // Claude prints the tools it offers; for the other CLIs only the calls can be checked.
+      const ok = builtInCalled.length === 0 && (refused || r.model.provider !== 'claude' || (offered !== undefined && builtInOffered.length === 0));
+      return { r, refused, offered, builtInOffered, builtInCalled, ok };
+    });
+    const started = perRun.filter((x) => !x.refused);
+    steps.push({
+      step: 'S1 offline: no built-in tool', calls: 0,
+      pass: started.length > 0 && perRun.every((x) => x.ok),
+      did: perRun.map((x) => `${x.r.role} ${x.r.model.provider}/${x.r.model.model} ${x.r.status}: ${x.refused ? 'refused (offline)' : `offered=${x.offered ? `${x.offered.length} (${x.builtInOffered.length} built-in${x.builtInOffered.length ? `: ${x.builtInOffered.join(',')}` : ''})` : 'unknown'} built-in calls=${x.builtInCalled.length}${x.builtInCalled.length ? ` (${x.builtInCalled.join(',')})` : ''}`}${x.r.failureReason && !x.refused ? ` failure=${short(x.r.failureReason, 100)}` : ''}`).join('; ') || 'no runs',
+    });
+
+    const own = stakeholderPersonas(store, wsId).filter((p) => p.subjectKind === 'own');
+    const hidden = own.filter(isHidden);
+    const { maxOwn } = stakeholdersSettings(config);
+    const cites = (p: (typeof own)[number]) =>
+      Object.values(p.profile).some((f) => (f?.evidence ?? []).some((id) => typeof id === 'string' && notes.includes(id)));
+    steps.push({
+      step: 'S2 hidden own stakeholders', calls: bus.filter((c) => c.tool === 'save_stakeholder').length,
+      pass: hidden.length >= 1 && hidden.length === own.length && own.length <= maxOwn && own.every(cites),
+      did: `task ${final.status} (round ${final.round}); own=${own.length} hidden=${hidden.length}: ${own.map((p) => `${p.segment} (${p.stakeholderType}, ${p.status}, cites notes=${cites(p)})`).join('; ')}`,
+    });
+
+    const repo = stakeholderRepos(store).questions;
+    const askable = hidden.filter((p) => p.status !== 'superseded' && p.status !== 'failed');
+    const templated = askable.every((p) => {
+      const qs = repo.list({ personaId: p.id, status: 'open' });
+      const templates = p.stakeholderType === 'team' || p.stakeholderType === 'system' ? SYSTEM_TEMPLATES : PEOPLE_TEMPLATES;
+      return qs.length === 4 && templates.every((t) => qs.some((q) => q.field === t.field && q.text === questionText(t.text, p.segment)));
+    });
+    const nodeQs = repo.list({ workspaceId: wsId, status: 'open' }).filter((q) => !q.personaId);
+    steps.push({
+      step: 'S3 question round', calls: 0,
+      pass: askable.length >= 1 && templated && nodeQs.length === NODE_QUESTIONS.length,
+      did: `created=${created.length}; per stakeholder ${askable.map((p) => `${p.segment}=${repo.list({ personaId: p.id, status: 'open' }).length}`).join(', ')}; node questions=${nodeQs.length}; texts are the templates=${templated}`,
+    });
+
+    const w = withholding(store);
+    steps.push({ step: 'S4 research withheld while hidden', calls: 0, pass: w.task(store.tasks.get(task.id)), did: `task withheld=${w.task(store.tasks.get(task.id))}` });
+
+    for (const c of bus.filter((x) => !x.ok)) confusion.push(`${c.tool} failed: ${short(c.error ?? '', 160)}`);
+    return {
+      name, pass: steps.every((x) => x.pass), seconds: (Date.now() - startedAt) / 1000, steps, usage: usageOf(booted, runIds), toolCalls: bus.length, confusion,
+      detail: `task=${final.status}; runs=${runs.map((r) => `${r.role}:${r.status}`).join(',')}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - startedAt) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls: 0, confusion };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning'].includes(args[0] ?? '') ? args.shift()! : 'all';
+  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders'].includes(args[0] ?? '') ? args.shift()! : 'all';
   const only = args.filter((a): a is ProviderId => (PROVIDERS as string[]).includes(a));
   const providers = only.length ? only : PROVIDERS;
   const results: Result[] = [];
@@ -1088,6 +1265,22 @@ async function main() {
       for (const p of only.length ? only : (['claude'] as ProviderId[])) {
         console.log(`[smoke] persona-learning ${p} (${MODELS[p]}) …`);
         const r = await personaLearningSmoke(p, booted);
+        printKnowledge(r);
+        results.push(r);
+      }
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'stakeholders') {
+    const shProviders = only.length ? only : (['claude'] as ProviderId[]);
+    const { booted, dir } = await startServer('stakeholders', { defaultEnabled: true, providers: shProviders });
+    try {
+      for (const p of shProviders) {
+        console.log(`[smoke] stakeholders ${p} (${MODELS[p]}) …`);
+        const r = await stakeholdersSmoke(p, booted);
         printKnowledge(r);
         results.push(r);
       }

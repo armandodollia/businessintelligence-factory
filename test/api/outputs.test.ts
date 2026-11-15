@@ -68,6 +68,18 @@ describe('output status API', () => {
     expect((await t.json('POST', '/api/recommendations/rec_u/include', { include: 'yes' })).status).toBe(400);
   });
 
+  it('the personas list serves segment personas only (a stakeholder persona is left out)', async () => {
+    const t = setup();
+    const base = { workspaceId: t.ws.id, profile: {}, agentMdPath: 'x.md', version: 1, status: 'verified' as const };
+    t.store.personas.insert({ ...base, id: 'per_seg', slug: 'sam', segment: 'SMB' });
+    t.store.personas.insert({
+      ...base, id: 'per_stk', slug: 'stk-cfo', segment: 'Chief financial officer', kind: 'stakeholder', stakeholderType: 'leader',
+      subjectKind: 'own', relation: 'Approves budgets', disclosure: 'hidden',
+    });
+    const personas = await t.json('GET', `/api/workspaces/${t.ws.id}/personas`);
+    expect(personas.body.map((p: { id: string }) => p.id)).toEqual(['per_seg']);
+  });
+
   it('competitors carry status + lastReview; include override sets / resets', async () => {
     const t = setup();
     t.store.competitors.insert({

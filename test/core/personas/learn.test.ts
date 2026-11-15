@@ -167,6 +167,17 @@ describe('runPersonaLearning', () => {
     expect(t.repos.runs.list()).toEqual([]);
   });
 
+  it('a hidden stakeholder persona is not evaluated (its signals wait)', async () => {
+    const t = setup();
+    // Rated while open (the API refuses to rate a hidden one), then hidden: its signals exist and must wait.
+    const cfo = t.persona('stk-cfo', { kind: 'stakeholder', stakeholderType: 'leader', subjectKind: 'own', relation: 'Approves budgets', disclosure: 'open' });
+    t.react(cfo, 6);
+    t.store.personas.update(cfo.id, { disclosure: 'hidden' });
+    expect(await t.run()).toEqual({ personasEvaluated: 0, personasQualified: 0, personaLearningRuns: 0, personaProposals: 0 });
+    expect(t.requests).toEqual([]);
+    expect(t.repos.runs.list()).toEqual([]);
+  });
+
   it('a persona with a pending proposal is skipped and its signals stay open', async () => {
     const t = setup();
     const smb = t.persona('smb');
@@ -217,7 +228,7 @@ describe('runPersonaLearning', () => {
     const t = setup();
     const smb = t.persona('smb');
     const left = t.repos.runs.insert({
-      id: newId('plr'), rootWorkspaceId: 'ws_a', personaId: smb.id, status: 'running', signalsThrough: T0, shownSignalIds: [],
+      id: newId('plr'), rootWorkspaceId: 'ws_a', personaId: smb.id, status: 'running', signalsThrough: T0, shownSignalIds: [], shownStatementIds: [],
       stats: { n: 0, agree: 0, disagree: 0, items: 0, lower: 0 }, createdAt: T0,
     });
     await t.run();

@@ -188,8 +188,10 @@ describe('export exclusion: the visible cost (summary by cause)', () => {
       ['exposed_run', 'exposed run'],
       ['exposed_task', 'task of an exposed run'],
       ['exposed_output', 'references an output of such a task'],
+      ['internal', 'internal stakeholder statements and what rests on them'],
     ]);
     expect(by).toEqual({
+      internal: 0,
       cites_upload: w.decisionsOf(w.citer.agentRunId).length,
       exposed_run: w.decisionsOf(w.exposed.agentRunId).length,
       exposed_task: w.decisionsOf(w.reviewer.agentRunId).length,

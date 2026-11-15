@@ -107,6 +107,18 @@ export const FEEDBACK_KINDS = [
   /** The user retired an active persona adjustment (target type `persona_adjustment`). */
   'persona_adjustment_retire',
   // --- end persona learning ---
+  // --- stakeholder personas (design 2026-11-15-stakeholder-personas-design.md) ---
+  /** The user answered (or partly answered) a stakeholder's question round (target type `stakeholder`). */
+  'stakeholder_answers',
+  /** The user opened a hidden stakeholder without answering ("Show what the tool found"; target type `stakeholder`). */
+  'stakeholder_reveal',
+  /** The user added a note on a stakeholder (target type `stakeholder`). */
+  'stakeholder_note',
+  /** The user recorded a stakeholder's real decision on a recommendation (target type `stakeholder`). */
+  'stakeholder_decision_record',
+  /** Agree / disagree with a stakeholder's simulated read (target type `stakeholder_read`). */
+  'stakeholder_read_reaction',
+  // --- end stakeholder personas ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -144,7 +156,10 @@ export type FeedbackTargetType =
   | 'review_mention'
   // persona learning: a persona proposal (accept / reject), a persona adjustment (retire)
   | 'persona_proposal'
-  | 'persona_adjustment';
+  | 'persona_adjustment'
+  // stakeholder personas: a stakeholder persona (answers, reveal, note, decision record), a stakeholder read (reaction)
+  | 'stakeholder'
+  | 'stakeholder_read';
 
 export interface FeedbackEvent {
   id: string;

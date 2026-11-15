@@ -3,11 +3,12 @@
  * live here; views render what these return and call the returned actions.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, api, artifactUrl, exportUrl, flowsApi, personaLearningApi } from './api.js';
+import { ApiError, api, artifactUrl, exportUrl, flowsApi, personaLearningApi, stakeholdersApi } from './api.js';
 import { plural } from './flows.js';
 import { exportSummaryView } from './exportSummary.js';
 import { asPersonaLearningView, pendingProposals } from './personaLearning.js';
 import { subscribe } from './sse.js';
+import { answersToSend, asStakeholdersView, isHiddenView, isOpenView } from './stakeholders.js';
 import {
   COMPETITOR_CRITERIA,
   FINDING_CRITERIA,
@@ -34,6 +35,8 @@ import type {
   PersonaAdjustment,
   PersonaProposal,
   PersonaSignal,
+  RealDecision,
+  StakeholderQuestionGroup,
   BusEvent,
   CreateWorkspaceInput,
   Criteria,
@@ -1711,5 +1714,181 @@ export function usePersonaLearning(wsId: string | null | undefined) {
     loading: res.loading,
     error: res.error,
     reload: res.reload,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// stakeholder personas: the Stakeholders page and the reads on a recommendation
+
+/** The node's stakeholders (`view` null until loaded); `ownOpen`: own stakeholders that are open (who can record a real decision). */
+export function useStakeholderList(wsId: string | null | undefined) {
+  const res = useResource(`stakeholders:${wsId ?? ''}`, wsId ? () => stakeholdersApi.list(wsId) : null);
+  useTaskStatusRefresh(wsId, res.reload);
+  const view = asStakeholdersView(res.data);
+  return {
+    view,
+    own: view?.own ?? [],
+    ownOpen: (view?.own ?? []).filter(isOpenView),
+    competitors: view?.competitors ?? [],
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
+}
+
+/**
+ * The Stakeholders page: the stakeholders, the open question round and the user's drafts. `send`
+ * posts only the non-empty answers (a stakeholder left blank stays in the round); `skip`, `skipAll`
+ * and `reveal` ("Show what the tool found") post at once. After each change both lists are reloaded and
+ * `onChange` is called (a change can open stakeholders, whose learning block then loads).
+ */
+export function useStakeholders(wsId: string | null | undefined, onChange?: () => void) {
+  const list = useStakeholderList(wsId);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const qs = useResource(`stakeholderQuestions:${wsId ?? ''}`, wsId ? () => stakeholdersApi.questions(wsId) : null);
+  useTaskStatusRefresh(wsId, qs.reload);
+  const action = useAction();
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const groups: StakeholderQuestionGroup[] = Array.isArray(qs.data?.groups) ? qs.data.groups : [];
+  const toSend = answersToSend(groups, drafts);
+  const listReload = list.reload;
+  const qsReload = qs.reload;
+
+  const change = useCallback(
+    async (fn: () => Promise<unknown>) => {
+      const ok = (await action.run(async () => (await fn(), true))) === true;
+      if (ok) {
+        await Promise.all([listReload(), qsReload()]);
+        onChangeRef.current?.();
+      }
+      return ok;
+    },
+    [action.run, listReload, qsReload],
+  );
+
+  const send = async () => {
+    if (!wsId || toSend.length === 0) return false;
+    const ok = await change(() => stakeholdersApi.answer(wsId, { answers: toSend }));
+    if (ok) setDrafts((d) => Object.fromEntries(Object.entries(d).filter(([id]) => !toSend.some((a) => a.questionId === id))));
+    return ok;
+  };
+
+  return {
+    view: list.view,
+    groups,
+    hidden: list.own.filter(isHiddenView),
+    open: list.ownOpen,
+    competitors: list.competitors,
+    hasHidden: list.own.some(isHiddenView),
+    draft: (questionId: string) => drafts[questionId] ?? '',
+    setDraft: (questionId: string, v: string) => setDrafts((d) => ({ ...d, [questionId]: v })),
+    canSend: toSend.length > 0,
+    send,
+    skip: (personaId: string) => (wsId ? change(() => stakeholdersApi.answer(wsId, { answers: [], skip: [personaId] })) : Promise.resolve(false)),
+    skipAll: () => (wsId ? change(() => stakeholdersApi.answer(wsId, { answers: [], skipAll: true })) : Promise.resolve(false)),
+    reveal: (personaId: string) => (wsId ? change(() => stakeholdersApi.reveal(wsId, personaId)) : Promise.resolve(false)),
+    /** "Use for reads and learning" (the persona include override); `null` resets to the default (verified only). */
+    setInclude: (personaId: string, include: boolean | null) => change(() => api.setPersonaInclude(personaId, include)),
+    busy: action.busy,
+    actionError: action.error,
+    loading: list.loading || qs.loading,
+    error: list.error ?? qs.error,
+  };
+}
+
+/** The user's statements about one stakeholder (newest first) and the "Add a note" box. */
+export function useStakeholderStatements(wsId: string | null | undefined, personaId: string) {
+  const res = useResource(`stakeholderStatements:${wsId ?? ''}:${personaId}`, wsId ? () => stakeholdersApi.statements(wsId, personaId) : null);
+  const action = useAction();
+  const [note, setNote] = useState('');
+  const addNote = async () => {
+    const text = note.trim();
+    if (!wsId || !text) return false;
+    const ok = (await action.run(async () => (await stakeholdersApi.addNote(wsId, personaId, text), true))) === true;
+    if (ok) {
+      setNote('');
+      await res.reload();
+    }
+    return ok;
+  };
+  return {
+    statements: Array.isArray(res.data?.statements) ? res.data.statements : [],
+    note,
+    setNote,
+    canAdd: note.trim() !== '',
+    addNote,
+    busy: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
+  };
+}
+
+/**
+ * The simulated stakeholder reads of one recommendation, the user's agree / disagree (with an optional
+ * reason) and the "Record the real decision" form (an own, open stakeholder, the decision, the reasoning).
+ */
+export function useStakeholderReads(wsId: string | null | undefined, recId: string) {
+  const res = useResource(`stakeholderReads:${wsId ?? ''}:${recId}`, wsId ? () => stakeholdersApi.reads(wsId, recId) : null);
+  useBusEvents(wsId, (e) => {
+    if (e.type === 'task_status') void res.reload();
+  });
+  const action = useAction();
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  /** Reactions made on this page since the reads loaded (the served reads carry the earlier ones). */
+  const [reacted, setReacted] = useState<Record<string, { reaction: FlowReaction; reason?: string }>>({});
+  const [form, setForm] = useState<{ personaId: string; decision: RealDecision; reasoning: string } | null>(null);
+  const [recorded, setRecorded] = useState<{ label: string; decision: RealDecision } | null>(null);
+
+  const react = async (readId: string, reaction: FlowReaction) => {
+    if (!wsId) return false;
+    const reason = reasons[readId]?.trim() || undefined;
+    const ok = (await action.run(async () => (await stakeholdersApi.react(wsId, readId, reaction, reason), true))) === true;
+    if (ok) {
+      setReacted((r) => ({ ...r, [readId]: { reaction, ...(reason ? { reason } : {}) } }));
+      setReasons((r) => ({ ...r, [readId]: '' }));
+    }
+    return ok;
+  };
+
+  const record = async (labelOf: (personaId: string) => string) => {
+    if (!wsId || !form || !form.personaId || !form.reasoning.trim()) return false;
+    const input = { personaId: form.personaId, decision: form.decision, reasoning: form.reasoning.trim() };
+    const ok = (await action.run(async () => (await stakeholdersApi.recordDecision(wsId, recId, input), true))) === true;
+    if (ok) {
+      setRecorded({ label: labelOf(input.personaId), decision: input.decision });
+      setForm(null);
+    }
+    return ok;
+  };
+
+  const reads = Array.isArray(res.data?.reads) ? res.data.reads : [];
+
+  return {
+    reads,
+    reason: (readId: string) => reasons[readId] ?? '',
+    setReason: (readId: string, v: string) => setReasons((r) => ({ ...r, [readId]: v })),
+    /** The user's latest reaction to a read: made on this page, else the one the server holds. */
+    reacted: (readId: string): { reaction: FlowReaction; reason?: string } | undefined => {
+      if (reacted[readId]) return reacted[readId];
+      const served = reads.find((x) => x.id === readId);
+      return served?.reaction ? { reaction: served.reaction, ...(served.reactionReason ? { reason: served.reactionReason } : {}) } : undefined;
+    },
+    react,
+    form,
+    openForm: (personaId: string) => {
+      setRecorded(null);
+      setForm({ personaId, decision: 'approved', reasoning: '' });
+    },
+    setForm: (patch: Partial<{ personaId: string; decision: RealDecision; reasoning: string }>) => setForm((f) => (f ? { ...f, ...patch } : f)),
+    closeForm: () => setForm(null),
+    canRecord: !!form && !!form.personaId && form.reasoning.trim() !== '',
+    record,
+    recorded,
+    busy: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
   };
 }

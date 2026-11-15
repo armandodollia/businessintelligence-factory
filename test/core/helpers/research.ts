@@ -99,3 +99,17 @@ export const revise =
   };
 
 export const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A finished stakeholder research task of `workspaceId` for fixtures that call `save_stakeholder`
+ * (only a run of an `own_stakeholders` / `competitor_stakeholders` task may save one): the type that
+ * matches `subject` ('own' or a competitor id), one per node and type.
+ */
+export function fixtureStakeholderTask(store: Store, workspaceId: string, subject: unknown): Task {
+  const type = subject === 'own' ? 'own_stakeholders' : 'competitor_stakeholders';
+  const brief = 'fixture: saves stakeholders';
+  return (
+    store.tasks.list({ workspaceId }).find((t) => t.type === type && t.brief === brief) ??
+    addTask(store, { workspaceId, phase: 'stakeholders', type, brief, subject: undefined, status: 'verified' })
+  );
+}

@@ -4,7 +4,8 @@ import { entityKindSchema, modelRefSchema, taskTypeSchema } from '../../config/s
 import { READ_FLOOR_TOKENS } from '../../knowledge/floors.js';
 import { QUOTE_MAX_CHARS, QUOTE_TOO_LONG } from '../../knowledge/factTools.js';
 import { RELATION_TYPES } from '../../knowledge/relations.js';
-import { PERSONA_FIELDS, type PersonaField } from '../../scoring/criteria.js';
+import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, type PersonaField, type StakeholderField } from '../../scoring/criteria.js';
+import { OWN_STANCES, RIVAL_STANCES, STAKEHOLDER_TYPES } from '../../stakeholders/types.js';
 import { FLOW_LABEL_MAX, FLOW_TEXT_MAX, type CheckAnsweredBy, type CheckKind, type ReviewSourceType, type StopReason } from '../../flows/types.js';
 import type { Role } from '../../types.js';
 
@@ -54,6 +55,12 @@ export const TOOL_NAMES = [
   'save_review_mentions',
   'propose_flow_type',
   'propose_checklist',
+  // Stakeholder personas: the worker tool of the stakeholders phase
+  'save_stakeholder',
+  // Stakeholder personas: the interviewer notes what the user said about a stakeholder
+  'note_stakeholder',
+  // Stakeholder personas: a stakeholder persona's simulated read of a recommendation
+  'submit_stakeholder_read',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -105,6 +112,13 @@ ROLE_TOOLS.worker.push('read_flow_catalog', 'save_flow', 'save_flow_checks', 'sa
 ROLE_TOOLS.reviewer.push('read_flow_catalog');
 // --- end flow records ----------------------------------------------------------------------------
 
+// Stakeholder personas (design 2026-11-15 §6): workers of the stakeholders phase save stakeholders.
+ROLE_TOOLS.worker.push('save_stakeholder');
+// Stakeholder personas (design 2026-11-15 §9): the interviewer stores what the user said about a stakeholder.
+ROLE_TOOLS.interviewer.push('note_stakeholder');
+// Stakeholder personas (design 2026-11-15 §10): a stakeholder persona reads a recommendation in the panel.
+ROLE_TOOLS.persona.push('submit_stakeholder_read');
+
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
 export type IssueClass = (typeof ISSUE_CLASSES)[number];
 
@@ -120,6 +134,10 @@ const personaField = z.object({
 });
 const personaProfileShape = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, personaField])) as {
   [K in PersonaField]: typeof personaField;
+};
+/** Stakeholder profile: every `STAKEHOLDER_FIELDS` entry, each like a persona field (stakeholder design §5). */
+const stakeholderProfileShape = Object.fromEntries(STAKEHOLDER_FIELDS.map((f) => [f, personaField])) as {
+  [K in StakeholderField]: typeof personaField;
 };
 
 // --- knowledge store KS-3: entity references (design §7.4, §9) ---
@@ -440,6 +458,35 @@ export const toolInputSchemas = {
     audience: z.enum(['external', 'internal']).describe('external = customers; internal = employees / internal users'),
     profile: z.object(personaProfileShape).describe('Every persona field, each with value, confidence 0–1 and evidence'),
   }),
+  // Stakeholder personas (design 2026-11-15 §6).
+  save_stakeholder: z.object({
+    label: z.string().min(1).max(80).describe('A role, team or system name on one line (at most 80 characters); a person\'s name only when it appears in public evidence'),
+    stakeholder_type: z.enum(STAKEHOLDER_TYPES),
+    subject: z.string().min(1).describe("'own' (a stakeholder of this node) or the id of a competitor of this business tree"),
+    relation: z.string().min(1).max(300).describe('What this node needs from them or what they decide, on one line ("approves pricing changes")'),
+    profile: z.object(stakeholderProfileShape).describe('Every stakeholder field, each with value, confidence 0–1 and evidence'),
+  }),
+  // Stakeholder personas (design 2026-11-15 §9): a statement quoted from the user's interview messages.
+  note_stakeholder: z.object({
+    persona_id: id.optional().describe('A stakeholder of this node, when one is listed; omit for someone not listed yet'),
+    quote: z
+      .string()
+      .min(12, 'quote needs at least 12 characters')
+      .max(4000)
+      .describe("The user's own words about the stakeholder (at least 12 characters), copied exactly from one of their messages"),
+    field: z.enum(STAKEHOLDER_FIELDS).optional().describe('The stakeholder field the quote speaks to, when one clearly fits'),
+  }),
+  // Stakeholder personas (design 2026-11-15 §10): one stakeholder's simulated read of one recommendation.
+  submit_stakeholder_read: z.object({
+    recommendation_id: id,
+    stance: z
+      .enum([...OWN_STANCES, ...RIVAL_STANCES])
+      .describe(`Own stakeholder: ${OWN_STANCES.join(', ')}. Competitor stakeholder: ${RIVAL_STANCES.join(', ')}`),
+    conditions: z.array(z.string().max(300)).max(5).describe('Conditions you would set (at most 5, each at most 300 characters)'),
+    concerns: z.array(z.string().max(300)).max(5).describe('Your concerns, most important first (at most 5, each at most 300 characters)'),
+    reasoning: z.string().min(1).max(1000).describe('Why, in character (at most 1,000 characters)'),
+    would_change_mind: z.string().max(1000).describe('What would change your stance (at most 1,000 characters)'),
+  }),
   submit_persona_feedback: z.object({
     recommendation_id: id,
     /** Spec §8b: each score is on a 1–5 scale. */
@@ -653,7 +700,10 @@ export const toolInputSchemas = {
         z.object({
           action: z.enum(['add', 'replace', 'retire']).describe('add: a new adjustment; replace: new text for an active one; retire: end an active one'),
           adjustment_id: id.optional().describe('replace, retire: the id of the active adjustment'),
-          field: z.enum(PERSONA_FIELDS).optional().describe('The profile field it corrects, when one fits'),
+          field: z
+            .enum([...PERSONA_FIELDS, ...STAKEHOLDER_FIELDS])
+            .optional()
+            .describe('The profile field it corrects, when one fits: a persona field for a segment persona, a stakeholder field for a stakeholder'),
           text: z
             .string()
             .min(1)
@@ -661,7 +711,7 @@ export const toolInputSchemas = {
             .optional()
             .describe('add, replace: the adjustment, in the second person, as a general statement (never quote a reason or detail)'),
           why: z.string().min(1).max(400).describe('Why: what the reactions show'),
-          evidence: z.array(id).max(20).describe('Reaction ids shown in your prompt that support it'),
+          evidence: z.array(id).max(20).describe('Reaction ids (and, for a stakeholder, statement ids) shown in your prompt that support it'),
         }),
       )
       .max(5)
@@ -719,6 +769,15 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   get_identity: 'Get the disposable identity (email, name) to use for signing up on a site.',
   save_persona: 'Save or update an evidence-backed persona profile for an audience segment.',
   submit_persona_feedback: 'Submit your in-character feedback on a recommendation (simulated persona).',
+  save_stakeholder:
+    'Save or update an evidence-backed stakeholder persona: a person, team or system this node (subject "own") or a competitor ' +
+    '(subject: its id) depends on. Same label and subject = update.',
+  submit_stakeholder_read:
+    'Submit your in-character read of a recommendation as a stakeholder: your stance, conditions, concerns, reasoning and ' +
+    'what would change your mind (simulated stakeholder).',
+  note_stakeholder:
+    'Note what the user said about a person, team or system whose approval, budget or data this business depends on: ' +
+    'quote their words exactly from one of their messages. Changes nothing else.',
   submit_flow_verdicts:
     'Submit your in-character verdicts on pairs of flows of one flow type: one per listed pair, with the flow ids as given ' +
     '(simulated persona).',

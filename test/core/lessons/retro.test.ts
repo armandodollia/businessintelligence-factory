@@ -6,6 +6,7 @@ import { ROLE_TOOLS } from '../../../src/core/harness/tools/registry.js';
 import { estimateTokens } from '../../../src/core/knowledge/budget.js';
 import { recordRetrieval, runIsUploadExposed } from '../../../src/core/knowledge/retrievalLog.js';
 import { lessonRepos } from '../../../src/core/learning/lessons/store.js';
+import { LessonPrivacy } from '../../../src/core/learning/lessons/privacy.js';
 import { retroBudget, retroDigest, retroJobSource, runRetro } from '../../../src/core/learning/lessons/retro.js';
 import { calibrationAppendix } from '../../../src/core/prompts/index.js';
 import { promptStoreGaps } from '../../../src/core/prompts/store.js';
@@ -209,6 +210,36 @@ describe('weekly retro', () => {
     const digest = retroDigest({ store: t.store, config: t.config }, t.b.id, { since: '2000-01-01T00:00:00Z', until: nowAfter(t).toISOString() });
     expect(digest.active).toBe(false);
     expect(digest.briefing.section).not.toMatch(/tsk_/);
+  });
+});
+
+describe('withheld own-stakeholder research in lessons (stakeholder design §7)', () => {
+  it('review issues of a withheld task are counted but never quoted; quoted again once no stakeholder is hidden', () => {
+    const t = lessonsSetup(opened);
+    const own = t.task(t.a.id, { type: 'own_stakeholders' });
+    t.issue(own, 'substantive', 'WITHHELD-QUOTE the CFO only approves quick payback');
+    const plain = t.task(t.a.id);
+    t.issue(plain, 'substantive', 'the market size has no date');
+    const cfo = t.store.personas.insert({
+      id: 'per_cfo', workspaceId: t.a.id, slug: 'stk-cfo', segment: 'Chief financial officer', profile: {}, version: 1, status: 'verified',
+      agentMdPath: join(t.dir, 'cfo.md'), kind: 'stakeholder', stakeholderType: 'leader', subjectKind: 'own', relation: 'r', disclosure: 'hidden',
+    });
+    const window = () => ({ since: '2000-01-01T00:00:00Z', until: nowAfter(t).toISOString() });
+
+    const privacy = new LessonPrivacy(t.store);
+    expect(privacy.blocked(own.task.id)).toBe(true);
+    expect(privacy.blocked(own.worker.id)).toBe(true);
+    expect(privacy.blocked(own.reviewer.id)).toBe(true);
+    expect(privacy.blocked(plain.task.id)).toBe(false);
+
+    const hidden = retroDigest({ store: t.store, config: t.config }, t.a.id, window());
+    expect(hidden.briefing.section).not.toContain('WITHHELD-QUOTE');
+    expect(hidden.briefing.section).toContain(own.task.id.slice(0, 8)); // counted, named by id
+    expect(hidden.briefing.section).toContain('the market size has no date');
+
+    t.store.personas.update(cfo.id, { disclosure: 'open' });
+    expect(new LessonPrivacy(t.store).blocked(own.task.id)).toBe(false);
+    expect(retroDigest({ store: t.store, config: t.config }, t.a.id, window()).briefing.section).toContain('WITHHELD-QUOTE');
   });
 });
 

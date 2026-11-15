@@ -10,6 +10,9 @@
  * - Writes: accept (optionally with edited text), reject, retire. The actor is `actorOf(config)`, never
  *   the request body; each records one feedback event and one Decision (`core/personas/adjustments.ts`).
  * - Isolation: an id of another business tree answers exactly like an unknown one (404).
+ * - Stakeholder personas (stakeholder design §7, §14): open ones are served like segment personas; a
+ *   hidden one is absent from the list, left out of `pendingInTree`, and its persona, proposal and
+ *   adjustment ids answer 404 on every route here, exactly like unknown ids.
  * - Nothing here is shown to an agent; text is served as stored (redacted) plain data for the browser.
  */
 import type { Context, Hono } from 'hono';
@@ -24,6 +27,7 @@ import { personaLearningSettings } from '../core/personas/settings.js';
 import { collectPersonaSignals, openSignals } from '../core/personas/signals.js';
 import { activeAdjustments, personaLearningRepos } from '../core/personas/store.js';
 import type { PersonaLearningRun, PersonaProposal } from '../core/personas/types.js';
+import { isHidden, segmentPersonas, stakeholderPersonas } from '../core/stakeholders/personas.js';
 import type { Store } from '../core/store/db.js';
 import { rootOf } from '../core/workspace/tree.js';
 import type { Workspace } from '../core/types.js';
@@ -79,6 +83,16 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
   const { store, config } = deps;
   const base = '/api/workspaces/:id';
   const repos = personaLearningRepos(store);
+  /** Whether the persona is a hidden stakeholder: nothing about it is served (stakeholder design §7). */
+  const hiddenPersona = (personaId: string) => {
+    const p = store.personas.get(personaId);
+    return !!p && isHidden(p);
+  };
+  /** 404, exactly as for an unknown id, for a proposal of a hidden stakeholder. */
+  const notHiddenProposal = (proposalId: string) => {
+    const p = repos.proposals.get(proposalId);
+    if (p && hiddenPersona(p.personaId)) throw new PersonaLearningError(`persona proposal '${proposalId}' not found`, 404);
+  };
 
   const wrap =
     (fn: (c: Context, ws: Workspace) => Promise<Response> | Response) =>
@@ -99,10 +113,12 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
     wrap((c, ws) => {
       const settings = personaLearningSettings(config);
       const now = new Date();
-      const personas = store.personas.list({ workspaceId: ws.id }).map((p) => {
+      const learners = [...segmentPersonas(store, ws.id), ...stakeholderPersonas(store, ws.id).filter((p) => !isHidden(p))];
+      const personas = learners.map((p) => {
         const lastRun = lastRunOf(repos.runs.list({ personaId: p.id }));
         return {
           personaId: p.id,
+          kind: p.kind ?? 'segment',
           segment: p.segment,
           version: p.version,
           gate: personaGate(openSignals(store, settings, p.id, now), settings),
@@ -111,7 +127,9 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
           ...(lastRun ? { lastRun } : {}),
         };
       });
-      const pendingInTree = repos.proposals.list({ rootWorkspaceId: rootOf(store, ws.id), status: 'pending' }).length;
+      const pendingInTree = repos.proposals
+        .list({ rootWorkspaceId: rootOf(store, ws.id), status: 'pending' })
+        .filter((p) => !hiddenPersona(p.personaId)).length;
       // Whether persona learning would run at all: the retro runs it only with all three enabled.
       const lessons = lessonsSettings(config);
       const enabled = settings.enabled && lessons.enabled && lessons.retro.enabled;
@@ -124,7 +142,8 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
     `${base}/personas/:personaId/signals`,
     wrap((c, ws) => {
       const personaId = c.req.param('personaId')!;
-      if (store.personas.get(personaId)?.workspaceId !== ws.id) throw new PersonaLearningError(`persona '${personaId}' not found`, 404);
+      const persona = store.personas.get(personaId);
+      if (persona?.workspaceId !== ws.id || isHidden(persona)) throw new PersonaLearningError(`persona '${personaId}' not found`, 404);
       return c.json({ signals: collectPersonaSignals(store, personaId).reverse() });
     }),
   );
@@ -133,8 +152,10 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
   app.post(
     `${base}/persona-proposals/:proposalId/accept`,
     wrap(async (c, ws) => {
+      const proposalId = c.req.param('proposalId')!;
+      notHiddenProposal(proposalId);
       const input = await body(c, schemas.accept);
-      const out = acceptPersonaProposal(store, actorOf(config), ws.id, c.req.param('proposalId')!, {
+      const out = acceptPersonaProposal(store, actorOf(config), ws.id, proposalId, {
         ...(input.text !== undefined ? { text: input.text } : {}),
         ...(input.reason !== undefined ? { reason: input.reason } : {}),
         maxAdjustments: personaLearningSettings(config).maxAdjustments,
@@ -146,8 +167,10 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
   app.post(
     `${base}/persona-proposals/:proposalId/reject`,
     wrap(async (c, ws) => {
+      const proposalId = c.req.param('proposalId')!;
+      notHiddenProposal(proposalId);
       const input = await body(c, schemas.reasonOnly);
-      return c.json(rejectPersonaProposal(store, actorOf(config), ws.id, c.req.param('proposalId')!, input.reason !== undefined ? { reason: input.reason } : {}));
+      return c.json(rejectPersonaProposal(store, actorOf(config), ws.id, proposalId, input.reason !== undefined ? { reason: input.reason } : {}));
     }),
   );
 
@@ -155,8 +178,11 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
   app.post(
     `${base}/persona-adjustments/:adjustmentId/retire`,
     wrap(async (c, ws) => {
+      const adjustmentId = c.req.param('adjustmentId')!;
+      const adjustment = repos.adjustments.get(adjustmentId);
+      if (adjustment && hiddenPersona(adjustment.personaId)) throw new PersonaLearningError(`persona adjustment '${adjustmentId}' not found`, 404);
       const input = await body(c, schemas.reasonOnly);
-      return c.json(retireAdjustment(store, actorOf(config), ws.id, c.req.param('adjustmentId')!, input.reason !== undefined ? { reason: input.reason } : {}));
+      return c.json(retireAdjustment(store, actorOf(config), ws.id, adjustmentId, input.reason !== undefined ? { reason: input.reason } : {}));
     }),
   );
 }

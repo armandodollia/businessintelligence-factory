@@ -14,6 +14,8 @@ import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
 import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
+import { taskIsOffline, taskNeedsBrowser } from './phases.js'; // stakeholder personas
+import { stakeholderTaskSection } from '../stakeholders/personas.js'; // stakeholder personas
 import { defaultConfig } from '../config/schema.js'; // KS-2
 import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
 import type { ReviewSlice } from '../knowledge/readCommon.js'; // KS-4
@@ -349,7 +351,8 @@ export function workPromptWithReads(deps: Pick<ResearchDeps, 'store'> & Partial<
     `## Brief\n${task.brief}`,
     `## Acceptance criteria\n${bullets(task.acceptanceCriteria)}`,
     ...briefings.map((b) => b.section).filter(Boolean),
-  ];
+    stakeholderTaskSection(deps.store, deps.config ?? defaultConfig, task), // stakeholder personas ('' for other types)
+  ].filter(Boolean);
   const answered = answeredRequestsSection(deps, task);
   if (answered) parts.push(answered);
   // WP-D: escalation re-run context and the role's recent policy denials (same business tree).
@@ -385,6 +388,7 @@ export function revisePromptWithReads(
     deps ? workerDisputeSection(deps.store, task, issues, maxReasserts(deps.config)) : '', // learning loop WP-C
     outputs?.section ?? '',
     ...briefings.map((b) => b.section),
+    deps ? stakeholderTaskSection(deps.store, deps.config ?? defaultConfig, task) : '', // stakeholder personas
     deps ? answeredRequestsSection(deps, task) : '',
     ...(deps ? wpdSections(deps, task) : []), // WP-D
   ]
@@ -491,7 +495,7 @@ async function workerStep(
   const role = roleForTask(initial);
   const system =
     experimentWorkerPrompt(store, taskId) ?? // learning loop WP-F: an experiment arm's worker prompt version
-    workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config, initial.workspaceId, { taskId })); // stored lessons-off flag
+    workerSystemPrompt(config, role, taskNeedsBrowser(initial.type, initial.needsBrowser), initial.type, calibrationScope(store, config, initial.workspaceId, { taskId })); // stored lessons-off flag
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
@@ -501,7 +505,9 @@ async function workerStep(
     const { prompt, reads } = kind === 'work' ? workPromptWithReads(deps, task) : revisePromptWithReads(task, issues, deps);
     const res = await runAgent(deps, {
       kind, role, workspaceId: task.workspaceId, task, round, attempt, prompt, systemPrompt: system,
-      model: task.model, needsBrowser: task.needsBrowser, promptVersion: version,
+      // Stakeholder personas (design §6): own stakeholder research never has a browser, whatever the row says.
+      model: task.model, needsBrowser: taskNeedsBrowser(task.type, task.needsBrowser), promptVersion: version,
+      ...(taskIsOffline(task.type) ? { offline: true } : {}),
       ...(reads.length ? { promptReads: reads } : {}),
     });
     throwIfAborted(deps.signal);
@@ -582,12 +588,15 @@ async function reviewStep(
 ): Promise<{ valid: boolean; score: number; issues: ReviewIssue[] }> {
   const { store, config } = deps;
   const task = store.tasks.get(taskId)!;
-  const model = reviewerFor(task.model, config);
+  // Stakeholder personas (final review item 2): the reviewer of an offline task can run offline.
+  const model = reviewerFor(task.model, config, { offline: taskIsOffline(task.type) });
   const input = reviewerRunInput(deps, task, round); // learning loop WP-F: shared with reviewer audits
   const res = await runAgent(deps, {
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
     prompt: input.prompt, systemPrompt: input.systemPrompt,
     model, needsBrowser: false, promptVersion: input.promptVersion,
+    // Stakeholder personas: the reviewer of an offline task reads the same internal content, so it is offline too.
+    ...(taskIsOffline(task.type) ? { offline: true } : {}),
     ...(input.promptReads.length ? { promptReads: input.promptReads } : {}),
   });
   const version = input.promptVersion;

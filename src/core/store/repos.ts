@@ -321,6 +321,8 @@ export const specs = {
       agentMdPath: 'text', version: 'int', audience: 'text', taskId: 'text', status: 'text', taskRound: 'int',
       includeOverride: 'bool',
       entityId: 'text', // KS-0 (migration 18)
+      // stakeholder personas (migration 25)
+      kind: 'text', stakeholderType: 'text', subjectKind: 'text', subjectId: 'text', relation: 'text', disclosure: 'text',
     },
   } satisfies TableSpec<Persona>,
   symptoms: {

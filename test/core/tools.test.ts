@@ -17,6 +17,9 @@ import { createToolHandlers, getRunOutputs, resolveUserRequest, type ToolHandler
 import { ROLE_TOOLS, TOOL_NAMES } from '../../src/core/harness/tools/registry.js';
 import { TokenRegistry, type RunContext } from '../../src/core/harness/tokens.js';
 import type { Task } from '../../src/core/types.js';
+import { PRIVATE_TASK_TOOLS } from '../../src/core/research/phases.js';
+import { STAKEHOLDER_FIELDS } from '../../src/core/scoring/criteria.js';
+import { stakeholderToolHandlers } from '../../src/core/stakeholders/personas.js';
 
 const opened: Store[] = [];
 afterEach(() => {
@@ -65,11 +68,14 @@ describe('role scope table', () => {
     // KS-4: expand joins read_artifact, both limited to the task's review slice by the dispatcher.
     // Flow records: reviewers may read the flow catalog (the questions behind check answers).
     expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'expand', 'read_flow_catalog']));
-    expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback', 'submit_flow_verdicts']));
+    expect(new Set(ROLE_TOOLS.persona)).toEqual(
+      new Set(['log_decision', 'submit_persona_feedback', 'submit_flow_verdicts', 'submit_stakeholder_read']), // + stakeholder reads
+    );
     // KS-1: describe_artifact for worker, orchestrator, interviewer, synthesizer.
     expect(new Set(ROLE_TOOLS.interviewer)).toEqual(
       new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact', 'describe_artifact',
-        'search', 'get_card', 'expand']), // KS-4
+        'search', 'get_card', 'expand', // KS-4
+        'note_stakeholder']), // stakeholder personas
     );
     expect(new Set(ROLE_TOOLS.worker)).toEqual(
       new Set([
@@ -78,6 +84,7 @@ describe('role scope table', () => {
         'confirm_finding', 'retract_finding', // knowledge store KS-2
         'search', 'get_card', 'expand', 'list_changes', // KS-4
         'read_flow_catalog', 'save_flow', 'save_flow_checks', 'save_review_mentions', 'propose_flow_type', 'propose_checklist', // flow records
+        'save_stakeholder', // stakeholder personas
       ]),
     );
     expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(
@@ -631,3 +638,56 @@ describe('concurrent user requests on one task', () => {
   });
 });
 
+
+// Stakeholder personas (design §7, task 6 fix round 2): a run of an own_stakeholders task cannot ask the
+// user anything and may store only stakeholders; its reviewer keeps the review tools.
+describe('runs of a private task (own_stakeholders)', () => {
+  function privateSetup() {
+    const s = setup({ extraHandlers: stakeholderToolHandlers({ dataDir: mkdtempSync(join(tmpdir(), 'bif-tools-stk-')) }) });
+    s.store.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: new Date().toISOString() });
+    const task = s.store.tasks.insert({
+      id: newId('tsk'), workspaceId: 'ws_a', runId: 'run_1', phase: 'stakeholders', type: 'own_stakeholders', brief: 'Map stakeholders',
+      model: { provider: 'claude', model: 'sonnet' }, needsBrowser: false, acceptanceCriteria: ['c'], status: 'running', round: 1, createdAt: new Date().toISOString(),
+    });
+    const art = s.artifacts.save({ workspaceId: 'ws_a', kind: 'text', mime: 'text/plain', bytes: 'Org chart' }).id;
+    return { ...s, task, art };
+  }
+  const refusalOf = (r: { ok: boolean; error?: string }) => (r.ok ? '' : r.error ?? '');
+
+  it('every worker tool outside the allowlist is refused, asking the user with "finish with what you have"', async () => {
+    const s = privateSetup();
+    const c = ctx('worker', { taskId: s.task.id });
+    const refused = ROLE_TOOLS.worker.filter((t) => !PRIVATE_TASK_TOOLS.has(t));
+    expect(refused).toEqual(expect.arrayContaining([
+      'save_finding', 'save_persona', 'save_competitor', 'save_hypothesis', 'save_artifact', 'propose_business_unit', 'request_user_action',
+      'request_approval', 'describe_artifact', 'get_identity', 'confirm_finding', 'retract_finding',
+    ]));
+    for (const tool of refused) {
+      const r = await s.handle(c, tool, {});
+      expect(refusalOf(r), tool).toMatch(new RegExp(`tool '${tool}' is not available in a own_stakeholders task`));
+    }
+    for (const tool of ['request_user_action', 'request_approval'] as const) {
+      expect(refusalOf(await s.handle(c, tool, { site: 'x', action: 'a', details: 'd', reason: 'r' })), tool).toMatch(/cannot ask the user anything.*Finish with what you have/s);
+    }
+    expect(s.store.userRequests.list()).toEqual([]);
+    expect(s.store.findings.list()).toEqual([]);
+  });
+
+  it('the allowlisted tools still work; the reviewer keeps its review tools; other tasks are unaffected', async () => {
+    const s = privateSetup();
+    const c = ctx('worker', { taskId: s.task.id });
+    expect((await s.handle(c, 'log_decision', { what: 'start', why: 'plan', confidence: 0.6 })).ok).toBe(true);
+    expect((await s.handle(c, 'read_workspace', { workspace_id: 'ws_a' })).ok).toBe(true);
+    expect((await s.handle(c, 'read_artifact', { artifact_id: s.art })).ok).toBe(true);
+    const profile = Object.fromEntries(STAKEHOLDER_FIELDS.map((f) => [f, { value: `${f} v`, confidence: 0.5, evidence: [s.art] }]));
+    const saved = await s.handle(c, 'save_stakeholder', { label: 'Chief financial officer', stakeholder_type: 'leader', subject: 'own', relation: 'approves', profile });
+    expect(saved.ok).toBe(true);
+    expect((await s.handle(c, 'submit_result', { summary: 'one stakeholder', evidence: [s.art] })).ok).toBe(true);
+
+    const reviewer = ctx('reviewer', { taskId: s.task.id });
+    expect((await s.handle(reviewer, 'submit_review', { score: 8, issues: [] })).ok).toBe(true);
+
+    const other = addTask(s.store);
+    expect((await s.handle(ctx('worker', { taskId: other.id }), 'save_artifact', { kind: 'text', mime: 'text/plain', content: 'x' })).ok).toBe(true);
+  });
+});

@@ -14,6 +14,7 @@ import { loadPrompt, promptVersion, type CalibrationScope } from '../prompts/ind
 import { recordHarnessDecision, runAgent, type ResearchDeps } from '../research/deps.js';
 import { runHistory, runTaskTracked } from '../research/orchestrator.js';
 import { loopSettings, reviewContext, roleForTask } from '../research/reviewLoop.js';
+import { taskIsOffline, taskMayAskUser } from '../research/phases.js'; // stakeholder personas
 import { defaultConfig } from '../config/schema.js'; // KS-5
 import type { PromptRead } from '../knowledge/promptReads.js'; // KS-5
 import { servedLine } from '../knowledge/texts.js'; // KS-5
@@ -202,10 +203,14 @@ export function escalationPromptWithReads(
 // ---------------------------------------------------------------------------
 // running, answering, re-running
 
+/** Agent run id of the harness Decision recording an escalation skipped for a private task (no agent run). */
+export const ESCALATION_SKIPPED_ACTOR = 'escalation_skipped';
+
 /**
  * Runs the escalation agent for a task that ended `unverified` / `failed` and returns the questions
  * it asked. Does nothing (returns `[]`) when escalations are disabled, the task is not in such a
- * state, it still has unanswered escalation questions, or `escalation.maxPerTask` is reached.
+ * state, it still has unanswered escalation questions, or `escalation.maxPerTask` is reached. A private
+ * task (own stakeholder research) is skipped with a harness Decision, once per round.
  */
 export async function runEscalation(deps: ResearchDeps, taskId: string): Promise<UserRequest[]> {
   const { store, config } = deps;
@@ -214,6 +219,22 @@ export async function runEscalation(deps: ResearchDeps, taskId: string): Promise
   const task = store.tasks.get(taskId);
   if (!task || !ESCALATABLE.has(task.status)) return [];
   if (isExperimentTask(store, task.id)) return []; // learning loop WP-F: experiments never ask the user
+  // Stakeholder personas (design §7): own stakeholder research never asks the user; the question round is the only channel.
+  if (!taskMayAskUser(task.type)) {
+    const skipped = store.decisions
+      .list({ workspaceId: task.workspaceId, agentRunId: ESCALATION_SKIPPED_ACTOR })
+      .some((d) => (d.payload as { taskId?: unknown } | null)?.taskId === task.id && (d.payload as { round?: unknown }).round === task.round);
+    if (!skipped) {
+      recordHarnessDecision(
+        store,
+        { agentRunId: ESCALATION_SKIPPED_ACTOR, workspaceId: task.workspaceId, role: 'escalation', model: settings.model, promptVersion: '' },
+        'decision',
+        { event: 'escalation_skipped', reason: 'private_task', taskId: task.id, taskType: task.type, round: task.round, status: task.status },
+        [task.id],
+      );
+    }
+    return [];
+  }
   if (escalationRequests(store, task).some((r) => r.status === 'pending')) return [];
   const runs = store.agentRuns.list({ taskId, role: 'escalation' }).filter((r) => r.workspaceId === task.workspaceId);
   if (runs.length >= settings.maxPerTask) return [];
@@ -223,6 +244,8 @@ export async function runEscalation(deps: ResearchDeps, taskId: string): Promise
     kind: 'escalate', role: 'escalation', workspaceId: task.workspaceId, task, round: task.round, attempt: 1,
     prompt, systemPrompt: system,
     model: settings.model, needsBrowser: false, promptVersion: promptVersion(system),
+    // Stakeholder personas: the escalation of an offline task reads the same internal content, so it is offline too.
+    ...(taskIsOffline(task.type) ? { offline: true } : {}),
     ...(reads.length ? { promptReads: reads } : {}),
   });
   return store.userRequests.list({ agentRunId: res.agentRunId, kind: ESCALATION_KIND });

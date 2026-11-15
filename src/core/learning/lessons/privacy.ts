@@ -9,9 +9,14 @@
  * - its task is the task of an exposed run or a task whose outputs cite an output of one, or an id it
  *   rests on is such an output or a record citing one (the export's rule, `exportExclusion()`).
  * The check is computed when the example is built (never stored), exactly as the export does.
+ *
+ * Stakeholder personas (design §7): an id of withheld research (an own-stakeholder task of a node that
+ * still has a hidden stakeholder, one of its runs, or a Decision of such a run) is blocked the same way,
+ * so its review issues and audit misses are counted but never quoted.
  */
 import { servedLine } from '../../knowledge/texts.js';
 import { exportExclusion } from '../../scoring/export.js';
+import { withholding, type Withholding } from '../../stakeholders/withheld.js';
 import type { Store } from '../../store/db.js';
 import type { LessonSignal } from './signals.js';
 
@@ -20,6 +25,7 @@ export const LESSON_QUOTE_CHARS = 160;
 
 export class LessonPrivacy {
   private exclusion?: ReturnType<typeof exportExclusion>;
+  private withheldCache?: Withholding;
   constructor(private readonly store: Store) {}
 
   private get exc(): ReturnType<typeof exportExclusion> {
@@ -27,9 +33,19 @@ export class LessonPrivacy {
     return this.exclusion;
   }
 
-  /** The id is upload-derived, an exposed run / task / output, or cites such an output (export bound). */
+  /** The id is withheld research: a withheld task, a run of one, or a Decision of such a run. */
+  private withheld(id: string): boolean {
+    this.withheldCache ??= withholding(this.store);
+    const w = this.withheldCache;
+    if (id.startsWith('tsk_')) return w.task(this.store.tasks.get(id));
+    if (id.startsWith('dec_')) return w.run(this.store.decisions.get(id)?.agentRunId);
+    return w.run(id);
+  }
+
+  /** The id is upload-derived, an exposed run / task / output, or cites such an output (export bound), or is withheld research. */
   blocked(id: string | undefined): boolean {
     if (!id) return false;
+    if (this.withheld(id)) return true;
     return this.exc.runExposed(id) || this.exc.has(id) || (id.startsWith('tsk_') && this.exc.taskCitesExposedOutput(id) !== undefined);
   }
 

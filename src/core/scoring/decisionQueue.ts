@@ -3,6 +3,7 @@ import type { Criteria, Decision } from '../types.js';
 import { CRITERIA } from './criteria.js';
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 import type { ReviewQueueItem } from './reviewQueue.js';
+import { withholding } from '../stakeholders/withheld.js';
 
 const DECISION_KEYS = CRITERIA.decision.map((c) => c.key);
 
@@ -39,7 +40,8 @@ export function decisionReviewQueue(workspaceId: string, deps: { store: Store })
     store.ratings.list({ workspaceId, targetType: 'decision' }).map((r) => `${r.targetId}|${r.criterion}`),
   );
   const out: ReviewQueueItem[] = [];
-  for (const d of store.decisions.list({ workspaceId })) {
+  const w = withholding(store); // stakeholder design §7: a withheld research Decision has no ratable value
+  for (const d of store.decisions.list({ workspaceId }).map((x) => w.servedDecision(x))) {
     const criteria = decisionCriteria(d);
     const unrated = Object.keys(criteria).filter((k) => !rated.has(`${d.id}|${k}`));
     if (!unrated.length) continue;

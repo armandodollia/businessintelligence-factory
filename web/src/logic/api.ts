@@ -382,3 +382,24 @@ export const personaLearningApi = {
     post<unknown>(`${ws(wsId)}/persona-adjustments/${enc(adjustmentId)}/retire`, withReason(reason)),
 };
 // --- end persona learning ------------------------------------------------------------------------
+// --- stakeholder personas: the Stakeholders page and reads on a recommendation (`src/api/stakeholderRoutes.ts`) ---
+type SV = import('./types.js').StakeholderView;
+type Statement = import('./types.js').StakeholderStatement;
+export const stakeholdersApi = {
+  list: (wsId: string) => get<import('./types.js').StakeholdersView>(`${ws(wsId)}/stakeholders`),
+  questions: (wsId: string) => get<{ groups: import('./types.js').StakeholderQuestionGroup[] }>(`${ws(wsId)}/stakeholder-questions`),
+  answer: (wsId: string, input: import('./types.js').StakeholderAnswersInput) =>
+    post<{ opened: string[]; statements: Statement[] }>(`${ws(wsId)}/stakeholder-questions/answers`, input),
+  /** "Show what the tool found" (recorded as a skip of its questions). */
+  reveal: (wsId: string, personaId: string) => post<SV>(`${ws(wsId)}/stakeholders/${enc(personaId)}/reveal`),
+  /** The user's statements about a stakeholder, newest first. */
+  statements: (wsId: string, personaId: string) => get<{ statements: Statement[] }>(`${ws(wsId)}/stakeholders/${enc(personaId)}/statements`),
+  addNote: (wsId: string, personaId: string, text: string) => post<Statement>(`${ws(wsId)}/stakeholders/${enc(personaId)}/notes`, { text }),
+  reads: (wsId: string, recId: string) =>
+    get<{ reads: import('./types.js').ServedStakeholderRead[] }>(`${ws(wsId)}/recommendations/${enc(recId)}/stakeholder-reads`),
+  react: (wsId: string, readId: string, reaction: Reaction, reason?: string) =>
+    post<FeedbackRow>(`${ws(wsId)}/stakeholder-reads/${enc(readId)}/reaction`, { reaction, ...withReason(reason) }),
+  recordDecision: (wsId: string, recId: string, input: { personaId: string; decision: import('./types.js').RealDecision; reasoning: string }) =>
+    post<Statement>(`${ws(wsId)}/recommendations/${enc(recId)}/stakeholder-decisions`, input),
+};
+// --- end stakeholder personas --------------------------------------------------------------------

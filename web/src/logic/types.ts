@@ -173,6 +173,7 @@ export const ALL_PHASES: ResearchPhase[] = [
   'market_research',
   'competitor_discovery',
   'deep_dives',
+  'stakeholders',
   'flow_ranking',
   'synthesis',
   'persona_panel',
@@ -562,3 +563,56 @@ export interface PersonaLearningView {
   /** Pending persona proposals in the whole business tree (the Lessons page count). */
   pendingInTree?: number;
 }
+
+// ---------------------------------------------------------------------------
+// Stakeholder personas: the Stakeholders page and reads on a recommendation (`src/api/stakeholderRoutes.ts` shapes)
+
+export type { StakeholderQuestion, StakeholderRead, StakeholderStatement, StakeholderType } from '../../../src/core/stakeholders/types.js';
+type CoreStakeholderType = import('../../../src/core/stakeholders/types.js').StakeholderType;
+/** All a hidden stakeholder shows (design §7): label, type and the number of its open questions. */
+export interface HiddenStakeholderView {
+  id: string;
+  label: string;
+  stakeholderType: CoreStakeholderType;
+  disclosure: 'hidden';
+  questions: number;
+}
+/** An open stakeholder: what research found, its review status and how many statements the user made. */
+export type OpenStakeholderView = Omit<HiddenStakeholderView, 'disclosure'> & {
+  disclosure: 'open';
+  subjectKind: 'own' | 'competitor';
+  relation: string;
+  profile: Record<string, import('../../../src/core/types.js').PersonaProfileField>;
+  version: number;
+  status: string;
+  includeOverride?: boolean;
+  statements: number;
+};
+export type StakeholderView = HiddenStakeholderView | OpenStakeholderView;
+/** `GET .../stakeholders`. */
+export interface StakeholdersView {
+  enabled: boolean;
+  own: StakeholderView[];
+  competitors: Array<{ competitorId: string; name: string; stakeholders: StakeholderView[] }>;
+}
+/** One group of `GET .../stakeholder-questions`; no `persona`: the node-wide questions. */
+export interface StakeholderQuestionGroup {
+  persona?: { id: string; label: string; stakeholderType: CoreStakeholderType };
+  questions: import('../../../src/core/stakeholders/types.js').StakeholderQuestion[];
+}
+/** `POST .../stakeholder-questions/answers`. */
+export interface StakeholderAnswersInput {
+  answers: Array<{ questionId: string; text: string }>;
+  skip?: string[];
+  skipAll?: boolean;
+}
+/** A read of `GET .../recommendations/:recId/stakeholder-reads`, with its stakeholder's label and type. */
+export type ServedStakeholderRead = import('../../../src/core/stakeholders/types.js').StakeholderRead & {
+  /** The user's latest reaction to this read, when they reacted to it. */
+  reaction?: 'agree' | 'disagree';
+  reactionReason?: string;
+  label: string;
+  stakeholderType: CoreStakeholderType;
+  subjectKind: 'own' | 'competitor';
+};
+export type RealDecision = NonNullable<import('../../../src/core/stakeholders/types.js').StakeholderStatement['decision']>;

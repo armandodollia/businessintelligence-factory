@@ -32,6 +32,26 @@ export const PERSONA_FIELDS = [
 ] as const;
 export type PersonaField = (typeof PERSONA_FIELDS)[number];
 
+/**
+ * Stakeholder persona profile fields (stakeholder personas design §5), each `{ value, confidence,
+ * evidence }` like the segment fields. `dependencies`: what the node needs from them and they from it;
+ * `known_positions`: past decisions and their stated reasons.
+ */
+export const STAKEHOLDER_FIELDS = [
+  'role_mandate',
+  'goals_incentives',
+  'decision_criteria',
+  'constraints',
+  'risk_tolerance',
+  'dependencies',
+  'known_positions',
+  'objections',
+  'information_needs',
+  'communication_style',
+  'influence',
+] as const;
+export type StakeholderField = (typeof STAKEHOLDER_FIELDS)[number];
+
 /** Evidence-backed recommendation criteria combined into `priority`. */
 export const RECOMMENDATION_KEYS = [
   'upside',

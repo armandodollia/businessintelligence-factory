@@ -1,5 +1,6 @@
 /** Pure display helpers shared by views (no state, no I/O). */
 import type { BusEvent, Criteria, Decision, WorkspaceNode } from './types.js';
+import { isWithheld, WITHHELD_TEXT } from './stakeholders.js';
 
 export function formatValue(v: unknown): string {
   if (v === null || v === undefined || v === '') return '—';
@@ -31,6 +32,11 @@ export function shortDate(iso: string | undefined): string {
 
 export function toggle<T>(list: readonly T[], item: T): T[] {
   return list.includes(item) ? list.filter((x) => x !== item) : [...list, item];
+}
+
+/** A Decision payload as one line; a withheld one (own-stakeholder research while hidden) says so. */
+export function payloadText(payload: unknown, max = 240): string {
+  return isWithheld(payload) ? WITHHELD_TEXT : summarize(payload, max);
 }
 
 export function summarize(payload: unknown, max = 240): string {
@@ -92,7 +98,7 @@ export function describeEvent(e: BusEvent): string {
     case 'tool_call':
       return `tool ${e.tool} ${e.ok ? 'accepted' : `rejected: ${e.error ?? ''}`}`;
     case 'decision':
-      return `${e.decision.kind} by ${e.decision.role}: ${summarize(e.decision.payload, 160)}`;
+      return `${e.decision.kind} by ${e.decision.role}: ${payloadText(e.decision.payload, 160)}`;
     case 'user_request':
       return `user action requested: ${e.request.kind} ${e.request.site ?? ''}`;
     case 'user_request_resolved':

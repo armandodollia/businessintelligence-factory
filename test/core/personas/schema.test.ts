@@ -23,13 +23,13 @@ const proposal = (over: Partial<PersonaProposal> = {}): PersonaProposal => ({
   adjustmentId: 'pad_1', field: 'goals', text: 'Cares more about price', rationale: 'Overrode six verdicts on price',
   evidence: ['fbe_1', 'fbe_2', 'fbe_3'], stats: { n: 8, disagree: 6 }, source: 'retro', status: 'accepted',
   finalText: 'Cares most about price', createdAt: NOW, decidedAt: LATER, actor: 'local-user', reason: 'Matches interviews',
-  decisionId: 'dec_1', feedbackEventId: 'fbe_9',
+  decisionId: 'dec_1', feedbackEventId: 'fbe_9', internal: true,
   ...over,
 });
 
 const run = (over: Partial<PersonaLearningRun> = {}): PersonaLearningRun => ({
   id: 'plr_1', rootWorkspaceId: 'ws_root', personaId: 'per_1', retroId: 'rtr_1', status: 'failed', signalsThrough: NOW,
-  shownSignalIds: ['sig_a', 'sig_b'], stats: { n: 8, agree: 2, disagree: 6, items: 5, lower: 0.41 },
+  shownSignalIds: ['sig_a', 'sig_b'], shownStatementIds: ['sst_a'], stats: { n: 8, agree: 2, disagree: 6, items: 5, lower: 0.41 },
   assumption: 'The user reacts on price', agentRunId: 'run_1', failureReason: 'timeout', createdAt: NOW, endedAt: LATER,
   ...over,
 });

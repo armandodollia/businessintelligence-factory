@@ -4,7 +4,7 @@
  * `x-bif-export-summary` header of the download). Formatting only; the view renders it.
  */
 
-export type ExportExclusionCause = 'cites_upload' | 'exposed_run' | 'exposed_task' | 'exposed_output';
+export type ExportExclusionCause = 'cites_upload' | 'exposed_run' | 'exposed_task' | 'exposed_output' | 'internal';
 
 export type ExportExclusionCount = { total: number; byCause: Array<{ cause: ExportExclusionCause; label: string; count: number }> };
 
@@ -17,7 +17,7 @@ export type ExportSummary = {
 
 export type ExportSummaryView = {
   headline: string;
-  /** One line per cause, in the API's order (cites an upload, exposed run, task of an exposed run, output of such a task). */
+  /** One line per cause, in the API's order (cites an upload, exposed run, task of an exposed run, output of such a task, internal stakeholder records). */
   causes: Array<{ cause: ExportExclusionCause; text: string }>;
   /** How to include them (the server's note). */
   includeHint: string;

@@ -11,6 +11,8 @@
  *   persona out of learning runs).
  * - An accepted `add` or `replace` records the persona version it made (`personaVersion`) and a
  *   `replace` the replace proposal's gate numbers (`stats`), so the effect compares like with like.
+ * - An `internal` proposal (its run was shown the user's statements) makes an internal adjustment; a
+ *   replace from one makes the adjustment internal (once internal, always internal).
  * - Reject changes nothing but the proposal; one feedback event and one Decision record it.
  * - Isolation: a proposal or adjustment whose persona is outside the caller's business tree is refused
  *   exactly like an unknown id (404). Reasons are cleaned like flow reactions (`cleanReason`).
@@ -152,11 +154,12 @@ export function acceptPersonaProposal(
       adjustment = repos.adjustments.insert({
         id: newId('pad'), rootWorkspaceId: p.rootWorkspaceId, workspaceId: persona.workspaceId, personaId: persona.id,
         ...(p.field !== undefined ? { field: p.field } : {}), marker: newMarker(store), text, version: 1, status: 'active', source: p.source,
-        proposalId: p.id, actor, stats: p.stats, internal: false, createdAt: now, changedAt: now, personaVersion: persona.version + 1,
+        proposalId: p.id, actor, stats: p.stats, internal: p.internal === true, createdAt: now, changedAt: now, personaVersion: persona.version + 1,
       });
     } else if (p.action === 'replace') {
       adjustment = repos.adjustments.update(before!.id, {
         text, version: before!.version + 1, actor, stats: p.stats, changedAt: now, personaVersion: persona.version + 1,
+        ...(p.internal ? { internal: true } : {}),
       });
     } else {
       adjustment = repos.adjustments.update(before!.id, { status: 'retired', actor, changedAt: now, endedAt: now });

@@ -7,6 +7,8 @@ export type SseOptions = {
   heartbeatMs?: number;
   /** Closes the stream (client disconnected). */
   signal?: AbortSignal;
+  /** The event as served; `undefined`: not sent (stakeholder design §7: withheld research). */
+  serve?: (e: BusEvent) => BusEvent | undefined;
 };
 
 /**
@@ -31,7 +33,8 @@ export function sseResponse(events: EventBus, opts: SseOptions = {}): Response {
       };
       const off = events.on((e: BusEvent) => {
         if (opts.workspaceId && e.workspaceId !== opts.workspaceId) return;
-        send(`data: ${JSON.stringify(e)}\n\n`);
+        const served = opts.serve ? opts.serve(e) : e;
+        if (served) send(`data: ${JSON.stringify(served)}\n\n`);
       });
       const timer = setInterval(() => send(': ping\n\n'), opts.heartbeatMs ?? 15_000);
       timer.unref?.();

@@ -1,6 +1,7 @@
 import { competitorCriteria } from '../market/competitors.js';
 import { isOutputUsable } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
+import { segmentPersonas } from '../stakeholders/personas.js';
 import type { Criteria, Rating } from '../types.js';
 import { criterionDef, type TargetType } from './criteria.js';
 import { currentRatedKeys } from '../feedback/provenance.js';
@@ -51,7 +52,8 @@ export function reviewQueue(workspaceId: string, deps: { store: Store }): Review
   }
   // Competitors are queued only once usable (verified, or included by the user).
   for (const c of store.competitors.list({ workspaceId }).filter(isOutputUsable)) push('competitor', c.id, c.name, competitorCriteria(c));
-  for (const p of live(store.personas.list({ workspaceId }))) {
+  // Segment personas only: their criteria are the persona fields (stakeholder design §5).
+  for (const p of live(segmentPersonas(store, workspaceId))) {
     push('persona', p.id, p.segment, Object.fromEntries(Object.entries(p.profile).map(([k, f]) => [k, f.confidence])));
   }
   return out;

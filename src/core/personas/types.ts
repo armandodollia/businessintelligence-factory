@@ -5,7 +5,15 @@
  */
 
 /** Where a persona signal came from. */
-export type SignalSource = 'verdict_reaction' | 'override' | 'feedback_rating' | 'profile_rating' | 'include';
+export type SignalSource =
+  | 'verdict_reaction'
+  | 'override'
+  | 'feedback_rating'
+  | 'profile_rating'
+  | 'include'
+  // stakeholder personas (stakeholder design §11)
+  | 'read_reaction'
+  | 'decision_record';
 
 /** One reaction of the user to something a persona said, read from the feedback log. */
 export type PersonaSignal = {
@@ -49,7 +57,7 @@ export interface PersonaAdjustment {
   actor: string;
   /** Gate numbers when it was proposed. */
   stats: Partial<GateStats>;
-  /** Reserved for internal personas (project 3). */
+  /** Accepted from a proposal of a run that was shown the user's statements (stakeholder design §11): internal text, left out of exports by default. */
   internal: boolean;
   createdAt: string;
   changedAt: string;
@@ -90,6 +98,8 @@ export interface PersonaProposal {
   reason?: string;
   decisionId?: string;
   feedbackEventId?: string;
+  /** Its run was shown the user's statements (stakeholder design §11), or it retires an internal adjustment; absent: false. */
+  internal?: boolean;
 }
 
 export type LearningRunStatus = 'running' | 'proposed' | 'no_change' | 'failed';
@@ -105,6 +115,8 @@ export interface PersonaLearningRun {
   signalsThrough: string;
   /** Signals shown to the agent (the only ones a proposal may cite). */
   shownSignalIds: string[];
+  /** Stakeholder statements shown to the agent (a proposal may cite them too); consumed when the run ends `proposed` or `no_change`. */
+  shownStatementIds: string[];
   stats: GateStats;
   assumption?: string;
   agentRunId?: string;

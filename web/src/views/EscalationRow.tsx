@@ -1,5 +1,6 @@
 import { shortDate } from '../logic/format.js';
 import { useForm } from '../logic/hooks.js';
+import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import type { UserRequest } from '../logic/types.js';
 
 /**
@@ -23,7 +24,7 @@ export function EscalationRow(props: {
         <span className="tag strong">question</span>
         {r.taskId && <span className="muted"> task {r.taskId}</span>} <span className="muted">{shortDate(r.createdAt)}</span>
       </div>
-      <div className="request-details">{r.details}</div>
+      <div className="request-details">{isWithheld(r) ? WITHHELD_TEXT : r.details}</div>
       {opts?.rationale && <div className="muted">{opts.rationale}</div>}
       {opts && (
         <fieldset className="escalation-options" aria-label={`options for ${r.id}`}>

@@ -5,6 +5,7 @@
 import { useCallback, useState } from 'react';
 import { usageApi } from './api.js';
 import { useBusEvents, useResource } from './hooks.js';
+import { isWithheld } from './stakeholders.js';
 import type { AgentRunView, CalibrationVersion, PromptVersionRecord, RevertedCalibration, RunEvent } from './types.js';
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -92,6 +93,8 @@ export function useRunEvents(runId: string | null) {
   return {
     detail: detail.data ?? null,
     events: page.data?.events ?? [],
+    /** The run is withheld research (own-stakeholder research while a stakeholder is hidden): no events are served. */
+    withheld: isWithheld(page.data),
     total,
     offset,
     from: total ? offset + 1 : 0,

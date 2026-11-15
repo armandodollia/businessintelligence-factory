@@ -12,12 +12,27 @@ const COMPETITOR_TASK_TYPES: ReadonlySet<TaskType> = new Set(['discover_competit
 const HYPOTHESIS_TASK_TYPES: ReadonlySet<TaskType> = new Set(['symptom_hypotheses']);
 /** Flow records (design 2026-11-14 §8, §9): the prompt of each flow task type. */
 const FLOW_TASK_PROMPTS: Partial<Record<TaskType, string>> = { flow_walkthrough: 'flow_walkthrough', flow_reviews: 'flow_reviews' };
+/** Stakeholder personas (design 2026-11-15 §6): the prompt of each stakeholder task type. */
+const STAKEHOLDER_TASK_PROMPTS: Partial<Record<TaskType, string>> = {
+  own_stakeholders: 'own_stakeholders',
+  competitor_stakeholders: 'competitor_stakeholders',
+};
+/** One-line notes for task types without a prompt of their own (stakeholder design §6: pages the stakeholder tasks read). */
+const TASK_TYPE_NOTES: Partial<Record<TaskType, string>> = {
+  own_company_audit:
+    'For this task: capture the public leadership, ownership and investor pages of the own company when they exist, as artifacts. ' +
+    'Stakeholders are built from them in the stakeholders phase, not here.',
+  public_filings:
+    'For this task: capture the public leadership, ownership and investor pages of the company when they exist, as artifacts. ' +
+    'Stakeholders are built from them in the stakeholders phase, not here.',
+};
 
 /**
  * System prompt of worker / synthesizer runs: `worker.md` + `synthesizer.md` (synthesizer role:
  * recommendation criteria and accepted cost formats) + `persona_profile.md` (persona task
  * types only) + `competitors.md` (competitor discovery / flow walkthroughs) + `hypotheses.md`
- * (symptom hypotheses) + `flow_walkthrough.md` / `flow_reviews.md` (those task types) + the action
+ * (symptom hypotheses) + `flow_walkthrough.md` / `flow_reviews.md` and `own_stakeholders.md` /
+ * `competitor_stakeholders.md` (those task types) + a one-line note (company audit, public filings) + the action
  * policy rendered from config (always) + the browser note (browser-using tasks only) + the business
  * tree's approved calibration appendix for the role
  * (`<dataDir>/<root>/calibration/<role>.md`, when `scope` is given), so applying a calibration
@@ -37,6 +52,10 @@ export function workerSystemPrompt(
   if (taskType && HYPOTHESIS_TASK_TYPES.has(taskType)) parts.push(promptTemplate('hypotheses').trimEnd());
   const flowPrompt = taskType && FLOW_TASK_PROMPTS[taskType];
   if (flowPrompt) parts.push(promptTemplate(flowPrompt).trimEnd());
+  const stakeholderPrompt = taskType && STAKEHOLDER_TASK_PROMPTS[taskType];
+  if (stakeholderPrompt) parts.push(promptTemplate(stakeholderPrompt).trimEnd());
+  const note = taskType && TASK_TYPE_NOTES[taskType];
+  if (note) parts.push(note);
   parts.push(policyPrompt(config));
   if (needsBrowser) parts.push(browserPromptNote(config));
   return withCalibration(parts.join('\n\n'), role, scope);

@@ -7,6 +7,7 @@ import type { ModelRef, Role, TaskType } from './config/schema.js';
 // Knowledge store KS-0
 export type { EntityKind } from './config/schema.js';
 import type { EntityKind } from './config/schema.js';
+import type { StakeholderType } from './stakeholders/types.js';
 
 export type Phase =
   /** Optional; runs first when present; not in the default pipeline (Task 10b). */
@@ -14,6 +15,8 @@ export type Phase =
   | 'market_research'
   | 'competitor_discovery'
   | 'deep_dives'
+  /** Stakeholder personas of the node and its main competitors (stakeholder personas design §6). */
+  | 'stakeholders'
   /** Runner phase: persona head-to-heads on flows (flows/round.ts). */
   | 'flow_ranking'
   | 'synthesis'
@@ -404,7 +407,24 @@ export interface Persona {
   includeOverride?: boolean;
   /** Knowledge store entity (KS-0, migration 18). */
   entityId?: string;
+  /**
+   * Stakeholder personas (migration 25; design 2026-11-15-stakeholder-personas-design.md §5). `kind`:
+   * `segment` (DB default: an audience segment), `stakeholder`, `user` (reserved). Code that means
+   * "the audience segments of a node" reads `segmentPersonas` (stakeholders/personas.ts).
+   */
+  kind?: PersonaKind;
+  stakeholderType?: StakeholderType;
+  /** `own`: a stakeholder of the node itself; `competitor`: of the competitor `subjectId`. */
+  subjectKind?: 'own' | 'competitor';
+  subjectId?: string;
+  /** What the node needs from the stakeholder or what they decide (≤ 300 characters). */
+  relation?: string;
+  /** DB default `open`; an own stakeholder stays `hidden` until its question round. */
+  disclosure?: PersonaDisclosure;
 }
+
+export type PersonaKind = 'segment' | 'stakeholder' | 'user';
+export type PersonaDisclosure = 'hidden' | 'open';
 
 export interface Symptom {
   id: string;

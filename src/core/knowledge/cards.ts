@@ -17,6 +17,7 @@
  * an upload-derived line is marked `[upload]`.
  */
 import type { Store } from '../store/db.js';
+import { isHidden } from '../stakeholders/personas.js';
 import type { Entity, Finding, RetrievalResultRef } from '../types.js';
 import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { entityNames, getEntity } from './entities.js';
@@ -142,7 +143,8 @@ function typedLines(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, group: 
   }
   for (const id of ids('personas', outputUsableSql('r'))) {
     const per = store.personas.get(id)!;
-    const top = Object.entries(per.profile ?? {})
+    // A hidden stakeholder (stakeholder design §7): no profile field on the card.
+    const top = isHidden(per) ? [] : Object.entries(per.profile ?? {})
       .sort((a, b) => (b[1]?.confidence ?? 0) - (a[1]?.confidence ?? 0))
       .slice(0, 3)
       .map(([k, v]) => `${k}: ${servedLine(store, ws, v?.value ?? '', 80)}`);

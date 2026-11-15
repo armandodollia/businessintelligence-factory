@@ -5,6 +5,7 @@ export const WORKSPACE_PAGES = [
   { page: 'map', label: 'Business map' },
   { page: 'interview', label: 'Interview' },
   { page: 'personas', label: 'Audience & Personas' },
+  { page: 'stakeholders', label: 'Stakeholders' }, // stakeholder personas
   { page: 'research', label: 'Research' },
   { page: 'findings', label: 'Findings & Evidence' },
   { page: 'competitors', label: 'Competitors' },

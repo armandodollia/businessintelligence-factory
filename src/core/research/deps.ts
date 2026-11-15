@@ -2,7 +2,7 @@ import type { BifConfig } from '../config/schema.js';
 import { AbortError, type EventBus } from '../events.js';
 import type { FakeScript } from '../harness/adapter.js';
 import type { RunOutcome, Supervisor } from '../harness/supervisor.js';
-import type { TokenRegistry } from '../harness/tokens.js';
+import type { RunContext, TokenRegistry } from '../harness/tokens.js';
 import { redactIdentitySecrets } from '../identity/identities.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
@@ -10,6 +10,7 @@ import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
 import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-4
 import { lessonsOff, tagRun } from '../learning/runTags.js'; // learning loop WP-F
 import { lessonsMode } from '../learning/lessons/mode.js'; // wave-2 integration: withLessons marks runs
+import { taskIsOffline } from './phases.js'; // stakeholder personas
 
 /** Which agent step a run is for (used by fake pickers and logs). */
 export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate' | 'retro' | 'audit'; // escalate: WP-D; retro: learning loop WP-E; audit: WP-F
@@ -37,6 +38,17 @@ export type AgentRequest = {
    * the prompt reads), e.g. a reviewer audit's `auditId`. Decisions of the run inherit them.
    */
   runTags?: { auditId?: string; lessonsOff?: boolean };
+  /**
+   * Stakeholder personas: the run must not reach the web (`RunOptions.offline`). Every run of a task
+   * whose type is offline (worker, reviewer, escalation, reviewer audit) is offline whatever this says:
+   * `runAgent` sets it from `task.type` too.
+   */
+  offline?: boolean;
+  /**
+   * Stakeholder personas: called with the run's context once its id exists and before the agent
+   * starts (after `runTags` and `promptReads`), e.g. to tell a tool handler what the run was asked.
+   */
+  onStart?: (ctx: RunContext) => void;
 };
 
 /** Returns an in-process script for a run (tests / dry runs); `undefined` → spawn the real CLI. */
@@ -82,6 +94,7 @@ export async function runAgent(
     systemPrompt: req.systemPrompt,
     needsBrowser: req.needsBrowser,
   };
+  if (req.offline || (req.task && taskIsOffline(req.task.type))) opts.offline = true;
   if (fake) opts.fake = fake;
   if (deps.signal) opts.signal = deps.signal;
   // Learning loop WP-B: round / task type on the AgentRun, research run for usage and budgets.
@@ -96,10 +109,11 @@ export async function runAgent(
   // task whose stored flag is lessons-off, is stored with `lessons_off = 1` (prompt assembly reads it).
   const off = lessonsMode() === 'off' || (req.task ? lessonsOff(deps.store, { taskId: req.task.id }) : false);
   const tags = off && !req.runTags?.lessonsOff ? { ...req.runTags, lessonsOff: true } : req.runTags;
-  if (reads.length || tags) {
+  if (reads.length || tags || req.onStart) {
     opts.beforeStart = (runCtx) => {
       if (tags) tagRun(deps.store, runCtx.agentRunId, tags);
       if (reads.length) recordPromptReads({ store: deps.store, events: deps.events }, runCtx, reads);
+      req.onStart?.(runCtx);
     };
   }
   return deps.supervisor.run(opts);

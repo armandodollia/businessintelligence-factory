@@ -18,6 +18,7 @@
 import type { BifConfig } from '../config/schema.js';
 import { isOutputUsable } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
+import { segmentPersonas } from '../stakeholders/personas.js';
 import { newId } from '../store/repos.js';
 import { rootOf } from '../workspace/tree.js';
 import { activeChecklists, coverageOf, FlowCatalogError, listFlowTypes } from './catalog.js';
@@ -62,9 +63,9 @@ export type NodeRanking = {
   pendingProposals: { flowTypes: number; checklists: number };
 };
 
-/** Ids of the node's usable personas (verified, or included by the user). */
+/** Ids of the node's usable segment personas (verified, or included by the user); stakeholders judge no flows. */
 export function usablePersonaIds(store: Store, workspaceId: string): Set<string> {
-  return new Set(store.personas.list({ workspaceId }).filter(isOutputUsable).map((p) => p.id));
+  return new Set(segmentPersonas(store, workspaceId).filter(isOutputUsable).map((p) => p.id));
 }
 
 /** The active general checklist, then the active specific one of the type (when there is one). */

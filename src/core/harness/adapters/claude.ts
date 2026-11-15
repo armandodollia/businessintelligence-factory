@@ -17,15 +17,26 @@ import {
 export const CLAUDE_MCP_FILE = '.bif-mcp.json';
 
 /**
+ * `--tools` value of offline runs: the empty set, so no built-in tool at all (no web fetch or search, no
+ * shell or other code-running tool, no remote agents or publishing). An allowlist, not a deny list, so a
+ * future built-in is off too. MCP tools are not built-ins: the harness `bif` tools stay offered (checked
+ * with a real haiku run, stakeholder task 2 fix round 2).
+ */
+export const CLAUDE_OFFLINE_TOOLS = '';
+
+/**
  * Claude Code (`claude` 2.1.x) in print mode with stream-json output.
  *
  * Verified against `claude --help` (2.1.322): `-p/--print` is a boolean flag and the prompt is
  * the positional argument; `--mcp-config <configs...>` is variadic, so it is always followed by
  * another flag here. `--bare` is NOT used: it skips keychain reads and so breaks OAuth logins.
  * `MCP_TOOL_TIMEOUT` is raised so blocking harness tools (`request_approval`) do not time out.
+ * Offline runs (`spec.offline`) add `--tools ""` (no built-in tools; variadic like `--mcp-config`,
+ * so the empty value is one argument and is followed by another flag).
  */
 export class ClaudeAdapter implements CliAdapter {
   readonly id = 'claude' as const;
+  readonly offline = true;
   private readonly toolNames = new Map<string, string>();
 
   constructor(private readonly command = 'claude') {}
@@ -42,6 +53,7 @@ export class ClaudeAdapter implements CliAdapter {
         '--model', spec.model,
         '--mcp-config', mcpPath,
         '--strict-mcp-config',
+        ...(spec.offline ? ['--tools', CLAUDE_OFFLINE_TOOLS] : []),
         '--append-system-prompt', safePositional(spec.systemPrompt),
         '--dangerously-skip-permissions',
       ],

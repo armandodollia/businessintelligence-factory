@@ -21,6 +21,8 @@ import { calibrationReport, proposePromptPatch, proposeWeights } from '../core/s
 import { RECOMMENDATION_KEYS } from '../core/scoring/criteria.js';
 import { exportTrainingDataWithSummary } from '../core/scoring/export.js';
 import { scoreRecommendations } from '../core/scoring/priority.js';
+import { isHidden, segmentPersonas } from '../core/stakeholders/personas.js';
+import { withholding } from '../core/stakeholders/withheld.js';
 import { RatingError, rateCriterion } from '../core/scoring/ratings.js';
 import { reviewQueue } from '../core/scoring/reviewQueue.js';
 import { decisionReviewQueue } from '../core/scoring/decisionQueue.js';
@@ -55,6 +57,7 @@ import { mountWpfRoutes } from './experimentRoutes.js'; // learning loop WP-F
 import { mountMetricsRoutes } from './metricsRoutes.js'; // learning loop WP-G
 import { mountFlowRoutes } from './flowRoutes.js'; // flow records and ranking
 import { mountPersonaLearningRoutes } from './personaLearningRoutes.js'; // persona learning
+import { mountStakeholderRoutes } from './stakeholderRoutes.js'; // stakeholder personas
 
 export type AppDeps = {
   store: Store;
@@ -390,7 +393,8 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/api/workspaces/:id/tasks', (c) => {
     const id = workspace(c.req.param('id')).id;
     const runId = c.req.query('runId');
-    return c.json(store.tasks.list(runId ? { workspaceId: id, runId } : { workspaceId: id }));
+    const w = withholding(store); // stakeholder design §7: own-stakeholder research of a node with a hidden stakeholder
+    return c.json(store.tasks.list(runId ? { workspaceId: id, runId } : { workspaceId: id }).map((t) => w.servedTask(t)));
   });
 
   // --- results --------------------------------------------------------------------------------
@@ -426,7 +430,9 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/personas/:id/include', async (c) => {
     const id = c.req.param('id');
     const { include } = await body(c, schemas.includeFinding);
-    if (!store.personas.get(id)) throw new HttpError(404, `persona '${id}' not found`);
+    const persona = store.personas.get(id);
+    // A hidden stakeholder answers like an unknown id (stakeholder design §7): the response is the whole record.
+    if (!persona || isHidden(persona)) throw new HttpError(404, `persona '${id}' not found`);
     return c.json(setIncludeOverride(store, 'persona', id, include, { actor: actorOf(config) })); // WP-A
   });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
@@ -445,10 +451,10 @@ export function createApp(deps: AppDeps): Hono {
   });
   /** Research hypotheses per interview symptom (spec §8 drill-down). */
   app.get('/api/workspaces/:id/hypotheses', (c) => c.json(store.symptomHypotheses.list({ workspaceId: workspace(c.req.param('id')).id })));
-  /** Personas with review `status` and `lastReview` of the task that last saved them. */
+  /** Segment personas with review `status` and `lastReview` of the task that last saved them (stakeholders have their own routes). */
   app.get('/api/workspaces/:id/personas', (c) => {
     const id = workspace(c.req.param('id')).id;
-    return c.json(withLastReview(store.personas.list({ workspaceId: id }), lastReviewsByTask(store, [id])));
+    return c.json(withLastReview(segmentPersonas(store, id), lastReviewsByTask(store, [id])));
   });
   /**
    * Recommendations by priority, with review `status` and `lastReview` of the task that saved them
@@ -463,15 +469,18 @@ export function createApp(deps: AppDeps): Hono {
     const id = workspace(c.req.param('id')).id;
     const kind = c.req.query('kind');
     if (kind && !(DECISION_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `unknown decision kind '${kind}'`);
-    return c.json(store.decisions.list(kind ? { workspaceId: id, kind: kind as Decision['kind'] } : { workspaceId: id }));
+    const w = withholding(store);
+    return c.json(store.decisions.list(kind ? { workspaceId: id, kind: kind as Decision['kind'] } : { workspaceId: id }).map((d) => w.servedDecision(d)));
   });
   /** "What changed" Decisions recorded by the scheduler after each recurring run. */
   app.get('/api/workspaces/:id/changes', (c) => {
     const id = workspace(c.req.param('id')).id;
+    const w = withholding(store);
     return c.json(
       store.decisions
         .list({ workspaceId: id, agentRunId: 'scheduler' })
-        .filter((d) => (d.payload as { event?: string } | null)?.event === 'what_changed'),
+        .filter((d) => (d.payload as { event?: string } | null)?.event === 'what_changed')
+        .map((d) => w.servedDecision(d)),
     );
   });
 
@@ -480,7 +489,8 @@ export function createApp(deps: AppDeps): Hono {
     const id = workspace(c.req.param('id')).id;
     const status = c.req.query('status');
     if (status && !(REQUEST_STATUSES as readonly string[]).includes(status)) throw new HttpError(400, `unknown status '${status}'`);
-    return c.json(store.userRequests.list(status ? { workspaceId: id, status: status as UserRequest['status'] } : { workspaceId: id }));
+    const w = withholding(store); // stakeholder design §7: requests of withheld research lose their text
+    return c.json(store.userRequests.list(status ? { workspaceId: id, status: status as UserRequest['status'] } : { workspaceId: id }).map((r) => w.servedRequest(r)));
   });
   app.post('/api/requests/:id', async (c) => {
     const id = c.req.param('id');
@@ -488,7 +498,7 @@ export function createApp(deps: AppDeps): Hono {
     const req = store.userRequests.get(id);
     if (!req) throw new HttpError(404, `user request '${id}' not found`);
     if (req.status !== 'pending') throw new HttpError(409, `user request '${id}' is already ${req.status}`);
-    return c.json(answerUserRequest({ store, events }, id, input.status, input.response, { actor: actorOf(config) })); // WP-A
+    return c.json(withholding(store).servedRequest(answerUserRequest({ store, events }, id, input.status, input.response, { actor: actorOf(config) }))); // WP-A
   });
 
   // --- artifacts ------------------------------------------------------------------------------
@@ -696,6 +706,8 @@ export function createApp(deps: AppDeps): Hono {
       ...(workspaceId ? { workspaceId } : {}),
       ...(deps.sseHeartbeatMs ? { heartbeatMs: deps.sseHeartbeatMs } : {}),
       signal: c.req.raw.signal,
+      serve: (e) => withholding(store).servedBusEvent(e), // stakeholder design §7
+
     });
   });
 
@@ -732,6 +744,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- persona learning: gate, adjustments, proposals, signals, the user's decisions -------------
   mountPersonaLearningRoutes(app, { store, config }, workspace);
   // --- end persona learning --------------------------------------------------------------------
+  // --- stakeholder personas: question round, statements, reads (hidden personas never served) ------
+  mountStakeholderRoutes(app, { store, config }, workspace);
+  // --- end stakeholder personas ----------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

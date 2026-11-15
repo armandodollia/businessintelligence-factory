@@ -118,6 +118,12 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/persona-proposals/:proposalId/accept': { test: 'test/api/personaLearningRoutes.test.ts' },
   'POST /api/workspaces/:id/persona-proposals/:proposalId/reject': { test: 'test/api/personaLearningRoutes.test.ts' },
   'POST /api/workspaces/:id/persona-adjustments/:adjustmentId/retire': { test: 'test/api/personaLearningRoutes.test.ts' },
+  // stakeholder personas
+  'POST /api/workspaces/:id/stakeholder-questions/answers': { test: 'test/api/stakeholderRoutes.test.ts' },
+  'POST /api/workspaces/:id/stakeholders/:personaId/reveal': { test: 'test/api/stakeholderRoutes.test.ts' },
+  'POST /api/workspaces/:id/stakeholders/:personaId/notes': { test: 'test/api/stakeholderRoutes.test.ts' },
+  'POST /api/workspaces/:id/recommendations/:recId/stakeholder-decisions': { test: 'test/api/stakeholderRoutes.test.ts' },
+  'POST /api/workspaces/:id/stakeholder-reads/:readId/reaction': { test: 'test/api/stakeholderRoutes.test.ts' },
 };
 
 /**

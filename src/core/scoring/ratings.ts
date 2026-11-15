@@ -7,6 +7,8 @@ import { COST_FORMATS, costScore } from './priority.js';
 // Learning loop WP-A: who rated, and which agent judgment (run + prompt version) was rated.
 import { DEFAULT_ACTOR } from '../feedback/events.js';
 import { targetProvenance } from '../feedback/provenance.js';
+import { isHidden } from '../stakeholders/personas.js';
+import { withholding } from '../stakeholders/withheld.js';
 
 export type RatingInput = Omit<Rating, 'id' | 'createdAt' | 'agentValue' | 'agentRunId' | 'promptVersion'>;
 
@@ -55,6 +57,7 @@ export function resolveTarget(
     }
     case 'persona': {
       const p = own(store.personas.get(targetId));
+      if (p && isHidden(p)) return undefined; // stakeholder design §7: answers like an unknown id
       return p && { agentValue: scalar(p.profile[criterion]?.confidence), title: p.segment, role: 'worker' };
     }
     case 'persona_feedback': {
@@ -71,7 +74,7 @@ export function resolveTarget(
     }
     case 'decision': {
       const d = own(store.decisions.get(targetId));
-      if (!d) return undefined;
+      if (!d || withholding(store).run(d.agentRunId)) return undefined; // stakeholder design §7: withheld research
       const p = (d.payload ?? {}) as Record<string, unknown>;
       // learning loop WP-C: the agent value of a pushback is 1 ("the issue needs no change").
       if (criterion === 'pushback') return d.kind === 'pushback' ? { agentValue: 1, title: `Pushback on ${String(p.issueId ?? '?')}`, role: d.role } : undefined;

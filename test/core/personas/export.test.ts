@@ -115,7 +115,7 @@ describe('training export: persona learning rows follow the lesson-proposal rule
     const upload = t.artifacts.save({ workspaceId: 'ws_a', kind: 'upload', mime: 'text/plain', bytes: 'internal notes' });
     t.store.personas.update(t.smb.id, { profile: { ...t.smb.profile, pains: { value: 'p', confidence: 0.7, evidence: [upload.id] } } });
     const run = personaLearningRepos(t.store).runs.insert({
-      id: newId('plr'), rootWorkspaceId: 'ws_a', personaId: t.smb.id, status: 'running', signalsThrough: at(1), shownSignalIds: [],
+      id: newId('plr'), rootWorkspaceId: 'ws_a', personaId: t.smb.id, status: 'running', signalsThrough: at(1), shownSignalIds: [], shownStatementIds: [],
       stats: { n: 0, agree: 0, disagree: 0, items: 0, lower: 0 }, createdAt: at(1),
     });
     vi.setSystemTime(new Date(at(2)));

@@ -9,10 +9,13 @@ import { listFeedback } from '../../../src/core/feedback/events.js';
 import { confirmOverride, overridePair, reactToPosition, reactToVerdict, revokeOverride } from '../../../src/core/flows/feedback.js';
 import type { Flow } from '../../../src/core/flows/types.js';
 import { personaLearningSettings } from '../../../src/core/personas/settings.js';
-import { collectPersonaSignals, openSignals } from '../../../src/core/personas/signals.js';
+import { collectPersonaSignals, decisionPolarity, openSignals } from '../../../src/core/personas/signals.js';
 import { personaLearningRepos } from '../../../src/core/personas/store.js';
 import type { LearningRunStatus, PersonaSignal } from '../../../src/core/personas/types.js';
 import { rateCriterion } from '../../../src/core/scoring/ratings.js';
+import { reactToRead } from '../../../src/core/stakeholders/reads.js';
+import { recordDecision } from '../../../src/core/stakeholders/statements.js';
+import { stakeholderRepos } from '../../../src/core/stakeholders/store.js';
 import type { Store } from '../../../src/core/store/db.js';
 import type { Persona, Recommendation } from '../../../src/core/types.js';
 import { flowSetup, T0 } from '../flows/flowFixture.js';
@@ -249,7 +252,7 @@ describe('openSignals', () => {
   const settings = (t: ReturnType<typeof seed>) => personaLearningSettings(t.config);
   const run = (t: ReturnType<typeof seed>, persona: Persona, status: LearningRunStatus, signalsThrough: string) =>
     personaLearningRepos(t.store).runs.insert({
-      id: `plr_${status}_${signalsThrough}`, rootWorkspaceId: 'ws_a', personaId: persona.id, status, signalsThrough, shownSignalIds: [],
+      id: `plr_${status}_${signalsThrough}`, rootWorkspaceId: 'ws_a', personaId: persona.id, status, signalsThrough, shownSignalIds: [], shownStatementIds: [],
       stats: { n: 0, agree: 0, disagree: 0, items: 0, lower: 0 }, createdAt: signalsThrough,
     });
   /** Three disagreements, at minutes 1, 2 and 3. */
@@ -287,5 +290,87 @@ describe('openSignals', () => {
     // The window starts 180 days before now: minute 2 is its first instant.
     expect(openSignals(t.store, s, t.smb.id, new Date(Date.parse(iso(2)) + 180 * day)).map((x) => x.at)).toEqual([iso(2), iso(3)]);
     expect(openSignals(t.store, s, t.smb.id, new Date(Date.parse(iso(3)) + 181 * day))).toEqual([]);
+  });
+});
+
+describe('stakeholder signals (stakeholder design §11)', () => {
+  function stakeholderSeed() {
+    const t = seed();
+    const cfo = t.store.personas.insert({
+      id: 'per_stk_cfo', workspaceId: 'ws_a', slug: 'stk-cfo', segment: 'Chief financial officer', profile: {}, version: 2, status: 'verified',
+      agentMdPath: 'stk-cfo.md', kind: 'stakeholder', stakeholderType: 'leader', subjectKind: 'own', relation: 'Approves budgets', disclosure: 'open',
+    });
+    const recs = ['rec_a', 'rec_b', 'rec_c', 'rec_d', 'rec_e'].map((id) =>
+      t.store.recommendations.insert({ id, workspaceId: 'ws_a', title: id, summary: 's', criteria: {}, findingIds: [], priority: 3, personaFeedback: [], createdAt: T0 }),
+    );
+    const read = (recommendationId: string, stance: string) =>
+      stakeholderRepos(t.store).reads.insert({
+        id: `srd_${recommendationId}`, rootWorkspaceId: 'ws_a', workspaceId: 'ws_a', recommendationId, personaId: cfo.id, personaVersion: 2, stance,
+        conditions: [], concerns: [], reasoning: 'r', wouldChangeMind: 'w', agentRunId: 'arun_read', simulated: true, createdAt: T0,
+      });
+    const decide = (recommendationId: string, decision: 'approved' | 'approved_with_conditions' | 'rejected' | 'deferred') =>
+      recordDecision(t.store, 'local-user', 'ws_a', { recommendationId, personaId: cfo.id, decision, reasoning: `why ${decision}` });
+    return { ...t, cfo, recs, read, decide };
+  }
+
+  it('read_reaction: the latest reaction per read; item rec:<id>, topic read, the read\'s persona version', () => {
+    const t = stakeholderSeed();
+    const r = t.read('rec_a', 'approve');
+    clock(1);
+    reactToRead(t.store, 'local-user', 'ws_a', r.id, 'agree');
+    clock(2);
+    const e = reactToRead(t.store, 'local-user', 'ws_a', r.id, 'disagree', 'she would refuse');
+    const signals = only(collectPersonaSignals(t.store, t.cfo.id), 'read_reaction');
+    expect(signals).toEqual([{
+      id: e.id, source: 'read_reaction', personaId: t.cfo.id, personaVersion: 2, polarity: 'disagree', itemKey: 'rec:rec_a', topic: 'read',
+      detail: 'read rec_a: approve; you disagreed', reason: 'she would refuse', refs: [r.id, 'rec_a'], at: iso(2),
+    }]);
+  });
+
+  it('decision_record: rejected against approve disagrees, approved against approve_with_conditions agrees; deferred and a missing read give none', () => {
+    const t = stakeholderSeed();
+    const a = t.read('rec_a', 'approve');
+    const b = t.read('rec_b', 'approve_with_conditions');
+    t.read('rec_c', 'reject');
+    clock(1);
+    const sa = t.decide('rec_a', 'rejected');
+    clock(2);
+    const sb = t.decide('rec_b', 'approved');
+    clock(3);
+    t.decide('rec_c', 'deferred');
+    clock(4);
+    t.decide('rec_d', 'approved'); // no read of rec_d
+    const signals = only(collectPersonaSignals(t.store, t.cfo.id), 'decision_record');
+    expect(signals).toEqual([
+      {
+        id: `${sa.id}:${a.id}`, source: 'decision_record', personaId: t.cfo.id, personaVersion: 2, polarity: 'disagree', itemKey: 'rec:rec_a', topic: 'decision',
+        detail: 'read rec_a: approve; the real decision: rejected', refs: [a.id, 'rec_a'], at: iso(1),
+      },
+      expect.objectContaining({ id: `${sb.id}:${b.id}`, polarity: 'agree', itemKey: 'rec:rec_b', at: iso(2) }),
+    ]);
+    // The statement's text is never the signal's reason.
+    for (const s of signals) expect(s.reason).toBeUndefined();
+  });
+
+  it('decision_record: the latest record per recommendation counts (a later deferred one ends the signal)', () => {
+    const t = stakeholderSeed();
+    t.read('rec_a', 'reject');
+    clock(1);
+    t.decide('rec_a', 'rejected');
+    expect(only(collectPersonaSignals(t.store, t.cfo.id), 'decision_record').map((s) => s.polarity)).toEqual(['agree']);
+    clock(2);
+    t.decide('rec_a', 'deferred');
+    expect(only(collectPersonaSignals(t.store, t.cfo.id), 'decision_record')).toEqual([]);
+  });
+
+  it('decisionPolarity follows the table of §11', () => {
+    expect(decisionPolarity('approved', 'approve')).toBe('agree');
+    expect(decisionPolarity('approved_with_conditions', 'approve')).toBe('agree');
+    expect(decisionPolarity('approved_with_conditions', 'approve_with_conditions')).toBe('agree');
+    expect(decisionPolarity('rejected', 'reject')).toBe('agree');
+    expect(decisionPolarity('approved', 'reject')).toBe('disagree');
+    expect(decisionPolarity('rejected', 'approve_with_conditions')).toBe('disagree');
+    expect(decisionPolarity('deferred', 'approve')).toBeUndefined();
+    expect(decisionPolarity('approved', 'not_my_call')).toBeUndefined();
   });
 });

@@ -1,5 +1,6 @@
-import { changedArtifactLabel, describeEvent, eventRunId, shortDate, summarize, toggle } from '../logic/format.js';
+import { changedArtifactLabel, describeEvent, eventRunId, payloadText, shortDate, summarize, toggle } from '../logic/format.js';
 import { artifactUrl, useChanges, useDecisions, useForm, useResearch } from '../logic/hooks.js';
+import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import { ALL_PHASES, OPTIONAL_PHASES, type ResearchPhase } from '../logic/types.js';
 import { PendingRequests } from './PendingRequests.js';
 
@@ -70,8 +71,14 @@ export function Research({ wsId }: { wsId: string }) {
                 <td>{t.phase}</td>
                 <td>{t.type}</td>
                 <td>
-                  {t.subject && <b>{t.subject} </b>}
-                  <span className="muted">{summarize(t.brief, 160)}</span>
+                  {isWithheld(t) ? (
+                    <span className="muted">{WITHHELD_TEXT}</span>
+                  ) : (
+                    <>
+                      {t.subject && <b>{t.subject} </b>}
+                      <span className="muted">{summarize(t.brief, 160)}</span>
+                    </>
+                  )}
                 </td>
                 <td>
                   {t.model.provider}/{t.model.model}
@@ -102,14 +109,14 @@ export function Research({ wsId }: { wsId: string }) {
           <h3>Orchestrator plan</h3>
           <ul className="plain small">
             {plan.decisions.slice(0, 20).map((d) => (
-              <li key={d.id}>{summarize(d.payload, 200)}</li>
+              <li key={d.id}>{payloadText(d.payload, 200)}</li>
             ))}
           </ul>
           <h3>Review rounds</h3>
           <ul className="plain small">
             {reviews.decisions.slice(0, 30).map((d) => (
               <li key={d.id}>
-                <span className="muted">{shortDate(d.createdAt)}</span> {summarize(d.payload, 200)}
+                <span className="muted">{shortDate(d.createdAt)}</span> {payloadText(d.payload, 200)}
               </li>
             ))}
           </ul>

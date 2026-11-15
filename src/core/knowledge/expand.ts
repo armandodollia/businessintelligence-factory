@@ -33,6 +33,7 @@ import { flowRepos } from '../flows/repos.js';
 import { FLOW_TEXT_MAX, type Checklist, type FlowCheck } from '../flows/types.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Artifact, Finding, RetrievalResultRef, TextChunk } from '../types.js';
+import { isHidden } from '../stakeholders/personas.js';
 import { encodeCursor } from './budget.js';
 import { cardPageLines, entityCard, HEADER_NAME_JSON, nodeCard, nodeLineRecover } from './cards.js';
 import { getEntity } from './entities.js';
@@ -508,6 +509,11 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
       home = p.workspaceId;
       name = p.slug;
       status = p.status;
+      // A hidden stakeholder (stakeholder design §7): its label and type only, never what research found.
+      if (isHidden(p)) {
+        fields.push(['segment', red(p.segment)], ['stakeholder_type', p.stakeholderType ?? 'other'], ['disclosure', 'hidden']);
+        break;
+      }
       fields.push(['segment', red(p.segment)], ['audience', p.audience ?? 'external'], ['entity_id', p.entityId]);
       for (const [k, v] of Object.entries(p.profile ?? {})) {
         fields.push([`profile.${k}`, { value: servedLine(store, ws, v?.value ?? '', 600), confidence: v?.confidence, evidence: v?.evidence }]);

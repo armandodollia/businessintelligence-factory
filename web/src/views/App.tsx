@@ -17,6 +17,7 @@ import { Research } from './Research.js';
 import { ReviewQueue } from './ReviewQueue.js';
 import { Schedule } from './Schedule.js';
 import { Settings } from './Settings.js';
+import { Stakeholders } from './Stakeholders.js'; // stakeholder personas
 import { Strategy } from './Strategy.js';
 import { Usage } from './Usage.js';
 import { Workspaces } from './Workspaces.js';
@@ -81,6 +82,8 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Interview wsId={wsId} />;
     case 'personas':
       return <Personas wsId={wsId} />;
+    case 'stakeholders': // stakeholder personas
+      return <Stakeholders wsId={wsId} />;
     case 'research':
       return <Research wsId={wsId} />;
     case 'findings':

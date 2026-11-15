@@ -1534,4 +1534,106 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX persona_learning_runs_persona ON persona_learning_runs (root_workspace_id, persona_id);
   `,
+  // 25: stakeholder personas (design 2026-11-15-stakeholder-personas-design.md §5, §12). `personas`
+  // gains `kind` (every existing row is an audience `segment`), the stakeholder's type, subject (own
+  // node or a competitor), relation and disclosure (`open` unless an own stakeholder awaits its question
+  // round). Per business tree (`root_workspace_id`): the templated questions, the user's statements
+  // (append-only: no DELETE, and no UPDATE except setting `consumed_by_run_id`, like feedback_events)
+  // and the simulated reads (one per persona and recommendation). JSON columns (named by the Repo
+  // field): conditions, concerns. Repositories: `stakeholders/store.ts`.
+  `
+  ALTER TABLE personas ADD COLUMN kind TEXT NOT NULL DEFAULT 'segment';
+  ALTER TABLE personas ADD COLUMN stakeholder_type TEXT;
+  ALTER TABLE personas ADD COLUMN subject_kind TEXT;
+  ALTER TABLE personas ADD COLUMN subject_id TEXT;
+  ALTER TABLE personas ADD COLUMN relation TEXT;
+  ALTER TABLE personas ADD COLUMN disclosure TEXT NOT NULL DEFAULT 'open';
+  CREATE INDEX personas_ws_kind ON personas (workspace_id, kind);
+
+  CREATE TABLE stakeholder_questions (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    persona_id TEXT,
+    field TEXT NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL,
+    statement_id TEXT,
+    created_at TEXT NOT NULL,
+    answered_at TEXT
+  );
+  CREATE INDEX stakeholder_questions_ws ON stakeholder_questions (root_workspace_id, workspace_id);
+  CREATE INDEX stakeholder_questions_persona ON stakeholder_questions (persona_id);
+
+  CREATE TABLE stakeholder_statements (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    persona_id TEXT,
+    source TEXT NOT NULL,
+    field TEXT,
+    text TEXT NOT NULL,
+    question_id TEXT,
+    recommendation_id TEXT,
+    decision TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    created_at TEXT NOT NULL,
+    consumed_by_run_id TEXT
+  );
+  CREATE INDEX stakeholder_statements_ws ON stakeholder_statements (root_workspace_id, workspace_id);
+  CREATE INDEX stakeholder_statements_persona ON stakeholder_statements (persona_id);
+  CREATE TRIGGER stakeholder_statements_no_update BEFORE UPDATE ON stakeholder_statements
+    WHEN NEW.id IS NOT OLD.id OR NEW.root_workspace_id IS NOT OLD.root_workspace_id OR NEW.workspace_id IS NOT OLD.workspace_id
+      OR NEW.persona_id IS NOT OLD.persona_id OR NEW.source IS NOT OLD.source OR NEW.field IS NOT OLD.field
+      OR NEW.text IS NOT OLD.text OR NEW.question_id IS NOT OLD.question_id OR NEW.recommendation_id IS NOT OLD.recommendation_id
+      OR NEW.decision IS NOT OLD.decision OR NEW.actor IS NOT OLD.actor OR NEW.created_at IS NOT OLD.created_at
+    BEGIN SELECT RAISE(ABORT, 'stakeholder_statements is append-only'); END;
+  CREATE TRIGGER stakeholder_statements_no_delete BEFORE DELETE ON stakeholder_statements
+    BEGIN SELECT RAISE(ABORT, 'stakeholder_statements is append-only'); END;
+
+  CREATE TABLE stakeholder_reads (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    recommendation_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    persona_version INTEGER NOT NULL,
+    stance TEXT NOT NULL,
+    conditions TEXT NOT NULL DEFAULT '[]',
+    concerns TEXT NOT NULL DEFAULT '[]',
+    reasoning TEXT NOT NULL,
+    would_change_mind TEXT NOT NULL,
+    agent_run_id TEXT NOT NULL,
+    simulated INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX stakeholder_reads_pair ON stakeholder_reads (recommendation_id, persona_id);
+  CREATE INDEX stakeholder_reads_ws ON stakeholder_reads (root_workspace_id, workspace_id);
+  `,
+  // 26: the stakeholders phase for existing schedules (stakeholder personas design §6, §12). As
+  // migration 23 did for flow ranking: once, `stakeholders` goes directly after the first `deep_dives`
+  // of every schedule whose list is a JSON array of names with `deep_dives` and without `stakeholders`.
+  // Any other shape is left as it is. Pipelines are not touched (only ever running or finished).
+  `
+  UPDATE schedules SET phases = (
+    SELECT json_group_array(p.value ORDER BY p.ord) FROM (
+      SELECT value, key * 2 AS ord FROM json_each(schedules.phases)
+      UNION ALL
+      SELECT 'stakeholders', MIN(key) * 2 + 1 FROM json_each(schedules.phases) WHERE value = 'deep_dives'
+    ) p
+  )
+  WHERE CASE WHEN json_valid(phases) AND json_type(phases) = 'array' THEN
+    NOT EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE type <> 'text')
+    AND EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE value = 'deep_dives')
+    AND NOT EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE value = 'stakeholders')
+  ELSE 0 END;
+  `,
+  // 27: persona learning of stakeholder personas (stakeholder personas design §11). A learning run
+  // records the statements it was shown (`shown_statement_ids`, JSON, named by the Repo field
+  // `shownStatementIds`); a proposal of a run that was shown statements is `internal`, like the
+  // adjustment accepted from it. Repositories: `personas/store.ts`.
+  `
+  ALTER TABLE persona_learning_runs ADD COLUMN shown_statement_ids TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE persona_proposals ADD COLUMN internal INTEGER NOT NULL DEFAULT 0;
+  `,
 ];

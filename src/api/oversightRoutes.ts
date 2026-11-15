@@ -9,6 +9,7 @@ import type { EventBus } from '../core/events.js';
 import { listPolicyEvents, POLICY_EVENT_KINDS, type PolicyEventFilter } from '../core/policy/policyEvents.js';
 import type { Store } from '../core/store/db.js';
 import { listBusEvents, PERSISTED_BUS_EVENT_TYPES, type BusEventQuery } from '../core/telemetry/busEvents.js';
+import { withholding } from '../core/stakeholders/withheld.js';
 
 /**
  * WP-D routes: answering structured escalation questions, and the action-policy and bus-event
@@ -41,7 +42,7 @@ export function mountOversightRoutes(app: Hono, deps: { store: Store; events: Ev
       const answer: { choice: number; note?: string } = { choice: input.data.choice };
       if (input.data.note !== undefined) answer.note = input.data.note;
       // Integration with WP-A: answered by the configured actor, with a request_answer feedback event.
-      return c.json(answerEscalationAsUser({ store, events }, c.req.param('id'), answer, { actor: actorOf(config) }));
+      return c.json(withholding(store).servedRequest(answerEscalationAsUser({ store, events }, c.req.param('id'), answer, { actor: actorOf(config) })));
     } catch (e) {
       if (e instanceof FeedbackActionError) return err(c, e.status, e.message);
       if (e instanceof EscalationError) return err(c, e.code === 'not_found' ? 404 : e.code === 'conflict' ? 409 : 400, e.message);
@@ -100,6 +101,7 @@ export function mountOversightRoutes(app: Hono, deps: { store: Store; events: Ev
     const limit = limitOf(c.req.query('limit'));
     if (limit === null) return err(c, 400, 'limit must be a positive integer');
     if (limit !== undefined) q.limit = limit;
-    return c.json(listBusEvents(store, q));
+    const w = withholding(store); // stakeholder design §7: withheld research runs lose their error / reason text
+    return c.json(listBusEvents(store, q).map((e) => w.servedStoredBusEvent(e)));
   });
 }

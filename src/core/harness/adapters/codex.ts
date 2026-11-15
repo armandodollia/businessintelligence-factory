@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   isRateLimitText,
   num,
+  offlineRefusal,
   obj,
   parseJsonObject,
   plainLineEvents,
@@ -63,14 +64,21 @@ export function userCodexHome(env: NodeJS.ProcessEnv = process.env): string {
  * only the bif and browser MCP servers — none of the user's MCP servers, plugins or hooks.
  * Token (`spec.mcpBearer`): the harness URL carries no token; Codex sends it as a bearer header
  * read from `BIF_MCP_TOKEN` in its environment, so it never appears in argv.
+ *
+ * Offline runs are refused (`offline = false`): Codex 0.167 ships several built-in ways to reach the
+ * web besides the shell (web search, `browser_use`, `computer_use`, apps / connectors, all enabled by
+ * default and changing between releases), and `--help` documents no single switch that turns all of
+ * them off, so offline cannot be enforced with certainty.
  */
 export class CodexAdapter implements CliAdapter {
   readonly id = 'codex' as const;
+  readonly offline = false;
   private readonly started = new Set<string>();
 
   constructor(private readonly command = 'codex') {}
 
   buildCommand(spec: SpawnSpec): BuiltCommand {
+    if (spec.offline) throw new Error(offlineRefusal(this.id));
     const env: Record<string, string> = {};
     const config: string[] = [];
     if (spec.mcpBearer) {

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { shortDate } from '../logic/format.js';
+import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import type { CostGroup } from '../logic/types.js';
 import {
   describeRunEvent,
@@ -263,7 +264,7 @@ function Runs({
               </td>
               <td>{r.status}</td>
               <td>{r.attempts ?? '—'}</td>
-              <td className="small">{r.failureReason}</td>
+              <td className="small">{isWithheld(r) ? (r.status === 'failed' ? WITHHELD_TEXT : '') : r.failureReason}</td>
               <td>{formatTokens(r.usage.totalTokens)}</td>
               <td>{formatUsd(r.usage.costUsd)}</td>
               <td>
@@ -308,6 +309,7 @@ function RunEvents({ runId, onClose }: { runId: string; onClose: () => void }) {
         </ul>
       )}
       <div className="log">
+        {v.withheld && <div className="log-line muted">{WITHHELD_TEXT}</div>}
         {v.events.map((e, i) => (
           <div key={v.offset + i} className="log-line">
             {describeRunEvent(e)}

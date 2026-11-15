@@ -1,4 +1,5 @@
 import { decisionCriteria, formatValue, shortDate, summarize } from '../logic/format.js';
+import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import { useCalibration, useDecisions, useExportSummary, useForm, usePromptPatch } from '../logic/hooks.js';
 import type { Decision, PatchRole } from '../logic/types.js';
 import { CriteriaRatings } from './CriterionRating.js';
@@ -89,10 +90,14 @@ export function DecisionLog({ wsId }: { wsId: string }) {
                 <span className={`tag ${d.kind === 'persona_feedback' || d.kind === 'flow_verdicts' ? 'simulated' : ''}`}>{d.kind}</span>
               </td>
               <td>
-                <details>
-                  <summary>{summarize(d.payload, 140)}</summary>
-                  <pre>{JSON.stringify(d.payload, null, 2)}</pre>
-                </details>
+                {isWithheld(d.payload) ? (
+                  <span className="muted">{WITHHELD_TEXT}</span>
+                ) : (
+                  <details>
+                    <summary>{summarize(d.payload, 140)}</summary>
+                    <pre>{JSON.stringify(d.payload, null, 2)}</pre>
+                  </details>
+                )}
               </td>
               <td className="small">{d.refs.join(', ')}</td>
               <td className="small">{d.promptVersion}</td>

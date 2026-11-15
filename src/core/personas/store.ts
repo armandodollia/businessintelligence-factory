@@ -4,7 +4,7 @@ import { Repo, type TableSpec } from '../store/repos.js';
 import type { PersonaAdjustment, PersonaLearningRun, PersonaProposal } from './types.js';
 
 /**
- * Repositories of the persona learning tables (migration 24). Kept out of `store/repos.ts` (a shared
+ * Repositories of the persona learning tables (migrations 24, 27). Kept out of `store/repos.ts` (a shared
  * hot file) and created lazily per database connection. Ids: `pad_` (adjustment), `ppr_` (proposal),
  * `plr_` (learning run).
  */
@@ -25,7 +25,7 @@ export const personaLearningSpecs = {
       id: 'text', rootWorkspaceId: 'text', workspaceId: 'text', personaId: 'text', runId: 'text', action: 'text',
       adjustmentId: 'text', field: 'text', text: 'text', rationale: 'text', evidence: 'json', stats: 'json', source: 'text',
       status: 'text', finalText: 'text', createdAt: 'text', decidedAt: 'text', actor: 'text', reason: 'text', decisionId: 'text',
-      feedbackEventId: 'text',
+      feedbackEventId: 'text', internal: 'bool',
     },
   } satisfies TableSpec<PersonaProposal>,
   runs: {
@@ -33,7 +33,7 @@ export const personaLearningSpecs = {
     key: 'id',
     fields: {
       id: 'text', rootWorkspaceId: 'text', personaId: 'text', retroId: 'text', status: 'text', signalsThrough: 'text',
-      shownSignalIds: 'json', stats: 'json', assumption: 'text', agentRunId: 'text', failureReason: 'text', createdAt: 'text',
+      shownSignalIds: 'json', shownStatementIds: 'json', stats: 'json', assumption: 'text', agentRunId: 'text', failureReason: 'text', createdAt: 'text',
       endedAt: 'text',
     },
   } satisfies TableSpec<PersonaLearningRun>,
