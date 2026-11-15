@@ -470,10 +470,21 @@ raises its version. A wrong entry is corrected by a further entry, never by edit
 - *What they know about us (my call).* The rival read is told the person worked here until that date
   in that position, and may know plans and facts recorded up to then. This is what makes a former
   colleague more useful than an ordinary competitor persona.
-- *It stays internal (my call).* The persona was built from internal uploads and from what people
-  said, so it stays out of exports and its reads run without web access, unlike other competitor
-  stakeholders. Competitor research may add public facts about the person's new role; that research
-  is given only the name and the new company, not the internal profile.
+- *It keeps being refined from the web (the user's decision).* Research follows the person: new
+  role, public statements, further moves. That research is given the name, the last position held
+  here and the new company, never the internal profile, and it may not put internal details into a
+  web request.
+- *Two layers, kept apart (the user's decision).* What the company knew from inside and what is
+  found in public are stored separately, each line with its origin and, for public lines, its
+  evidence copy. A run without web access reads both and writes the combined profile. Internal
+  knowledge is the base for how the person decides; public facts say what they do now; a conflict is
+  noted in the profile, not silently resolved; a line concluded from both is marked as a conclusion.
+  Internal lines carry the date they were last true, so their age is visible.
+- *What may leave the tool.* The public layer exports like any competitor stakeholder. The internal
+  layer and the combined profile stay out of exports, and reads made with them run without web
+  access.
+- A further move found by research (another company, a new title) is a proposal an owner accepts,
+  not an automatic change **(my call)**.
 
 **Moving team or division.** The persona's node changes. Needs an owner role covering both the old
 and the new node. The owner chooses whether the persona carries what is known (default) or starts
@@ -608,8 +619,8 @@ layer and not part of this design.
 
 Open questions for the user:
 
-1. Decisions that change shared findings (accept, reject, edit, uploading research material) stay
-   recorded under the person; only opinions go through §8b. Is that the split you want?
+None. Decided on 2026-11-15: decisions stay recorded under the person; only opinions go through
+§8b.
 
 ## 15. Verification
 
