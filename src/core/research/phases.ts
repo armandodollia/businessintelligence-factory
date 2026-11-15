@@ -31,29 +31,23 @@ export const PHASE_TASK_TYPES: Record<Phase, TaskType[]> = {
 };
 
 /**
- * Task types whose workers must not reach the web at all, whatever the planner asked (stakeholder
- * design §6, §16: own stakeholder research reads only what the store already holds): no browser, and
- * the run is offline (the CLI's web and shell tools denied by the adapter). Applied where a planned
- * task is stored and where the review loop starts its worker.
- */
-export const OFFLINE_TASK_TYPES: ReadonlySet<TaskType> = new Set(['own_stakeholders']);
-
-/** Whether a worker of a task of `type` must run offline (`RunOptions.offline`). */
-export function taskIsOffline(type: TaskType): boolean {
-  return OFFLINE_TASK_TYPES.has(type);
-}
-
-/**
  * Task types whose runs work in private (stakeholder design §7, task 6 fix round 2): own stakeholder
  * research may not reach the user except through the question round, and may store nothing but
- * stakeholders. Its runs cannot ask the user anything (`request_user_action`, `request_approval`,
- * escalation), and a non-reviewer run may call only `PRIVATE_TASK_TOOLS`.
+ * stakeholders and copies of the public pages it relies on. Its runs cannot ask the user anything
+ * (`request_user_action`, `request_approval`, escalation), and a non-reviewer run may call only
+ * `PRIVATE_TASK_TOOLS`. Private is not offline: since the user's ruling of 2026-11-15 these runs may
+ * use the web like any other research task.
  */
 export const PRIVATE_TASK_TYPES: ReadonlySet<TaskType> = new Set(['own_stakeholders']);
 
-/** What a non-reviewer run of a private task may call: save stakeholders, finish, answer its review, log, and read. */
+/**
+ * What a non-reviewer run of a private task may call: save stakeholders, store a copy of each public
+ * page it relies on (to cite as evidence; `taskToolInputRefusal` narrows it to kind, mime, content and
+ * source_url: no title, note, description, flow, step, applies_to or entity), finish, answer its
+ * review, log, and read. No `describe_artifact`: a caption is the worker's own words.
+ */
 export const PRIVATE_TASK_TOOLS: ReadonlySet<string> = new Set([
-  'save_stakeholder', 'submit_result', 'respond_to_review', 'log_decision',
+  'save_stakeholder', 'save_artifact', 'submit_result', 'respond_to_review', 'log_decision',
   'read_artifact', 'read_workspace', 'search', 'get_card', 'expand', 'list_changes',
 ]);
 
@@ -72,13 +66,46 @@ export function taskToolRefusal(type: TaskType, role: string, tool: string): str
     return `tool '${tool}' is not available in a ${type} task: you cannot ask the user anything here (the user answers ` +
       'their own questions about stakeholders separately). Finish with what you have: save the stakeholders you can support and call submit_result.';
   }
-  return `tool '${tool}' is not available in a ${type} task: it may save only stakeholders (save_stakeholder). ` +
+  return `tool '${tool}' is not available in a ${type} task: it may save only stakeholders (save_stakeholder) ` +
+    'and copies of the public pages it relies on (save_artifact). ' +
     'Finish with what you have and call submit_result.';
 }
 
-/** Whether a task of `type` runs with a browser when `asked` (never for an offline task type). */
-export function taskNeedsBrowser(type: TaskType, asked: boolean): boolean {
-  return asked && !taskIsOffline(type);
+/** The only `save_artifact` options a private task's worker may pass (a copy of a public page, no words of its own). */
+const PRIVATE_SAVE_OPTIONS: ReadonlySet<string> = new Set(['kind', 'mime', 'content', 'content_base64', 'file_path', 'source_url']);
+/** The kinds a private task's page copy may have (a screenshot needs a caption: the worker's own words). */
+const PRIVATE_SAVE_KINDS: ReadonlySet<string> = new Set(['page_snapshot', 'document']);
+
+/**
+ * Why a run of a task of `type`, in `role`, may not call `tool` with this (validated) `input` ('' when
+ * it may). A private task saves only copies of public pages: `save_artifact` takes `kind`
+ * (`page_snapshot` or `document`), `mime`, the content and an http(s) `source_url`, nothing else — no
+ * title, note, description, flow, step, applies_to or entity (the handler derives the title from the
+ * URL, `pageCopyTitle`).
+ */
+export function taskToolInputRefusal(type: TaskType, role: string, tool: string, input: unknown): string {
+  if (!PRIVATE_TASK_TYPES.has(type) || role === 'reviewer' || tool !== 'save_artifact') return '';
+  const i = (input ?? {}) as Record<string, unknown>;
+  const why = (what: string) => `save_artifact in a ${type} task stores only copies of public pages you rely on: ${what}`;
+  const extra = Object.keys(i).filter((k) => i[k] !== undefined && !PRIVATE_SAVE_OPTIONS.has(k)).sort();
+  if (extra.length) {
+    return why(`${extra.map((k) => `'${k}'`).join(', ')} ${extra.length === 1 ? 'is' : 'are'} not accepted (pass only kind, mime, the content and source_url; the title is taken from the URL)`);
+  }
+  if (typeof i.kind !== 'string' || !PRIVATE_SAVE_KINDS.has(i.kind)) return why(`kind '${String(i.kind)}' is not accepted (use page_snapshot or document)`);
+  if (!pageCopyTitle(i.source_url)) return why('source_url (the http or https address of the page) is required');
+  return '';
+}
+
+/** The stored title of a private task's page copy: host and path of its http(s) source URL ('' when there is none). */
+export function pageCopyTitle(sourceUrl: unknown): string {
+  let url: URL;
+  try {
+    url = new URL(typeof sourceUrl === 'string' ? sourceUrl : '');
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+  return `${url.host}${url.pathname === '/' ? '' : url.pathname}`;
 }
 
 /**
@@ -106,8 +133,8 @@ export const PHASE_GOALS: Record<Phase, string> = {
     'pain points. Apply the same task types to the own company via own_company_audit.',
   stakeholders:
     'Build the stakeholder personas of {{scope}}: the people, teams and systems whose approval, budget, data or ' +
-    'work it depends on (own_stakeholders, from what the store already holds, never with a browser), and the ' +
-    'leaders, owners and investors of its most important competitors from public sources (competitor_stakeholders; ' +
+    'work it depends on (own_stakeholders, from what the store already holds and the public web; set needs_browser ' +
+    'when it should browse), and the leaders, owners and investors of its most important competitors from public sources (competitor_stakeholders; ' +
     'only when the business tree has competitors).',
   synthesis:
     'Link the interview symptoms of {{scope}} to research findings (symptom hypotheses) and synthesize ' +

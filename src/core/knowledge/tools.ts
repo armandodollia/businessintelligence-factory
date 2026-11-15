@@ -157,7 +157,9 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     });
   };
   // A workspace without a row (legacy callers, tests) is a tree of one node: nothing else is reachable.
-  const scope: KnowledgeScope = factScope(store, caller.workspaceId);
+  const home = factScope(store, caller.workspaceId);
+  // Stakeholder personas: the reading run's task, so its own withheld page copies stay readable by id.
+  const scope: KnowledgeScope = caller.taskId ? { ...home, readerTaskId: caller.taskId } : home;
   const env: ReadEnv = {
     store, config: deps.config, role: caller.role, scope, now: deps.now ?? new Date(),
     ...(caller.model ? { provider: caller.model.provider } : {}),

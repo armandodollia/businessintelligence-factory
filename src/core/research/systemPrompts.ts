@@ -28,6 +28,16 @@ const TASK_TYPE_NOTES: Partial<Record<TaskType, string>> = {
 };
 
 /**
+ * Notes for the reviewer (and the reviewer audit, which reuses its input) of a task type. Own-stakeholder
+ * research may use the web (user ruling 2026-11-15), so its reviewer may too, under the worker's rule.
+ */
+const REVIEWER_TASK_NOTES: Partial<Record<TaskType, string>> = {
+  own_stakeholders:
+    'For this task (own_stakeholders): never put text, names, figures or other details from internal uploads or the interview ' +
+    "into a search query, a web form or any web request. Check public claims by the company's public name only.",
+};
+
+/**
  * System prompt of worker / synthesizer runs: `worker.md` + `synthesizer.md` (synthesizer role:
  * recommendation criteria and accepted cost formats) + `persona_profile.md` (persona task
  * types only) + `competitors.md` (competitor discovery / flow walkthroughs) + `hypotheses.md`
@@ -61,7 +71,8 @@ export function workerSystemPrompt(
   return withCalibration(parts.join('\n\n'), role, scope);
 }
 
-/** System prompt of reviewer runs: `reviewer.md` (+ the business's reviewer calibration) + the action policy. */
-export function reviewerSystemPrompt(config: BifConfig, scope?: CalibrationScope): string {
-  return [loadPrompt('reviewer', scope).text.trimEnd(), policyPrompt(config)].join('\n\n');
+/** System prompt of reviewer runs: `reviewer.md` (+ the business's reviewer calibration) + the note for `taskType`, if any + the action policy. */
+export function reviewerSystemPrompt(config: BifConfig, scope?: CalibrationScope, taskType?: TaskType): string {
+  const note = taskType && REVIEWER_TASK_NOTES[taskType];
+  return [loadPrompt('reviewer', scope).text.trimEnd(), ...(note ? [note] : []), policyPrompt(config)].join('\n\n');
 }

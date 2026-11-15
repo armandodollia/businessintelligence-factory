@@ -8,7 +8,7 @@
  *   npx tsx scripts/smoke.ts knowledge [providers] # knowledge-store flow (KS-8), per provider
  *   npx tsx scripts/smoke.ts flows [providers]     # flow records and ranking, per provider
  *   npx tsx scripts/smoke.ts persona-learning [providers] # persona learning in the retro (default: claude)
- *   npx tsx scripts/smoke.ts stakeholders [providers]     # offline own-stakeholder research (default: claude)
+ *   npx tsx scripts/smoke.ts stakeholders [providers]     # own-stakeholder research (default: claude)
  *   npx tsx scripts/smoke.ts user-persona [providers]     # the user persona's learning run in the retro (default: claude)
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
@@ -45,14 +45,14 @@
  *            signals shown, the evidence and text limits) and an unchanged persona (version 1, no adjustment).
  * stakeholders: stakeholder personas (design 2026-11-15 §18). Per provider, seeds a node with three internal notes
  *            (uploads) about a fictional company, then runs one `own_stakeholders` task through the real review loop
- *            (worker and reviewer offline, no browser) and the phase-end step that creates the question round
- *            (`ensureQuestions`). Judged from the store and the runs' files: every run of the task offline with no
- *            built-in tool (the CLI's offered tools in `stdout.log` and the tool calls in `events.jsonl` are harness
- *            tools only), at least one hidden own stakeholder citing the notes, four template questions per hidden
- *            stakeholder plus the two node questions, and the task's research withheld while they are hidden.
+ *            (not offline: own research may use the web since the user's ruling of 2026-11-15; no browser asked) and
+ *            the phase-end step that creates the question round (`ensureQuestions`). Judged from the store and the
+ *            runs' files: the worker run is not offline (for a Claude run its CLI offered built-in tools, read from
+ *            `stdout.log`; for the other CLIs it was not refused as offline), at least one hidden own stakeholder
+ *            citing the notes, four template questions per hidden stakeholder plus the two node questions, and the
+ *            task's research withheld while they are hidden. Whether the worker actually browsed is not required.
  *            Providers are enabled as in the default config (plus those named), so the reviewer is picked as
- *            on a default install. Codex refuses offline runs, so the codex worker is expected to fail with
- *            that refusal.
+ *            on a default install.
  * user-persona: a persona of the user (design 2026-11-15-user-persona-design.md §15). Per provider, seeds a node of a
  *            fictional company with six verified competitors and twelve actions of the configured person through the real
  *            action functions (each competitor excluded with a reason, its threat rated down), then runs the real retro
@@ -143,8 +143,8 @@ function freePort(): Promise<number> {
 
 /**
  * Config with every provider enabled (only the smoke model each) and all roles on claude. With
- * `defaultEnabled` (stakeholders mode), a provider is enabled as in the default config or when it is
- * one of `providers`, so offline work is routed as it would be on a default install.
+ * `defaultEnabled` (stakeholders and user-persona modes), a provider is enabled as in the default config
+ * or when it is one of `providers`, so reviewers and offline work are routed as on a default install.
  */
 function smokeConfig(dataDir: string, port: number, opts: { defaultEnabled?: boolean; providers?: ProviderId[] } = {}): BifConfig {
   const cfg = structuredClone(defaultConfig) as BifConfig;
@@ -1066,7 +1066,7 @@ async function personaLearningSmoke(provider: ProviderId, booted: Booted): Promi
 // stakeholder personas smoke (stakeholder design 2026-11-15 §18)
 
 const SH_COMPANY = 'Larkspur Freight';
-/** Internal notes about a fictional company (uploads: the own-stakeholder task reads what the store holds, never the web). */
+/** Internal notes about a fictional company (uploads the own-stakeholder task reads from the store). */
 const SH_NOTES: Array<{ name: string; text: string }> = [
   {
     name: 'org-notes.txt',
@@ -1155,20 +1155,20 @@ async function stakeholdersSmoke(provider: ProviderId, booted: Booted): Promise<
     runIds = runs.map((r) => r.id);
     const harness = new Set<string>(TOOL_NAMES);
     const perRun = runs.map((r) => {
-      // A run on a provider that cannot enforce offline is refused before its CLI starts (no tools at all).
+      // A run refused as offline never started its CLI; no run of this task should be.
       const refused = (r.failureReason ?? '').includes(offlineRefusal(r.model.provider));
       const offered = offeredTools(dataDir, wsId, r.id);
       const builtInOffered = offered?.filter((t) => !t.startsWith('mcp__bif__')) ?? [];
       const builtInCalled = calledTools(dataDir, wsId, r.id).filter((t) => !harness.has(t));
-      // Claude prints the tools it offers; for the other CLIs only the calls can be checked.
-      const ok = builtInCalled.length === 0 && (refused || r.model.provider !== 'claude' || (offered !== undefined && builtInOffered.length === 0));
-      return { r, refused, offered, builtInOffered, builtInCalled, ok };
+      // Claude prints the tools it offers (an offline run is offered none); for the other CLIs only the refusal can be checked.
+      const notOffline = !refused && (r.model.provider !== 'claude' || (offered !== undefined && builtInOffered.length > 0));
+      return { r, refused, offered, builtInOffered, builtInCalled, notOffline };
     });
-    const started = perRun.filter((x) => !x.refused);
+    const workers = perRun.filter((x) => x.r.role === 'worker');
     steps.push({
-      step: 'S1 offline: no built-in tool', calls: 0,
-      pass: started.length > 0 && perRun.every((x) => x.ok),
-      did: perRun.map((x) => `${x.r.role} ${x.r.model.provider}/${x.r.model.model} ${x.r.status}: ${x.refused ? 'refused (offline)' : `offered=${x.offered ? `${x.offered.length} (${x.builtInOffered.length} built-in${x.builtInOffered.length ? `: ${x.builtInOffered.join(',')}` : ''})` : 'unknown'} built-in calls=${x.builtInCalled.length}${x.builtInCalled.length ? ` (${x.builtInCalled.join(',')})` : ''}`}${x.r.failureReason && !x.refused ? ` failure=${short(x.r.failureReason, 100)}` : ''}`).join('; ') || 'no runs',
+      step: 'S1 not offline: no run refused as offline; a claude worker was offered built-in tools (other providers: not refused only)', calls: 0,
+      pass: workers.length > 0 && workers.every((x) => x.notOffline) && perRun.every((x) => !x.refused),
+      did: perRun.map((x) => `${x.r.role} ${x.r.model.provider}/${x.r.model.model} ${x.r.status}: ${x.refused ? 'refused (offline)' : `offered=${x.offered ? `${x.offered.length} (${x.builtInOffered.length} built-in)` : 'unknown'} built-in calls=${x.builtInCalled.length}${x.builtInCalled.length ? ` (${x.builtInCalled.join(',')})` : ''}`}${x.r.failureReason && !x.refused ? ` failure=${short(x.r.failureReason, 100)}` : ''}`).join('; ') || 'no runs',
     });
 
     const own = stakeholderPersonas(store, wsId).filter((p) => p.subjectKind === 'own');

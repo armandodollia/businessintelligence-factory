@@ -12,7 +12,7 @@ import type { RunContext } from '../tokens.js';
 import { browserConfigured } from '../browser.js';
 import { isAllowedRunFile } from '../paths.js';
 import { taskOutputEvidence } from '../../research/outputs.js';
-import { taskNeedsBrowser, taskToolRefusal } from '../../research/phases.js'; // stakeholder personas
+import { pageCopyTitle, PRIVATE_TASK_TYPES, taskToolInputRefusal, taskToolRefusal } from '../../research/phases.js'; // stakeholder personas
 import { findReplay } from './idempotency.js';
 // Knowledge store KS-1: captures, captions, entity / applies_to, extraction, describe_artifact.
 import { captureMeta, checkArtifactSave, describeArtifact, finishArtifactSave, linkArtifactCapture } from '../../knowledge/artifactTools.js';
@@ -271,6 +271,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     },
 
     async save_artifact(ctx, input: ToolInput<'save_artifact'>) {
+      const owner = taskOf(ctx);
+      const privateCopy = !!owner && ctx.role !== 'reviewer' && PRIVATE_TASK_TYPES.has(owner.type);
       // KS-1: caption rule, entity and applies_to are checked before anything is written.
       const extras = {
         ...(input.description !== undefined && { description: input.description }),
@@ -285,6 +287,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         mime: input.mime,
         ...(input.source_url !== undefined && { sourceUrl: input.source_url }),
         ...(input.title !== undefined && { title: input.title }),
+        // Stakeholder personas: a private task's page copy is titled from its URL, never by the worker.
+        ...(privateCopy && { title: pageCopyTitle(input.source_url) }),
         ...(input.flow !== undefined && { flow: input.flow }),
         ...(input.step !== undefined && { step: input.step }),
         ...(input.note !== undefined && { note: input.note }),
@@ -507,6 +511,8 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     if (refusal) return announce(fail(refusal));
     const parsed = toolInputSchemas[name].safeParse(input ?? {});
     if (!parsed.success) return announce(fail(`invalid input for ${name}: ${formatZodError(parsed.error)}`));
+    const inputRefusal = privateTask ? taskToolInputRefusal(privateTask.type, ctx.role, name, parsed.data) : '';
+    if (inputRefusal) return announce(fail(inputRefusal));
 
     // --- knowledge store KS-6: a successful save that cites ids marks the ids this run was shown as used.
     const tracked = (r: ToolResult): ToolResult => {
@@ -526,8 +532,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
       if (!extra) return announce(fail(`tool '${name}' is not available yet in this build`));
       if (name === 'propose_tasks' && !browserConfigured(deps.config)) {
         const tasks = (parsed.data as ToolInput<'propose_tasks'>).tasks;
-        // Stakeholder personas: a task type that never gets a browser is not refused for asking for one.
-        const idx = tasks.flatMap((t, i) => (taskNeedsBrowser(t.type, t.needs_browser) ? [i] : []));
+        const idx = tasks.flatMap((t, i) => (t.needs_browser ? [i] : []));
         if (idx.length) {
           return announce(
             fail(

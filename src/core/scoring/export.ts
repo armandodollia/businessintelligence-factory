@@ -12,7 +12,7 @@ import { knowledgeRepos } from '../store/repos.js'; // KS-6
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 import { personaLearningRepos } from '../personas/store.js';
 import { isHidden } from '../stakeholders/personas.js';
-import { withholding } from '../stakeholders/withheld.js';
+import { withholding, type Withholding } from '../stakeholders/withheld.js';
 import { stakeholderRepos } from '../stakeholders/store.js';
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
@@ -327,7 +327,7 @@ export function exportTrainingDataWithSummary(
     lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}), ...tags }));
   }
   lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf, tally));
-  lines.push(...knowledgeLines(store, workspaceId, uploads, tally)); // KS-6
+  lines.push(...knowledgeLines(store, workspaceId, uploads, tally, w)); // KS-6
   lines.push(...stakeholderLines(store, workspaceId, !!uploads, tally));
   return { jsonl: lines.length ? `${lines.join('\n')}\n` : '', summary: tally.summary() };
 }
@@ -767,10 +767,12 @@ export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<st
  *   observation. Left out by default when it is upload-derived (its fact or any cited artifact), its
  *   prior version is, its run or task is upload-exposed, or its fact / prior is an exposed output.
  */
-function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclusion | undefined, tally: ExclusionTally): string[] {
+function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclusion | undefined, tally: ExclusionTally, w: Withholding): string[] {
   const k = knowledgeRepos(store);
   const lines: string[] = [];
   for (const ev of k.retrievalEvents.list({ workspaceId })) {
+    // Stakeholder personas: withheld research and withheld page copies are not exported at all while withheld.
+    if (w.run(ev.agentRunId) || ev.resultIds.some((r) => w.artifact(r.id))) continue;
     const uses = k.retrievalUses.list({ retrievalEventId: ev.id }).map((u) => ({ itemId: u.itemId, usedByKind: u.usedByKind, usedById: u.usedById }));
     if (uploads) {
       const cause =
@@ -787,6 +789,7 @@ function knowledgeLines(store: Store, workspaceId: string, uploads: ExportExclus
     lines.push(JSON.stringify({ type: 'retrieval_event', retrievalEvent: ev, uses }));
   }
   for (const o of k.factObservations.list({ workspaceId })) {
+    if (w.run(o.agentRunId) || o.evidence.some((e) => w.artifact(e))) continue; // stakeholder personas
     if (uploads) {
       const cause =
         uploads.uploadDerived(o.id) || uploads.uploadDerived(o.findingId) || (o.priorFindingId && uploads.uploadDerived(o.priorFindingId)) ||

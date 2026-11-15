@@ -18,6 +18,7 @@ import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { artifactVisible, canonicalArtifactId, capText } from './texts.js';
 import { FENCE_CLOSE, FENCE_OPEN } from './trust.js';
+import { artifactWithheldSql } from '../stakeholders/withheld.js'; // stakeholder personas
 import type { Entity, EntityKind, Relation, RelationSourceKind, RelationType } from '../types.js';
 import { getEntity } from './entities.js';
 import { SOURCE_TABLES, sourceUsableSql, sourceVisibleSql } from './usable.js';
@@ -141,10 +142,14 @@ export const factVisibleSql = (f: string): string =>
   `(${f}.workspace_id IN (SELECT value FROM json_each(:tree)) AND EXISTS (SELECT 1 FROM item_scopes s
      WHERE s.item_kind = 'fact' AND s.item_id = ${f}.id AND s.workspace_id IN (SELECT value FROM json_each(:ids))))`;
 
-/** SQL (0/1): artifact `a` is visible. Params `:tree`, `:ids`. */
+/**
+ * SQL (0/1): artifact `a` is visible. Params `:tree`, `:ids`. A withheld artifact (a page copy of
+ * own-stakeholder research while it is withheld, `artifactWithheldSql`) is never visible to a query.
+ */
 export const artifactVisibleSql = (a: string): string =>
   `(${a}.workspace_id IN (SELECT value FROM json_each(:tree)) AND EXISTS (SELECT 1 FROM item_scopes s
-     WHERE s.item_kind = 'artifact' AND s.item_id = ${a}.id AND s.workspace_id IN (SELECT value FROM json_each(:ids))))`;
+     WHERE s.item_kind = 'artifact' AND s.item_id = ${a}.id AND s.workspace_id IN (SELECT value FROM json_each(:ids)))
+     AND NOT ${artifactWithheldSql(a)})`;
 
 /** SQL (0/1): a typed record `r` (no scope rows) is visible by its workspace. Param `:ids`. */
 export const recordVisibleSql = (r: string): string => `(${r}.workspace_id IN (SELECT value FROM json_each(:ids)))`;

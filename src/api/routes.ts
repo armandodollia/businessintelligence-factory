@@ -505,6 +505,8 @@ export function createApp(deps: AppDeps): Hono {
 
   // --- artifacts ------------------------------------------------------------------------------
   app.get('/api/artifacts/:id', (c) => {
+    // Stakeholder personas: a withheld page copy of own-stakeholder research answers like an unknown id.
+    if (withholding(store).artifact(c.req.param('id'))) throw new HttpError(404, `artifact '${c.req.param('id')}' not found`);
     const { artifact, bytes } = artifacts.read(c.req.param('id'));
     // Artifacts come from third-party sites and uploads: never let them run as our origin.
     const headers: Record<string, string> = {
@@ -530,7 +532,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/api/artifacts/:id/meta', (c) => {
     const id = c.req.param('id');
     const a = store.artifacts.get(id);
-    if (!a) throw new HttpError(404, `artifact '${id}' not found`);
+    if (!a || withholding(store).artifact(id)) throw new HttpError(404, `artifact '${id}' not found`);
     return c.json(a);
   });
 

@@ -14,7 +14,6 @@ import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
 import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
-import { taskIsOffline, taskNeedsBrowser } from './phases.js'; // stakeholder personas
 import { stakeholderTaskSection } from '../stakeholders/personas.js'; // stakeholder personas
 import { defaultConfig } from '../config/schema.js'; // KS-2
 import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
@@ -495,7 +494,7 @@ async function workerStep(
   const role = roleForTask(initial);
   const system =
     experimentWorkerPrompt(store, taskId) ?? // learning loop WP-F: an experiment arm's worker prompt version
-    workerSystemPrompt(config, role, taskNeedsBrowser(initial.type, initial.needsBrowser), initial.type, calibrationScope(store, config, initial.workspaceId, { taskId })); // stored lessons-off flag
+    workerSystemPrompt(config, role, initial.needsBrowser, initial.type, calibrationScope(store, config, initial.workspaceId, { taskId })); // stored lessons-off flag
   const version = promptVersion(system);
   let reason = '';
   for (let attempt = 1; attempt <= WORKER_STEP_ATTEMPTS; attempt++) {
@@ -505,9 +504,7 @@ async function workerStep(
     const { prompt, reads } = kind === 'work' ? workPromptWithReads(deps, task) : revisePromptWithReads(task, issues, deps);
     const res = await runAgent(deps, {
       kind, role, workspaceId: task.workspaceId, task, round, attempt, prompt, systemPrompt: system,
-      // Stakeholder personas (design §6): own stakeholder research never has a browser, whatever the row says.
-      model: task.model, needsBrowser: taskNeedsBrowser(task.type, task.needsBrowser), promptVersion: version,
-      ...(taskIsOffline(task.type) ? { offline: true } : {}),
+      model: task.model, needsBrowser: task.needsBrowser, promptVersion: version,
       ...(reads.length ? { promptReads: reads } : {}),
     });
     throwIfAborted(deps.signal);
@@ -558,7 +555,7 @@ export function reviewerRunInput(
   lessons: { lessonsOff?: boolean } = {},
 ): { systemPrompt: string; promptVersion: string; prompt: string; promptReads: PromptRead[] } {
   const { store, config } = deps;
-  const system = reviewerSystemPrompt(config, calibrationScope(store, config, task.workspaceId, { taskId: task.id, ...lessons }));
+  const system = reviewerSystemPrompt(config, calibrationScope(store, config, task.workspaceId, { taskId: task.id, ...lessons }), task.type);
   const context = reviewContext(deps, task);
   // Knowledge store KS-2/KS-4: the prior claims and quotes in the reviewer's prompt are a read (design
   // §12), logged on the reviewer run before it starts (a crash mid-run cannot lose the row).
@@ -588,15 +585,12 @@ async function reviewStep(
 ): Promise<{ valid: boolean; score: number; issues: ReviewIssue[] }> {
   const { store, config } = deps;
   const task = store.tasks.get(taskId)!;
-  // Stakeholder personas (final review item 2): the reviewer of an offline task can run offline.
-  const model = reviewerFor(task.model, config, { offline: taskIsOffline(task.type) });
+  const model = reviewerFor(task.model, config);
   const input = reviewerRunInput(deps, task, round); // learning loop WP-F: shared with reviewer audits
   const res = await runAgent(deps, {
     kind: 'review', role: 'reviewer', workspaceId: task.workspaceId, task, round, attempt: 1,
     prompt: input.prompt, systemPrompt: input.systemPrompt,
     model, needsBrowser: false, promptVersion: input.promptVersion,
-    // Stakeholder personas: the reviewer of an offline task reads the same internal content, so it is offline too.
-    ...(taskIsOffline(task.type) ? { offline: true } : {}),
     ...(input.promptReads.length ? { promptReads: input.promptReads } : {}),
   });
   const version = input.promptVersion;

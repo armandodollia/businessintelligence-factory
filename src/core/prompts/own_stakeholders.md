@@ -2,25 +2,36 @@
 
 Build the stakeholder personas of this node: the people, teams and systems whose approval, budget,
 data or work it depends on. Save each one with `save_stakeholder` (subject `"own"`). Save only
-stakeholders: no findings.
+stakeholders: no findings. Never put text, names, figures or other details from internal uploads or
+the interview into a search query, a web form or any web request: search for the company's public
+record by its public name only.
 
 ## What you can call
 This task works in private: the user has not yet told the tool about these stakeholders in their own
 words, so nothing you find may reach them first. You can call only `save_stakeholder`,
-`submit_result`, `respond_to_review`, `log_decision` and the reading tools (`read_artifact`,
-`read_workspace`, `search`, `get_card`, `expand`, `list_changes`). You cannot save artifacts,
+`save_artifact` (for copies of the public pages you rely on), `submit_result`, `respond_to_review`,
+`log_decision` and the reading tools (`read_artifact`, `read_workspace`, `search`, `get_card`,
+`expand`, `list_changes`), plus your browser and web tools when this task has them. You cannot save
 findings or other records, and you cannot ask the user anything (`request_user_action`,
-`request_approval` are refused): cite artifacts that are already stored, and when you are missing
-something, finish with what you have.
+`request_approval` are refused): when you are missing something, finish with what you have.
 
-## You have no web access
-This task has no browser and no web access. Work only from what the store already holds for this
-node:
-- its internal uploads (`read_artifact`; the uploads are listed with `read_workspace`);
-- the interview (the profile and symptoms on the node's card, `read_workspace` / `get_card`);
-- saved facts (`search`, then `get_card` / `expand`);
-- public pages other tasks already captured (company audit, public filings, news: leadership,
-  ownership and investor pages), found with `search`.
+## Where you work from
+Work from both:
+1. What the store already holds for this node:
+   - its internal uploads (`read_artifact`; the uploads are listed with `read_workspace`);
+   - the interview (the profile and symptoms on the node's card, `read_workspace` / `get_card`);
+   - saved facts (`search`, then `get_card` / `expand`);
+   - public pages other tasks already captured (company audit, public filings, news: leadership,
+     ownership and investor pages), found with `search`.
+2. The public web: the company's leadership, board, ownership and investor pages, registry filings,
+   its parent and sister organisations, and the press.
+
+Every field still needs an evidence artifact. Save a copy of each public page you use with
+`save_artifact` and cite its id; a page another task already captured can be cited as it is. Pass
+only `kind` (`page_snapshot` or `document`), `mime`, the page's content (`content`, `content_base64`
+or `file_path`) and its `source_url` (http or https). Every other option (`title`, `note`,
+`description`, `flow`, `step`, `applies_to`, `entity`) is refused, and so are screenshots and kind
+`text`: the title is taken from the URL, and nothing you write yourself is stored with the page.
 
 ## What a stakeholder is at each layer of the tree
 - At the top of the business: leaders, the board, owners and investors, regulators, key partners.

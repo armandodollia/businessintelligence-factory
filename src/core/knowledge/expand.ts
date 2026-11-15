@@ -34,6 +34,7 @@ import { FLOW_TEXT_MAX, type Checklist, type FlowCheck } from '../flows/types.js
 import { knowledgeRepos } from '../store/repos.js';
 import type { Artifact, Finding, RetrievalResultRef, TextChunk } from '../types.js';
 import { isHidden } from '../stakeholders/personas.js';
+import { artifactWithheldSql, captureWithheld } from '../stakeholders/withheld.js';
 import { encodeCursor } from './budget.js';
 import { cardPageLines, entityCard, HEADER_NAME_JSON, nodeCard, nodeLineRecover } from './cards.js';
 import { getEntity } from './entities.js';
@@ -344,6 +345,8 @@ function expandArtifact(env: ReadEnv, id: string): Built {
   // Captures: their text is served under the artifact's flag (a capture has no flag of its own).
   const caps = knowledgeRepos(store).artifactCaptures.list({ artifactId: a.id }).sort((x, y) => x.capturedAt.localeCompare(y.capturedAt));
   for (const cap of caps) {
+    // Stakeholder personas: a capture by withheld research is not listed, whatever else the artifact has.
+    if (captureWithheld(store, cap.taskId, env.scope.readerTaskId)) continue;
     if (!aroundVisible(env, { kind: 'workspace', workspaceId: cap.workspaceId })) {
       b.outside++;
       continue;
@@ -363,7 +366,8 @@ function expandArtifact(env: ReadEnv, id: string): Built {
     const rows = store.db
       .prepare(
         `SELECT a.id AS id, a.captured_at AS at, t.content_sha256 AS h FROM artifacts a LEFT JOIN artifact_texts t ON t.artifact_id = a.id
-         WHERE a.url_key = ? AND a.id <> ? AND a.workspace_id IN (SELECT value FROM json_each(?)) ORDER BY a.captured_at, a.rowid`,
+         WHERE a.url_key = ? AND a.id <> ? AND a.workspace_id IN (SELECT value FROM json_each(?)) AND NOT ${artifactWithheldSql('a')}
+         ORDER BY a.captured_at, a.rowid`,
       )
       .all(a.urlKey, a.id, JSON.stringify(env.scope.treeIds)) as Array<{ id: string; at: string; h: string | null }>;
     // Other captures of the page follow the request scope (re-gate): node scope by default.

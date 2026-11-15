@@ -22,10 +22,8 @@
 import { CronExpressionParser } from 'cron-parser';
 import { PROVIDER_IDS, type BifConfig, type ModelRef } from '../config/schema.js';
 import { treeWorkspaceIds } from '../evidence/synthesis.js';
-import { offlineModel } from '../harness/offline.js';
 import { getRunOutputs } from '../harness/tools/handlers.js';
 import { runAgent, type ResearchDeps } from '../research/deps.js';
-import { taskIsOffline } from '../research/phases.js';
 import { loopSettings, reviewerRunInput } from '../research/reviewLoop.js';
 import type { Store } from '../store/db.js';
 import { newId, Repo, type TableSpec } from '../store/repos.js';
@@ -97,23 +95,9 @@ const sameModel = (a: ModelRef, b: ModelRef) => a.provider === b.provider && a.m
  * The auditor for a review made by `original` of work by `worker`: `config.audit.model` when it differs
  * from `original`; else the first model of an enabled provider other than the original reviewer's
  * (preferring one that is not the worker's either); else another model of the original's provider;
- * else none (the audit is skipped). With `offline` (the review of an offline task; stakeholder
- * personas, final review item 2) that pick is swapped by `offlineModel` for a model, other than
- * `original`, whose provider can run offline (preferring a provider other than the original's); none
- * when no such model exists.
+ * else none (the audit is skipped).
  */
-export function auditModelFor(
-  original: ModelRef,
-  worker: ModelRef,
-  config: Pick<BifConfig, 'providers' | 'audit'>,
-  opts: { offline?: boolean } = {},
-): ModelRef | undefined {
-  const auditor = pickAuditor(original, worker, config);
-  if (!opts.offline) return auditor;
-  return offlineModel(config, auditor, { avoidProvider: original.provider, exclude: original });
-}
-
-function pickAuditor(original: ModelRef, worker: ModelRef, config: Pick<BifConfig, 'providers' | 'audit'>): ModelRef | undefined {
+export function auditModelFor(original: ModelRef, worker: ModelRef, config: Pick<BifConfig, 'providers' | 'audit'>): ModelRef | undefined {
   const configured = config.audit?.model;
   if (configured && !sameModel(configured, original) && config.providers[configured.provider].enabled) return configured;
   const firstOf = (id: (typeof PROVIDER_IDS)[number]) => {
@@ -207,7 +191,7 @@ export function startReviewerAudit(deps: ResearchDeps, input: AuditInput): { bat
   const now = new Date().toISOString();
   const rows = picked.map((p): { row: ReviewerAudit; task: Task } => {
     const run = store.agentRuns.get(p.decision.agentRunId);
-    const auditor = auditModelFor(p.decision.model, p.task.model, config, { offline: taskIsOffline(p.task.type) });
+    const auditor = auditModelFor(p.decision.model, p.task.model, config);
     const row: ReviewerAudit = {
       id: newId('aud'), batchId, workspaceId: p.task.workspaceId, rootWorkspaceId: root, taskId: p.task.id, taskType: p.task.type,
       startedBy: input.startedBy ?? 'api', actor: input.actor ?? 'local-user', status: auditor ? 'running' : 'done',
@@ -220,9 +204,7 @@ export function startReviewerAudit(deps: ResearchDeps, input: AuditInput): { bat
     if (auditor) row.auditModel = auditor;
     else {
       row.verdict = 'skipped';
-      row.reason = taskIsOffline(p.task.type)
-        ? `no different model that can run offline is configured to audit a review by ${p.decision.model.provider}/${p.decision.model.model}`
-        : `no different model is configured to audit a review by ${p.decision.model.provider}/${p.decision.model.model}`;
+      row.reason = `no different model is configured to audit a review by ${p.decision.model.provider}/${p.decision.model.model}`;
       row.endedAt = now;
     }
     return { row: repos(store).audits.insert(row), task: p.task };

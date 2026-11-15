@@ -9,6 +9,7 @@ import { sameTree } from '../workspace/tree.js';
 import { urlKey } from '../knowledge/extract/urlKey.js';
 import { redactServed, stripFences } from '../knowledge/trust.js';
 import { knowledgeRepos } from '../store/repos.js';
+import { PRIVATE_TASK_TYPES } from '../research/phases.js'; // stakeholder personas
 
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
@@ -161,6 +162,18 @@ export class ArtifactStore {
     return join(this.dataDir, artifact.path);
   }
 
+  /** Whether `taskId` is a task of a private type (own stakeholder research, `PRIVATE_TASK_TYPES`). */
+  private isPrivateTask(taskId: string | undefined): boolean {
+    const type = taskId ? this.store.tasks.get(taskId)?.type : undefined;
+    return type !== undefined && PRIVATE_TASK_TYPES.has(type);
+  }
+
+  /** Whether every capture of the artifact so far was made by a private task. */
+  private onlyPrivateCaptures(artifactId: string): boolean {
+    const caps = knowledgeRepos(this.store).artifactCaptures.list({ artifactId });
+    return caps.length > 0 && caps.every((c) => this.isPrivateTask(c.taskId));
+  }
+
   private persist(raw: ArtifactMeta, buf: Buffer, ext: string): CaptureResult {
     if (!SAFE_SEGMENT.test(raw.workspaceId)) {
       throw new Error(`invalid workspaceId '${raw.workspaceId}': only [A-Za-z0-9_-] allowed`);
@@ -185,6 +198,7 @@ export class ArtifactStore {
       }
     }
     const key = urlKey(meta.sourceUrl);
+    const privateCapture = this.isPrivateTask(meta.taskId);
     // One transaction (BEGIN IMMEDIATE): the sha lookup, the artifact row and its capture row.
     return this.store.transaction(() => {
       let artifact = this.findBySha(meta.workspaceId, sha256);
@@ -208,8 +222,15 @@ export class ArtifactStore {
         if (meta.description !== undefined) fresh.description = meta.description;
         if (key !== undefined) fresh.urlKey = key;
         artifact = this.store.artifacts.insert(fresh);
-      } else if (!artifact.description && meta.description) {
-        // A later save fills an empty description but never overwrites one (design §8.1).
+      } else if (!privateCapture && artifact.kind !== 'upload' && this.onlyPrivateCaptures(artifact.id)) {
+        // Stakeholder personas: the row was written by private research (own stakeholders) alone; the
+        // first other capture's metadata replaces it, so what is served comes from served captures only.
+        artifact = this.store.artifacts.update(artifact.id, {
+          kind: meta.kind, title: meta.title, sourceUrl: meta.sourceUrl, urlKey: key, flow: meta.flow, step: meta.step, note: meta.note,
+          description: meta.description, capturedAt: new Date().toISOString(),
+        });
+      } else if (!artifact.description && meta.description && !privateCapture) {
+        // A later save fills an empty description but never overwrites one (design §8.1); never from private research.
         artifact = this.store.artifacts.update(artifact.id, { description: meta.description });
       }
       const captureId = newId('cap');

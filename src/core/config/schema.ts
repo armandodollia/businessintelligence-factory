@@ -33,7 +33,7 @@ export const TASK_TYPES = [
   'synthesize_recommendations',
   'persona_panel',
   'map_business_units',
-  // Stakeholder personas: of the node itself (never with a browser) and of its main competitors
+  // Stakeholder personas: of the node itself (the store and the public web) and of its main competitors
   'own_stakeholders',
   'competitor_stakeholders',
 ] as const;

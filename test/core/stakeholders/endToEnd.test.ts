@@ -1,6 +1,6 @@
 /**
- * Stakeholder personas end to end (design 2026-11-15-stakeholder-personas-design.md §18): offline
- * research saves two own stakeholders (hidden, research withheld) → the end of the `stakeholders` phase
+ * Stakeholder personas end to end (design 2026-11-15-stakeholder-personas-design.md §18): research
+ * (the store and the public web) saves two own stakeholders (hidden, research withheld) → the end of the `stakeholders` phase
  * creates the question round → the user answers → the stakeholders open → the panel gives simulated
  * reads → the user records a real decision that contradicts a read → nothing about the personas has
  * changed → the weekly retro proposes a correction citing the user's answer → the user accepts → the
@@ -87,7 +87,7 @@ describe('stakeholder personas end to end', () => {
     const learning = personaLearningRepos(t.store);
     const offline: boolean[] = [];
 
-    // --- 1. offline research saves two own stakeholders; the phase end creates the question round -----
+    // --- 1. research (not offline) saves two own stakeholders; the phase end creates the question round -
     t.state.pick = (req): FakeScript | undefined => {
       if (req.kind === 'orchestrate') {
         if (req.round !== 1) return async () => undefined;
@@ -110,9 +110,9 @@ describe('stakeholder personas end to end', () => {
     };
     const rr = await startPhase('ws_a', 'stakeholders', t.deps);
     expect(rr.status).toBe('done');
-    expect(offline).toEqual([true]);
+    expect(offline).toEqual([false]);
     const [task] = t.store.tasks.list({ runId: rr.id });
-    expect(task).toMatchObject({ type: 'own_stakeholders', needsBrowser: false, status: 'verified' });
+    expect(task).toMatchObject({ type: 'own_stakeholders', needsBrowser: true, status: 'verified' });
 
     const bySlug = (slug: string) => stakeholderPersonas(t.store, 'ws_a').find((p) => p.slug === slug)!;
     const cfo = bySlug('stk-chief-financial-officer');

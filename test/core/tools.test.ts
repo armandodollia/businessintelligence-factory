@@ -12,7 +12,7 @@ import { defaultConfig } from '../../src/core/config/schema.js';
 import { EventBus, type BusEvent } from '../../src/core/events.js';
 import { ArtifactStore } from '../../src/core/evidence/artifacts.js';
 import { openStore, type Store } from '../../src/core/store/db.js';
-import { newId } from '../../src/core/store/repos.js';
+import { knowledgeRepos, newId } from '../../src/core/store/repos.js';
 import { createToolHandlers, getRunOutputs, resolveUserRequest, type ToolHandlerDeps } from '../../src/core/harness/tools/handlers.js';
 import { ROLE_TOOLS, TOOL_NAMES } from '../../src/core/harness/tools/registry.js';
 import { TokenRegistry, type RunContext } from '../../src/core/harness/tokens.js';
@@ -640,7 +640,8 @@ describe('concurrent user requests on one task', () => {
 
 
 // Stakeholder personas (design §7, task 6 fix round 2): a run of an own_stakeholders task cannot ask the
-// user anything and may store only stakeholders; its reviewer keeps the review tools.
+// user anything and may store only stakeholders and copies of the public pages it relies on (own
+// research may use the web, user ruling 2026-11-15); its reviewer keeps the review tools.
 describe('runs of a private task (own_stakeholders)', () => {
   function privateSetup() {
     const s = setup({ extraHandlers: stakeholderToolHandlers({ dataDir: mkdtempSync(join(tmpdir(), 'bif-tools-stk-')) }) });
@@ -659,9 +660,10 @@ describe('runs of a private task (own_stakeholders)', () => {
     const c = ctx('worker', { taskId: s.task.id });
     const refused = ROLE_TOOLS.worker.filter((t) => !PRIVATE_TASK_TOOLS.has(t));
     expect(refused).toEqual(expect.arrayContaining([
-      'save_finding', 'save_persona', 'save_competitor', 'save_hypothesis', 'save_artifact', 'propose_business_unit', 'request_user_action',
+      'save_finding', 'save_persona', 'save_competitor', 'save_hypothesis', 'propose_business_unit', 'request_user_action',
       'request_approval', 'describe_artifact', 'get_identity', 'confirm_finding', 'retract_finding',
     ]));
+    expect(refused).not.toContain('save_artifact');
     for (const tool of refused) {
       const r = await s.handle(c, tool, {});
       expect(refusalOf(r), tool).toMatch(new RegExp(`tool '${tool}' is not available in a own_stakeholders task`));
@@ -679,6 +681,10 @@ describe('runs of a private task (own_stakeholders)', () => {
     expect((await s.handle(c, 'log_decision', { what: 'start', why: 'plan', confidence: 0.6 })).ok).toBe(true);
     expect((await s.handle(c, 'read_workspace', { workspace_id: 'ws_a' })).ok).toBe(true);
     expect((await s.handle(c, 'read_artifact', { artifact_id: s.art })).ok).toBe(true);
+    // a copy of a public page it relies on, to cite as evidence
+    const page = await s.handle(c, 'save_artifact', { kind: 'page_snapshot', mime: 'text/plain', source_url: 'https://acme.example/board', content: 'Leadership page: the board' });
+    expect(page.ok).toBe(true);
+    expect(s.store.findings.list()).toEqual([]);
     const profile = Object.fromEntries(STAKEHOLDER_FIELDS.map((f) => [f, { value: `${f} v`, confidence: 0.5, evidence: [s.art] }]));
     const saved = await s.handle(c, 'save_stakeholder', { label: 'Chief financial officer', stakeholder_type: 'leader', subject: 'own', relation: 'approves', profile });
     expect(saved.ok).toBe(true);
@@ -689,5 +695,43 @@ describe('runs of a private task (own_stakeholders)', () => {
 
     const other = addTask(s.store);
     expect((await s.handle(ctx('worker', { taskId: other.id }), 'save_artifact', { kind: 'text', mime: 'text/plain', content: 'x' })).ok).toBe(true);
+  });
+
+  it('save_artifact stores only page copies: kind, mime, content and an http(s) source_url; every other option is refused; describe_artifact too', async () => {
+    const s = privateSetup();
+    const c = ctx('worker', { taskId: s.task.id });
+    const page = { kind: 'page_snapshot', mime: 'text/plain', content: 'Board of Acme', source_url: 'https://acme.example/about/board?x=1' };
+    const refusals: Array<[Record<string, unknown>, RegExp]> = [
+      [{ ...page, kind: 'text' }, /kind 'text' is not accepted/],
+      [{ ...page, kind: 'screenshot', mime: 'image/png', description: 'A screenshot of the board page of Acme' }, /'description' is not accepted/],
+      [{ ...page, kind: 'screenshot' }, /kind 'screenshot' is not accepted/],
+      [{ ...page, source_url: undefined }, /source_url .* is required/],
+      [{ ...page, source_url: 'file:///etc/hosts' }, /source_url .* is required/],
+      [{ ...page, source_url: 'not a url' }, /source_url .* is required/],
+      [{ ...page, title: 'Board' }, /'title' is not accepted/],
+      [{ ...page, note: 'the CFO is new' }, /'note' is not accepted/],
+      [{ ...page, description: 'The board page of Acme, listing its directors.' }, /'description' is not accepted/],
+      [{ ...page, flow: 'signup' }, /'flow' is not accepted/],
+      [{ ...page, step: 1 }, /'step' is not accepted/],
+      [{ ...page, applies_to: ['ws_a'] }, /'applies_to' is not accepted/],
+      [{ ...page, entity: { kind: 'company', name: 'Acme' } }, /'entity' is not accepted/],
+      [{ ...page, title: 'Board', note: 'n' }, /'note', 'title' are not accepted/],
+    ];
+    for (const [input, why] of refusals) {
+      expect(refusalOf(await s.handle(c, 'save_artifact', input)), JSON.stringify(input)).toMatch(why);
+    }
+    expect(s.store.artifacts.list({ workspaceId: 'ws_a' }).map((a) => a.id)).toEqual([s.art]);
+    const saved = await s.handle(c, 'save_artifact', page);
+    expect(saved.ok).toBe(true);
+    const id = (saved as { data: { artifactId: string } }).data.artifactId;
+    // the stored title is derived from the URL (host and path), never from the worker
+    expect(s.store.artifacts.get(id)).toMatchObject({ title: 'acme.example/about/board', sourceUrl: page.source_url });
+    const [cap] = knowledgeRepos(s.store).artifactCaptures.list({ artifactId: id });
+    expect(cap).toMatchObject({ title: 'acme.example/about/board', taskId: s.task.id });
+    expect(cap!.note ?? cap!.description ?? cap!.entityId).toBeUndefined();
+    const doc = await s.handle(c, 'save_artifact', { kind: 'document', mime: 'text/plain', content: 'Registry filing', source_url: 'http://registry.example/' });
+    expect(s.store.artifacts.get((doc as { data: { artifactId: string } }).data.artifactId)!.title).toBe('registry.example');
+    expect(refusalOf(await s.handle(c, 'describe_artifact', { artifact_id: id, description: 'The board page of Acme, listing its directors.' })))
+      .toMatch(/tool 'describe_artifact' is not available in a own_stakeholders task/);
   });
 });

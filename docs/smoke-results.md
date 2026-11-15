@@ -152,6 +152,29 @@ What happened:
   not support), the worker fixed them, and the task was `verified` in round 2 with nits left open.
   Both are the review loop working as built; the difference is the model's variance on haiku.
 
+### 2026-11-15: own-stakeholder research may use the web (`fix/own-stakeholders-web`)
+
+After the user's ruling that own-stakeholder research may use the web, S1 changed: the worker run must
+not be offline (a Claude worker's CLI was offered built-in tools; no run refused as offline). Browsing
+is not required. S2–S4 are unchanged. Run once with
+`BIF_SMOKE_TIMEOUT_MS=300000 npm run smoke -- stakeholders claude` (macOS, Node 25.8.1; claude 2.1.322,
+codex-cli 0.167.2). Providers as on a default install, so the reviewer went to Codex. Printed:
+
+```
+[smoke] stakeholders claude (haiku) …
+[smoke] PASS stakeholders/claude (haiku) 44.0s — task=verified; runs=worker:done,reviewer:done; promptStoreGaps=[]
+[smoke]   tool calls=15; usage in=13949 out=6567 cost=$0.0669 (rows 2)
+[smoke]   PASS S1 not offline: the worker was offered built-in tools (calls 0): worker claude/haiku done: offered=57 (29 built-in) built-in calls=1 (ToolSearch); reviewer codex/gpt-6.1-sol done: offered=unknown built-in calls=0
+[smoke]   PASS S2 hidden own stakeholders (calls 3): task verified (round 1); own=3 hidden=3: Chief financial officer (leader, verified, cites notes=true); Board of directors (board, verified, cites notes=true); Billing platform team (team, verified, cites notes=true)
+[smoke]   PASS S3 question round (calls 0): created=14; per stakeholder Chief financial officer=4, Board of directors=4, Billing platform team=4; node questions=2; texts are the templates=true
+[smoke]   PASS S4 research withheld while hidden (calls 0): task withheld=true
+[smoke]   confusion: read_workspace failed: invalid input for read_workspace: workspace_id: Invalid input: expected string, received undefined
+```
+
+The worker did not browse (its one built-in call was `ToolSearch`). The Codex reviewer ran and
+verified the task in round 1. One `read_workspace` call without `workspace_id` was refused and the worker
+went on.
+
 ## User persona smoke (`feat/user-persona`, 2026-11-15)
 
 Run once on 2026-11-15 with `BIF_SMOKE_TIMEOUT_MS=300000 npm run smoke -- user-persona claude` (macOS,

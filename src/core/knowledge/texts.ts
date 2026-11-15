@@ -17,6 +17,7 @@ import { knowledgeRepos } from '../store/repos.js';
 import type { ArtifactText, ExtractionState, OcrState, TextChunk } from '../types.js';
 import { activeIds, notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { CONTENT_TRUST, fenceEvidence, redactRange, redactServed, treeSecrets } from './trust.js';
+import { artifactWithheld } from '../stakeholders/withheld.js'; // stakeholder personas
 
 /** Cap on `artifact_texts.error` when stored and when served (chars, before the fence). */
 export const SERVED_ERROR_MAX_CHARS = 300;
@@ -89,6 +90,8 @@ export function chunkCount(store: Store, artifactId: string): number {
 export function artifactVisible(store: Store, scope: KnowledgeScope, artifactId: string, mode: ScopeMode): boolean {
   const art = store.artifacts.get(artifactId);
   if (!art || !scope.treeIds.includes(art.workspaceId)) return false;
+  // Stakeholder personas: a withheld page copy is unknown except to runs of the task that captured it.
+  if (artifactWithheld(store, artifactId, scope.readerTaskId)) return false;
   if (mode === 'tree') return true;
   const ids = new Set(activeIds(scope, mode));
   return knowledgeRepos(store).itemScopes.list({ itemKind: 'artifact', itemId: artifactId }).some((s) => ids.has(s.workspaceId));

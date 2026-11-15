@@ -1,7 +1,8 @@
 /**
- * Stakeholder personas, task 2 fix round 1 (design §6, §16): an `own_stakeholders` run cannot reach the
- * web — the offline flag travels from the task to the adapter, each adapter enforces it in the command
- * it builds or refuses, and the stakeholder work prompt fences every stored text.
+ * Stakeholder personas, task 2 fix round 1 (design §6, §16): each adapter enforces an offline run in the
+ * command it builds or refuses it (used by reads and learning runs of own stakeholders and user-persona
+ * learning), and the stakeholder work prompt fences every stored text. Since the user's ruling of
+ * 2026-11-15, own-stakeholder research itself may use the web: no task type is offline.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SpawnSpec } from '../../../src/core/harness/adapter.js';
@@ -10,7 +11,6 @@ import { runEscalation } from '../../../src/core/escalation/escalation.js';
 import type { RunOptions } from '../../../src/core/harness/supervisor.js';
 import { CodexAdapter } from '../../../src/core/harness/adapters/codex.js';
 import { OPENCODE_OFFLINE_PERMISSION, OpenCodeAdapter } from '../../../src/core/harness/adapters/opencode.js';
-import { taskIsOffline } from '../../../src/core/research/phases.js';
 import { runTaskWithReview, workPrompt } from '../../../src/core/research/reviewLoop.js';
 import { stakeholderTaskSection } from '../../../src/core/stakeholders/personas.js';
 import type { Store } from '../../../src/core/store/db.js';
@@ -35,14 +35,6 @@ const spec: SpawnSpec = {
   cwd: '/tmp/bif-run',
   stateDir: '/tmp/bif-state',
 };
-
-describe('offline task types', () => {
-  it('only own_stakeholders is offline', () => {
-    expect(taskIsOffline('own_stakeholders')).toBe(true);
-    expect(taskIsOffline('competitor_stakeholders')).toBe(false);
-    expect(taskIsOffline('news_scan')).toBe(false);
-  });
-});
 
 describe('adapters enforce offline in the command they build', () => {
   it('claude: offline turns every built-in tool off (--tools with an empty value); the bif MCP config is unchanged', () => {
@@ -93,8 +85,8 @@ describe('adapters enforce offline in the command they build', () => {
   });
 });
 
-describe('the offline flag reaches the adapter', () => {
-  it('an own_stakeholders task reaches the adapter with offline: true through the review loop; other tasks do not', async () => {
+describe('own-stakeholder research is not offline', () => {
+  it('an own_stakeholders task reaches the adapter without offline through the review loop, like other tasks', async () => {
     const s = researchSetup(opened);
     s.store.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: NOW });
     s.deps.fake = undefined; // the real CLI path, stopped at buildCommand
@@ -106,8 +98,7 @@ describe('the offline flag reaches the adapter', () => {
     const own = addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', needsBrowser: true, brief: 'b' });
     await runTaskWithReview(own, s.deps);
     expect(specs.length).toBeGreaterThan(0);
-    expect(specs.every((sp) => sp.offline === true)).toBe(true);
-    expect(specs.every((sp) => Object.keys(sp.extraMcpServers).length === 0)).toBe(true);
+    expect(specs.every((sp) => sp.offline === undefined)).toBe(true);
 
     specs.length = 0;
     await runTaskWithReview(addTask(s.store, { type: 'news_scan' }), s.deps);
@@ -129,14 +120,15 @@ describe('the offline flag reaches the adapter', () => {
     await t.call('submit_result', { summary: 'x' });
   };
 
-  it('the reviewer run of an offline task is offline; of other tasks it is not', async () => {
+  it('the worker and reviewer runs of an own_stakeholders task are not offline; the worker gets the browser it asked for', async () => {
     const s = researchSetup(opened, { pick: (r) => (r.kind === 'review' ? review(9) : submit(r)) });
     s.store.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: NOW });
     const runs = spyRuns(s);
-    await runTaskWithReview(addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', brief: 'b' }), s.deps);
+    await runTaskWithReview(addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', needsBrowser: true, brief: 'b' }), s.deps);
     const reviewer = runs.filter((o) => o.ctx.role === 'reviewer');
     expect(reviewer.length).toBeGreaterThan(0);
-    expect(runs.every((o) => o.offline === true)).toBe(true);
+    expect(runs.every((o) => o.offline === undefined)).toBe(true);
+    expect(runs.filter((o) => o.ctx.role === 'worker').map((o) => o.needsBrowser)).toEqual([true]);
 
     runs.length = 0;
     await runTaskWithReview(addTask(s.store, { type: 'news_scan' }), s.deps);
@@ -144,7 +136,7 @@ describe('the offline flag reaches the adapter', () => {
     expect(runs.every((o) => o.offline === undefined)).toBe(true);
   });
 
-  it('an offline (private) task is never escalated; the escalation run of other tasks is not offline', async () => {
+  it('a private task is never escalated; the escalation run of other tasks is not offline', async () => {
     const escalate: Picker = () => async (t) => {
       await t.call('submit_escalation', { questions: [] });
     };

@@ -23,6 +23,11 @@ export type KnowledgeScope = {
   nodeIds: string[];
   /** Ancestors of `workspaceId`, nearest first (a subset of `nodeIds`; used for ranking). */
   ancestorIds: string[];
+  /**
+   * The task of the reading agent run, if any (stakeholder personas): a run of the task that captured a
+   * withheld artifact may still read it by id (`artifactVisible`); everyone else gets "not found".
+   */
+  readerTaskId?: string;
 };
 
 export type ScopeMode = 'node' | 'tree';
@@ -74,7 +79,8 @@ export function inTree(s: KnowledgeScope, workspaceId: string): boolean {
  */
 export function narrowTo(store: Store, s: KnowledgeScope, workspaceId: string): KnowledgeScope | undefined {
   if (!inTree(s, workspaceId)) return undefined;
-  return viewOf(store, workspaceId, s.rootId, s.treeIds);
+  const view = viewOf(store, workspaceId, s.rootId, s.treeIds);
+  return s.readerTaskId ? { ...view, readerTaskId: s.readerTaskId } : view;
 }
 
 /** Result ordering (design §7.1): 0 own node, 1 descendant, 2 ancestor, 3 the rest of the tree. */

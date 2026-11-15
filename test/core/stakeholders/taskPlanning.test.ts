@@ -1,14 +1,14 @@
 /**
- * Stakeholder personas, task 2 (design §6, §16): own stakeholder research never has a browser; the
- * competitor task is planned only when the tree has competitors; both task types get `save_stakeholder`
- * and their prompts.
+ * Stakeholder personas, task 2 (design §6, §16): own stakeholder research gets a browser when it asks
+ * for one (user ruling 2026-11-15: it may use the web); the competitor task is planned only when the
+ * tree has competitors; both task types get `save_stakeholder` and their prompts.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FakeScript } from '../../../src/core/harness/adapter.js';
 import { ROLE_TOOLS } from '../../../src/core/harness/tools/registry.js';
 import { startPhase } from '../../../src/core/research/orchestrator.js';
-import { roleForTask, runTaskWithReview, workPrompt } from '../../../src/core/research/reviewLoop.js';
-import { workerSystemPrompt } from '../../../src/core/research/systemPrompts.js';
+import { reviewerRunInput, roleForTask, runTaskWithReview, workPrompt } from '../../../src/core/research/reviewLoop.js';
+import { reviewerSystemPrompt, workerSystemPrompt } from '../../../src/core/research/systemPrompts.js';
 import { researchToolHandlers } from '../../../src/core/research/tools.js';
 import { stakeholderToolHandlers, unassignedStatementLines } from '../../../src/core/stakeholders/personas.js';
 import { stakeholderRepos } from '../../../src/core/stakeholders/store.js';
@@ -47,8 +47,8 @@ const addCompetitor = (store: Store) =>
     comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 }, evidence: [], createdAt: NOW, updatedAt: NOW, status: 'verified',
   });
 
-describe('own stakeholder research has no browser', () => {
-  it('an own_stakeholders task planned with needs_browser is stored and started without a browser', async () => {
+describe('own stakeholder research may use a browser', () => {
+  it('an own_stakeholders task planned with needs_browser is stored and started with a browser', async () => {
     const results: unknown[] = [];
     const works: Array<AgentRequest & { needsBrowser?: boolean }> = [];
     const s = setup({
@@ -69,13 +69,15 @@ describe('own stakeholder research has no browser', () => {
     });
     const rr = await startPhase('ws_a', 'stakeholders', s.deps);
     const [task] = s.store.tasks.list({ runId: rr.id });
-    expect(task).toMatchObject({ type: 'own_stakeholders', needsBrowser: false });
+    expect(task).toMatchObject({ type: 'own_stakeholders', needsBrowser: true });
     expect(works).toHaveLength(1);
-    expect(works[0]!.needsBrowser).toBe(false);
-    expect(works[0]!.systemPrompt).toContain('no web access');
+    expect(works[0]!.needsBrowser).toBe(true);
+    expect(works[0]!.offline).toBeUndefined();
+    expect(works[0]!.systemPrompt).toContain('public web');
+    expect(works[0]!.systemPrompt).not.toContain('no web access');
   });
 
-  it('the review loop starts a stored own_stakeholders task without a browser even when the row says otherwise', async () => {
+  it('the review loop starts a stored own_stakeholders task with the browser its row asks for', async () => {
     const works: Array<AgentRequest & { needsBrowser?: boolean }> = [];
     const s = setup({
       pick: (r) => {
@@ -86,9 +88,9 @@ describe('own stakeholder research has no browser', () => {
         return review(9);
       },
     });
-    const task = addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', needsBrowser: true, brief: 'b' });
-    await runTaskWithReview(task, s.deps);
-    expect(works[0]!.needsBrowser).toBe(false);
+    await runTaskWithReview(addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', needsBrowser: true, brief: 'b' }), s.deps);
+    await runTaskWithReview(addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', needsBrowser: false, brief: 'b2' }), s.deps);
+    expect(works.map((w) => w.needsBrowser)).toEqual([true, false]);
   });
 
   it('competitor_stakeholders is dropped when the tree has no competitors, and accepted when it has', async () => {
@@ -123,7 +125,14 @@ describe('stakeholder task prompts and tools', () => {
 
   it('each task type gets its own prompt', () => {
     const own = workerSystemPrompt(defaultConfig, 'worker', false, 'own_stakeholders');
-    expect(own).toContain('no web access');
+    expect(own).not.toContain('no web access');
+    expect(own).toContain('public web');
+    const opening = own.slice(own.indexOf('# Task type: own_stakeholders')).split('\n## ')[0]!;
+    expect(opening).toMatch(/never put text, names, figures or other details from internal uploads or\s+the interview into a search query, a web form or any web request/i);
+    expect(own.match(/never put text, names, figures/gi)).toHaveLength(1);
+    expect(own).not.toContain('describe_artifact');
+    expect(own).toMatch(/source_url/);
+    expect(own).toContain('save_artifact');
     expect(own).toContain('save_stakeholder');
     expect(own).toMatch(/`team` or `system`/);
     const comp = workerSystemPrompt(defaultConfig, 'worker', true, 'competitor_stakeholders');
@@ -133,6 +142,18 @@ describe('stakeholder task prompts and tools', () => {
     for (const type of ['own_company_audit', 'public_filings'] as const) {
       expect(workerSystemPrompt(defaultConfig, 'worker', true, type)).toMatch(/leadership, ownership and investor pages/);
     }
+  });
+
+  it('the reviewer of an own_stakeholders task (and its audit, which reuses the input) is told the web rule; other reviewers are not', () => {
+    const s = setup();
+    const rule = /never put text, names, figures or other details from internal uploads or the interview into a search query, a web form or any web request\. Check public claims by the company's public name only\./i;
+    expect(reviewerSystemPrompt(defaultConfig, undefined, 'own_stakeholders')).toMatch(rule);
+    expect(reviewerSystemPrompt(defaultConfig, undefined, 'competitor_stakeholders')).not.toMatch(rule);
+    expect(reviewerSystemPrompt(defaultConfig)).not.toMatch(rule);
+    const own = addTask(s.store, { phase: 'stakeholders', type: 'own_stakeholders', brief: 'b' });
+    expect(reviewerRunInput(s.deps, own, 1).systemPrompt).toMatch(rule);
+    expect(reviewerRunInput(s.deps, own, 1, { lessonsOff: true }).systemPrompt).toMatch(rule); // the reviewer audit's input
+    expect(reviewerRunInput(s.deps, addTask(s.store, { type: 'news_scan' }), 1).systemPrompt).not.toMatch(rule);
   });
 
   it('the own_stakeholders work prompt lists unassigned statements as fenced untrusted lines', () => {

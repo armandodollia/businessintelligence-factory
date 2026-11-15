@@ -4,6 +4,31 @@ The user asked for projects 2–4 to be built without check-ins. Each line is on
 the build, in the form: decision — why — what it costs if it is the wrong call. Decisions taken at
 design time are marked "(my call)" in each design document under `docs/superpowers/specs/`.
 
+## Changed by the user afterwards
+
+On 2026-11-15 the user decided that research on the stakeholders of the user's own company must be
+able to use the web like every other research task: working only from the store, it cannot add context
+the user does not already have. This reverses the following rulings of project 3 (the original lines
+are kept below):
+
+- own stakeholder research is offline (its worker runs offline, no browser) — now it runs like any
+  other research task, with a browser when the task asks for one.
+- reviewer (and escalation, audit) runs of an offline task are offline too — the reviewer of an
+  own_stakeholders task now runs as usual and may check the web.
+- Codex refuses offline runs, so own stakeholder research needs a Claude or OpenCode model — Codex may
+  now run it (the default reviewer on another provider is Codex); Codex still refuses the runs that
+  stay offline.
+- model choice for offline work swaps the worker and reviewer of an own_stakeholders task for
+  offline-capable models and does not plan the task when none can — removed for this task type.
+- own_stakeholders runs may save only stakeholders — they may now also save copies of the public
+  pages they cite (`save_artifact` with kind page_snapshot or document, mime, content and an http(s)
+  `source_url` only, title derived from the URL; no `describe_artifact`), withheld with the research
+  while it is withheld, and adding nothing to a page copy shared with an upload or another task; findings and other records
+  stay refused.
+
+What stays offline: reads by own stakeholders, learning runs for own stakeholder personas and
+user-persona learning runs.
+
 ## Project 2: persona learning in the retro
 
 - gate.ts also exports `gateStats(signals): GateStats`; personaGate builds on it — plan gap — none

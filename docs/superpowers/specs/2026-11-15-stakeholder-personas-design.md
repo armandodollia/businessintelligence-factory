@@ -31,7 +31,8 @@ What the user decided:
 Goals
 
 1. Stakeholder personas per node (own) and per investigated company, each field backed by evidence.
-2. Own-company stakeholders are researched from what the store already holds, without new web requests.
+2. Own-company stakeholders are researched from what the store already holds and from the public web
+   (changed by the user on 2026-11-15; first written as "without new web requests", see §19).
 3. A question round per node whose questions contain nothing the research found; the personas stay
    hidden until the user has answered or skipped.
 4. One place for everything the user says about a stakeholder: answers, notes, real decisions with
@@ -58,8 +59,10 @@ Anti-goals
 
 ## 3. Constraints
 
-As in project 2. In addition: own-company stakeholder research runs without a browser, so nothing it
-reads can reach the web. Statements are the user's internal information and are treated like
+As in project 2. In addition: own-company stakeholder research may use the public web like any other
+research task (the user's decision of 2026-11-15, reversing "runs without a browser, so nothing it reads
+can reach the web"), but never puts anything from internal uploads or the interview into a web request.
+Reads by own stakeholders and learning runs for them stay offline. Statements are the user's internal information and are treated like
 upload-derived text for exports (excluded by default, sticky).
 
 ## 4. Approaches considered
@@ -102,10 +105,13 @@ rounds, the Personas page, persona rating criteria) reads segment personas only.
 New phase `stakeholders`, after `deep_dives` and before `flow_ranking`; existing schedules gain it by
 migration (as flow ranking did). Two task types:
 
-- `own_stakeholders` — never has a browser (forced in code where the task is created, whatever the
-  planner asked). The worker reads what the store holds for the node: public pages other tasks already
-  captured (company audit, filings, news), internal uploads, the interview, the business tree (parent
-  and sibling nodes). It saves each stakeholder with `save_stakeholder`, at most `maxOwn` (default 8).
+- `own_stakeholders` — has a browser when the planner asks for one, like other research tasks (the
+  user's decision of 2026-11-15; first designed as never having one). The worker reads what the store
+  holds for the node: public pages other tasks already captured (company audit, filings, news), internal
+  uploads, the interview, the business tree (parent and sibling nodes); and the public web: leadership,
+  board, ownership and investor pages, registry filings, parent and sister organisations, press. It
+  saves a copy of each public page it relies on (`save_artifact`) and cites it, and never puts anything
+  from internal uploads or the interview into a search query or other web request. It saves each stakeholder with `save_stakeholder`, at most `maxOwn` (default 8).
   For a node below the root it is told that parent and sibling nodes whose approval or data this node
   needs are stakeholders of type `team` or `system`.
 - `competitor_stakeholders` — with a browser, public sources only, for the `maxCompetitors` (default 3)
@@ -269,7 +275,10 @@ disagree with a reason, and "Record the real decision".
 
 ## 16. Privacy and isolation
 
-- Own stakeholder research has no browser. The competitor task has no access to the node's uploads or
+- Own stakeholder research may use the public web (the user's decision of 2026-11-15) but never puts
+  text, names, figures or other details from internal uploads or the interview into a search query, web
+  form or other web request; it searches for the company's public record by its public name. Reads by
+  own stakeholders and learning runs for them are offline. The competitor task has no access to the node's uploads or
   interview beyond what any research worker has, and its prompt forbids searching for anyone who is not
   named in public evidence.
 - Question text is template plus label; a test asserts it for every template.
@@ -285,7 +294,7 @@ for "most important competitors" (use the ordering the deep dives already use).
 ## 18. Verification
 
 Unit tests per module; a leak test (no hidden persona content in any response of the API while hidden);
-a no-browser test for `own_stakeholders`; end to end (research → hidden → answers → open → retro →
+a test that `own_stakeholders` gets the browser it asks for and is not offline; end to end (research → hidden → answers → open → retro →
 proposal citing an answer → accept → agent.md); decision record against a read gives the right signal;
 isolation across two trees; a smoke mode `stakeholders` for the real CLIs.
 
@@ -294,25 +303,38 @@ isolation across two trees; a smoke mode `stakeholders` for the real CLIs.
 Reviews during the build found gaps in the sections above. The build follows these rules; where they
 conflict with an earlier section, this one holds.
 
-- **Offline, not only "no browser" (§3, §6, §16).** The agent CLIs have their own web, shell and file
-  tools, so removing the browser was not enough. A run of an `own_stakeholders` task (worker, reviewer,
-  reviewer audit) is `offline`: the Claude CLI is started with no built-in tools, OpenCode with every
-  tool denied except the harness tools, and Codex refuses offline runs. The same applies to a read by
-  an own stakeholder and to a learning run for an own stakeholder persona. Competitor stakeholder work
-  is not offline.
+- **Own research uses the store and the public web (§2, §3, §6, §16; decided by the user on
+  2026-11-15).** Working only from the store, the research could not add anything the user did not
+  already have. A run of an `own_stakeholders` task (worker, reviewer, reviewer audit) is now started
+  like any other research task: not offline, with a browser when the task asks for one, on the usual
+  models (the default reviewer on another provider, Codex included). It may also save copies of the
+  public pages it cites (`save_artifact` with only kind `page_snapshot` or `document`, mime, content
+  and an http(s) `source_url`; the title is derived from the URL; no other option, no screenshots, no
+  `describe_artifact`: nothing the worker writes is stored with a page). A capture by withheld research
+  is never listed or used on a read path, even when its artifact is served through an upload or
+  another task's capture; it never fills an artifact's description, and an artifact first captured by
+  private research takes its served fields from the first other capture. Those copies are withheld with the
+  research (below), and its reviewer and the reviewer audit are given the same web rule as the worker. This reverses the earlier build rules that made
+  these runs offline, swapped their models for offline-capable ones and refused to plan the task when
+  no provider could run offline.
+- **What stays offline.** A read by an own stakeholder, a learning run for an own stakeholder persona
+  (and the user persona's learning run): they judge or learn from stored internal material and need no
+  web. An offline run is enforced per adapter: the Claude CLI is started with no built-in tools,
+  OpenCode with every tool denied except the harness tools, and Codex refuses offline runs. Competitor
+  stakeholder work is not offline.
 - **Model choice for offline work.** One helper (`src/core/harness/offline.ts`) picks the model. A
-  configured model whose provider cannot run offline is swapped for one that can; the reviewer is the
-  usual pick or the configured reviewer when it can run offline, else another capable model, and the
-  worker's own model only when it is the only one. When no enabled provider can run offline the task is
-  not planned (reads and learning runs are skipped) with a recorded Decision, and the server prints a
-  warning at startup.
+  configured model whose provider cannot run offline is swapped for one that can. When no enabled
+  provider can run offline, those reads and learning runs are skipped with a recorded Decision, and the
+  server prints a warning at startup.
 - **Withheld activity (§7).** While an `own_stakeholders` task is unfinished, or its node has a hidden
   stakeholder, its runs, run events, task detail, Decisions, requests and review audits are served in a
   withheld form on every route and on the live event stream (`src/core/stakeholders/withheld.ts`).
   Hidden content is also kept out of knowledge search results, entity cards, lessons quotes and the
-  opt-in export. A hidden stakeholder cannot be included or excluded.
-- **What own-stakeholder research may do.** It may save only stakeholders, cannot ask the user
-  anything, and is not escalated. `save_stakeholder` is accepted only from the two stakeholder task
+  opt-in export. An artifact captured only by withheld research (a page copy) is withheld too, on
+  every read path (knowledge search, cards, changes and artifact reads, the artifact routes, the
+  export): it answers as unknown, except to runs of the task that captured it. A hidden stakeholder cannot be included or excluded.
+- **What own-stakeholder research may do.** It may save only stakeholders and copies of the public
+  pages it relies on (`save_artifact`, narrowed as above), cannot ask the user anything, and is not escalated. `save_stakeholder` is accepted only from the two stakeholder task
   types. Labels and relations are one line; labels are at most 80 characters. The caps count only
   stakeholders that are not failed or superseded.
 - **Questions (§8).** A round holds the four template questions for every hidden own stakeholder that

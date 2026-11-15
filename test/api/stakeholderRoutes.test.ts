@@ -28,7 +28,7 @@ import { ensureQuestions } from '../../src/core/stakeholders/questions.js';
 import { stakeholderRepos } from '../../src/core/stakeholders/store.js';
 import type { StakeholderRead } from '../../src/core/stakeholders/types.js';
 import type { Store } from '../../src/core/store/db.js';
-import { newId, Repo } from '../../src/core/store/repos.js';
+import { knowledgeRepos, newId, Repo } from '../../src/core/store/repos.js';
 import type { Persona } from '../../src/core/types.js';
 import { fixtureStakeholderTask, researchSetup } from '../core/helpers/research.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -139,6 +139,14 @@ async function setup() {
   const reviewerRun = runRow('arun_r', 'reviewer');
   recordRunPrompt(t.store, 'worker', 'pv0001', 'You are a research worker.');
   const cfo = await save('ws_a', 'Chief financial officer', 'own', MARK, evA, { agentRunId: workerRun.id, taskId: ownTask.id }); // hidden
+  // A copy of a public page the own research relied on, saved through the real worker tool (withheld with the research).
+  const workerCtx = { agentRunId: workerRun.id, workspaceId: 'ws_a', role: 'worker' as const, model, promptVersion: 'pv', taskId: ownTask.id };
+  const pageSave = await t.handle(workerCtx, 'save_artifact', {
+    kind: 'page_snapshot', mime: 'text/plain', source_url: `https://acme.example/${MARK}-page-title`, // the stored title is taken from the URL
+    content: `${MARK}-page-text: the leadership page of Acme names its board and its chief financial officer.`,
+  });
+  if (!pageSave.ok) throw new Error(JSON.stringify(pageSave));
+  const page = (pageSave as { data: { artifactId: string } }).data.artifactId;
   const runDir = runDirOf(dir, 'ws_a', workerRun.id);
   mkdirSync(runDir, { recursive: true });
   writeFileSync(
@@ -222,7 +230,7 @@ async function setup() {
   const hidden = { adjustment: adjustment(cfo, MARK), proposal: proposal(cfo, MARK), run: run(cfo, MARK) };
 
   const w = (rest: string, ws = 'ws_a') => `/api/workspaces/${ws}${rest}`;
-  return { ...t, dir, app, call, w, ownTask, workerRun, reviewerRun, review, cfo, opsTeam, rivalCeo, betaCfo, smb, reads, hidden, adjustment, proposal, run, evA };
+  return { ...t, dir, app, call, w, ownTask, workerRun, reviewerRun, review, cfo, opsTeam, rivalCeo, betaCfo, smb, reads, hidden, adjustment, proposal, run, evA, page, workerCtx };
 }
 
 const keysOf = (o: object) => Object.keys(o).sort();
@@ -479,7 +487,18 @@ describe('the leak test: nothing about a hidden stakeholder but its id, label, t
   const MARKERS = [
     ...STAKEHOLDER_FIELDS.map((f) => `${MARK}-${f}`), `${MARK}-relation`, `${MARK}-adjustment`, `${MARK}-proposal`, `${MARK}-assumption`, `${MARK}-reasoning`,
     `${MARK}-summary`, `${MARK}-review-issue`, `${MARK}-review-quote`, `${MARK}-model-text`, `${MARK}-tool-error`, `${MARK}-audit-issue`,
+    `${MARK}-page-title`, `${MARK}-page-text`,
   ];
+  /** The page copy's read paths (artifact routes, knowledge artifact / item / chunk routes): 404 while withheld. */
+  const pageUrls = (s: S): string[] => {
+    const k = '/api/workspaces/ws_a/knowledge';
+    const chunks = (s.store.db.prepare('SELECT id FROM chunks WHERE artifact_id = ?').all(s.page) as Array<{ id: string }>).map((c) => c.id);
+    expect(chunks.length).toBeGreaterThan(0);
+    return [
+      `/api/artifacts/${s.page}`, `/api/artifacts/${s.page}/meta`, `${k}/artifacts/${s.page}?mode=text`, `${k}/artifacts/${s.page}?mode=raw`,
+      `${k}/artifacts/${s.page}?mode=outline&scope=tree`, `${k}/items/${s.page}?scope=tree`, ...chunks.map((c) => `${k}/items/${c}?around=1&scope=tree`),
+    ];
+  };
 
   /** The app's routes of `method` (no wildcard, no SSE stream). */
   const routesOf = (s: S, method: string) =>
@@ -518,6 +537,10 @@ describe('the leak test: nothing about a hidden stakeholder but its id, label, t
       `${k}/search?q=Chief`, `${k}/search?q=Chief&include_unverified=true&scope=tree`, `${k}/entities?scope=tree`,
       `${k}/entities/${cfo.entityId}?scope=tree`, `${k}/items/${cfo.id}?scope=tree`, `${k}/node?scope=tree`, `${k}/changes?scope=tree`,
       `${k}/items/${cfo.entityId}`, `${k}/items/${s.review.id}`, `${k}/items/${s.ownTask.id}`,
+      // the page copy of the withheld research: search without and with a query, by kind, changes, stats, every read path
+      `${k}/search`, `${k}/search?scope=tree&include_unverified=true&include_history=true`, `${k}/search?kinds=artifact,passage&scope=tree`,
+      `${k}/search?q=leadership&scope=tree`, `${k}/changes`, `${k}/changes?run_id=rrun_1&scope=tree`, `${k}/stats?scope=tree`,
+      '/api/workspaces/ws_a/export', ...pageUrls(s),
     ];
     return [...routesOf(s, 'GET').map(fill), ...variants];
   }
@@ -575,6 +598,17 @@ describe('the leak test: nothing about a hidden stakeholder but its id, label, t
       const r = await s.call('GET', `/api/workspaces/ws_a/knowledge/search?q=${encodeURIComponent(q)}&scope=tree&include_unverified=true&include_history=true`);
       expect(r.body.hits, q).toEqual([]);
     }
+    // The page copy answers as unknown on every read path, and no list names its id.
+    for (const url of pageUrls(s)) expect((await s.call('GET', url)).status, url).toBe(404);
+    for (const url of getUrls(s).filter((u) => !pageUrls(s).includes(u))) expect((await s.call('GET', url)).text, url).not.toContain(s.page);
+    // A run of the same task still reads it by id; a run of another task does not.
+    expect((await s.handle(s.workerCtx, 'read_artifact', { artifact_id: s.page, mode: 'text' })).ok).toBe(true);
+    // (the reviewer reads within its review slice: the deliverable cites the page)
+    s.store.tasks.update(s.ownTask.id, { result: { summary: `${MARK}-summary`, evidence: [s.page] } });
+    expect((await s.handle({ ...s.workerCtx, role: 'reviewer', agentRunId: s.reviewerRun.id }, 'read_artifact', { artifact_id: s.page, mode: 'text' })).ok).toBe(true);
+    const other = fixtureStakeholderTask(s.store, 'ws_a', 'cmp_rival');
+    expect(await s.handle({ ...s.workerCtx, agentRunId: newId('arun'), taskId: other.id }, 'read_artifact', { artifact_id: s.page, mode: 'text' }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('not found') });
 
     // The decision log: the save Decision keeps label, type and confidences, refs only the persona; the review is withheld.
     const decisions = (await s.call('GET', s.w('/decisions'))).body as any[];
@@ -607,6 +641,12 @@ describe('the leak test: nothing about a hidden stakeholder but its id, label, t
     expect((await s.call('GET', s.w('/audits'))).text).toContain(`${MARK}-audit-issue`);
     expect((await s.call('GET', '/api/experiments/exp_1')).text).toContain(`${MARK}-arm-failure`);
     expect((await s.call('GET', s.w('/requests'))).text).toContain(`${MARK}-request-details`);
+    // The page copy is served again on every read path.
+    for (const url of pageUrls(s)) expect((await s.call('GET', url)).status, url).toBe(200);
+    expect((await s.call('GET', `/api/artifacts/${s.page}`)).text).toContain(`${MARK}-page-text`);
+    expect((await s.call('GET', `/api/workspaces/ws_a/knowledge/artifacts/${s.page}?mode=text`)).text).toContain(`${MARK}-page-text`);
+    const hits = (await s.call('GET', `/api/workspaces/ws_a/knowledge/search?q=leadership&scope=tree`)).body.hits as Array<{ id: string; artifact_id?: string }>;
+    expect(JSON.stringify(hits)).toContain(s.page);
   });
 
   it('routes that change data and return a record never return a hidden stakeholder\'s research', async () => {
@@ -755,5 +795,114 @@ describe('own-stakeholder research is withheld from its first run (final review 
     expect(text).not.toContain(MARK);
     expect(text).toContain(`"id":"${s.logged.id}"`);
     expect(text).toContain('"withheld":true');
+  });
+});
+
+describe('private research adds no words to a shared page copy (the same bytes captured by another task or uploaded)', () => {
+  type S = Awaited<ReturnType<typeof setup>>;
+  const PRIVATE_URL = `https://acme.example/${MARK}-private-path`;
+  const publicCtx = (s: S) => ({
+    agentRunId: newId('arun'), workspaceId: 'ws_a', role: 'worker' as const, model: { provider: 'claude' as const, model: 'sonnet' }, promptVersion: 'pv',
+    taskId: fixtureStakeholderTask(s.store, 'ws_a', 'cmp_rival').id,
+  });
+  const saveId = async (s: S, ctx: Parameters<S['handle']>[0], input: Record<string, unknown>): Promise<string> => {
+    const r = await s.handle(ctx, 'save_artifact', input);
+    if (!r.ok) throw new Error(JSON.stringify(r));
+    return (r as { data: { artifactId: string } }).data.artifactId;
+  };
+  const privateSave = (s: S, content: string) => saveId(s, s.workerCtx, { kind: 'page_snapshot', mime: 'text/plain', content, source_url: PRIVATE_URL });
+  const publicSave = (s: S, content: string) =>
+    saveId(s, publicCtx(s), {
+      kind: 'page_snapshot', mime: 'text/plain', content, source_url: 'https://acme.example/board', title: 'Board of Acme', note: 'public note',
+      description: 'The public board page of Acme, listing its directors.',
+    });
+  /** Every response the person can get about the artifact. */
+  const served = async (s: S, id: string) => {
+    const k = '/api/workspaces/ws_a/knowledge';
+    const urls = [`/api/artifacts/${id}/meta`, `${k}/items/${id}?scope=tree`, `${k}/artifacts/${id}?mode=outline&scope=tree`, `${k}/search?q=directors&scope=tree`,
+      `${k}/search?scope=tree`, `${k}/changes?scope=tree`, `${k}/gc?scope=tree`];
+    const out: Array<{ url: string; status: number; text: string }> = [];
+    for (const url of urls) {
+      const r = await s.call('GET', url);
+      out.push({ url, status: r.status, text: r.text });
+    }
+    return out;
+  };
+  const noPrivateWords = (rs: Array<{ url: string; text: string }>) => {
+    for (const r of rs) {
+      expect(r.text, r.url).not.toContain(MARK);
+      expect(r.text, r.url).not.toContain('private-path');
+    }
+  };
+
+  it('A: a public task captured the bytes first; the private save adds a capture that is never served and changes nothing served', async () => {
+    const s = await setup();
+    const content = 'Acme board page: the directors of Acme and its chief financial officer.';
+    const id = await publicSave(s, content);
+    const before = (await s.call('GET', `/api/artifacts/${id}/meta`)).body;
+    expect(await privateSave(s, content)).toBe(id);
+    expect(knowledgeRepos(s.store).artifactCaptures.list({ artifactId: id })).toHaveLength(2);
+    const rs = await served(s, id);
+    expect(rs[0]!.status).toBe(200);
+    expect(JSON.parse(rs[0]!.text)).toEqual(before);
+    expect(before).toMatchObject({ title: 'Board of Acme', sourceUrl: 'https://acme.example/board', description: 'The public board page of Acme, listing its directors.' });
+    const item = JSON.parse(rs[1]!.text);
+    expect(JSON.stringify(item)).toContain('Board of Acme');
+    noPrivateWords(rs);
+  });
+
+  it('B: private research captured the bytes first; once a public task captures them, what is served comes from the public capture', async () => {
+    const s = await setup();
+    const content = 'Acme leadership: the directors, the board chair and the chief financial officer.';
+    const id = await privateSave(s, content);
+    expect((await s.call('GET', `/api/artifacts/${id}/meta`)).status).toBe(404);
+    const privateAt = s.store.artifacts.get(id)!.capturedAt;
+    expect(await publicSave(s, content)).toBe(id);
+    const pub = knowledgeRepos(s.store).artifactCaptures.list({ artifactId: id }).find((c) => c.taskId !== s.ownTask.id)!;
+    const rs = await served(s, id);
+    const meta = JSON.parse(rs[0]!.text);
+    expect(rs[0]!.status).toBe(200);
+    expect(meta).toMatchObject({
+      title: 'Board of Acme', sourceUrl: 'https://acme.example/board', note: 'public note', description: 'The public board page of Acme, listing its directors.',
+    });
+    expect(meta.capturedAt >= privateAt).toBe(true);
+    expect(Date.parse(meta.capturedAt) - Date.parse(pub.capturedAt)).toBeLessThan(1000);
+    expect((await s.call('GET', `/api/artifacts/${id}`)).text).toContain('Acme leadership');
+    noPrivateWords(rs);
+  });
+
+  it('C: the same bytes as an internal upload: the upload stays served and unchanged', async () => {
+    const s = await setup();
+    const content = 'Internal notes: Acme board meets monthly; the CFO chairs the audit committee.';
+    const upload = s.artifacts.save({ workspaceId: 'ws_a', kind: 'upload', mime: 'text/plain', bytes: content, title: 'board-notes.txt' });
+    const before = (await s.call('GET', `/api/artifacts/${upload.id}/meta`)).body;
+    expect(await privateSave(s, content)).toBe(upload.id);
+    const rs = await served(s, upload.id);
+    expect(rs[0]!.status).toBe(200);
+    expect(JSON.parse(rs[0]!.text)).toEqual(before);
+    expect(before).toMatchObject({ kind: 'upload', title: 'board-notes.txt' });
+    noPrivateWords(rs);
+  });
+
+  it('gc neither reports nor prunes a withheld page copy, however old; once served again it is a candidate', async () => {
+    const s = await setup();
+    const old = '2020-01-01T00:00:00.000Z';
+    s.store.db.prepare('UPDATE artifacts SET captured_at = ? WHERE id = ?').run(old, s.page);
+    s.store.db.prepare('UPDATE artifact_captures SET captured_at = ? WHERE artifact_id = ?').run(old, s.page);
+    const k = '/api/workspaces/ws_a/knowledge';
+    const report = await s.call('GET', `${k}/gc?scope=tree`);
+    expect(report.status).toBe(200);
+    expect(report.text).not.toContain(s.page);
+    expect(report.text).not.toContain(MARK);
+    const prune = await s.call('POST', `${k}/gc/prune`, { artifactIds: [s.page] });
+    expect(prune.status).toBe(409);
+    expect(prune.body.refused).toEqual([{ artifactId: s.page, reason: 'not_found' }]);
+    expect((await s.call('GET', `/api/artifacts/${s.page}`)).status).toBe(404); // still there, still withheld
+
+    // the question round opens the stakeholder: the copy is served, and gc lists it like any old page
+    const groups = (await s.call('GET', s.w('/stakeholder-questions'))).body.groups;
+    const answers = groups[0].questions.map((q: any) => ({ questionId: q.id, text: `Answer to ${q.field}` }));
+    expect((await s.call('POST', '/api/workspaces/ws_a/stakeholder-questions/answers', { answers })).status).toBe(200);
+    expect((await s.call('GET', `${k}/gc?scope=tree`)).body.candidates.map((c: { artifactId: string }) => c.artifactId)).toContain(s.page);
   });
 });

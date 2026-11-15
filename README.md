@@ -551,17 +551,21 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
     planned only when the tree has competitors. `own_stakeholders` works from what the store already
     holds (captured public pages, internal uploads, the interview, the business tree: parent and
     sibling nodes are offered as `team` or `system` stakeholders, and your statements not yet tied to
-    a stakeholder) and runs **offline**, enforced in code whatever the planner asked: no browser; a
-    Claude run gets no built-in tools at all (`--tools ""`, only the harness tools), an OpenCode run a
-    deny-all permission config except the harness tools, and Codex refuses such runs (it cannot shut
-    its built-in web access off with certainty). Its reviewer and audit runs are offline too. Offline
-    work always goes to a provider that can run offline: a Codex worker model (override or
-    `roles.workers`) is swapped for a Claude or OpenCode model, and the reviewer and the reviewer audit
-    are picked among those providers (another provider than the worker's when one can, else the same
-    one); when no enabled provider can run offline, no `own_stakeholders` task is created and a harness
-    decision records why (the server also warns at startup).
-    These runs may save only stakeholders (plus finish, answer review and read), cannot ask you
-    anything and are never escalated. The company audit and filings prompts also capture public
+    a stakeholder) and from the public web (the company's leadership, board, ownership and investor
+    pages, registry filings, parent and sister organisations, press). It runs like any other research
+    task, on the usual models (its reviewer may be on another provider, Codex included), with a
+    browser when the planner asks for one. Every field still cites an artifact: the worker saves a copy
+    of each public page it relies on. Its prompt forbids putting anything from internal uploads or the
+    interview into a search query, web form or other web request; it searches for the company's public
+    record by its public name. (Decided by you on 2026-11-15; it was offline before.)
+    These runs may save only stakeholders and copies of the pages they rely on (`save_artifact` with
+    only kind `page_snapshot` or `document`, mime, the content and the page's http(s) `source_url`;
+    the title is taken from the URL; plus finish, answer review and read), cannot ask you anything and
+    are never escalated. Those page copies are withheld with the research: while it is withheld they
+    answer as unknown everywhere (knowledge search and pages, artifact links, gc, the export). When the
+    same bytes were also uploaded or captured by another task, that artifact stays served, but nothing
+    of the private capture is shown with it, and what is shown comes from the served captures. The
+    reviewer of this task is given the same web rule as the worker. The company audit and filings prompts also capture public
     leadership, ownership and investor pages as artifacts (they do not save stakeholders). Each stakeholder gets an agent.md ("You are <label>, a
     stakeholder of <scope>…"; for a competitor's, "…at <competitor>, a rival of <scope>").
   - *Hidden until you answer: the question round.* A first save of an own stakeholder is **hidden**.
@@ -755,9 +759,9 @@ of that business tree — another company's prompts never see them. Nothing is w
   the learning model; it checks one `submit_persona_learning` call and the stored run and proposals,
   and that the persona did not change.
 - the **stakeholder personas smoke** (`stakeholders`, default claude, only when named): a node with
-  three internal notes, one `own_stakeholders` task through the real review loop (offline) and the
-  phase-end question round; it checks that no run of the task offered or called a built-in tool, that
-  at least one hidden own stakeholder cites the notes, that each has its four template questions (and
+  three internal notes, one `own_stakeholders` task through the real review loop (not offline) and the
+  phase-end question round; it checks that the worker run is not offline (a Claude worker's CLI was
+  offered built-in tools; browsing is not required), that at least one hidden own stakeholder cites the notes, that each has its four template questions (and
   the node its two), and that the task's research is withheld.
 - the **user persona smoke** (`user-persona`, default claude, only when named): twelve actions of the
   configured person on six fictional competitors through the real action functions, then the real
@@ -799,9 +803,10 @@ smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md
   the idle watchdog ends the run (default 10 minutes), the run is marked failed (not rate-limit
   retried) and the task's one retry applies. Rate-limit text that OpenCode does print on stderr is
   detected, but it does not shorten the hang. Lower `idleTimeoutMs` if you use OpenCode's free tier.
-- **Own-stakeholder work needs a provider that can run offline.** Codex refuses offline runs, so
-  own-stakeholder research, reviews, audits, reads and learning go to Claude or OpenCode; with neither
-  enabled they are skipped and a harness decision records why (see Stakeholder personas).
+- **Offline runs need a provider that can run offline.** Codex refuses offline runs, so reads by own
+  stakeholders, learning runs for own stakeholder personas and the user persona's learning run go to
+  Claude or OpenCode; with neither enabled they are skipped and a harness decision records why (see
+  Stakeholder personas). Own-stakeholder research itself is not offline and runs on any provider.
 - **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth.
 - **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
   overrides are runtime-only and are not written into `bif.config.json` when you save settings.)

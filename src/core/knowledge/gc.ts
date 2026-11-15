@@ -20,6 +20,8 @@
  * - an upload: kind `upload`, or listed in a profile's `uploads`;
  * - a text extraction still `pending` (its text has not been kept yet).
  * Logs (decisions, feedback, retrieval events, outcomes) are not references.
+ * A withheld page copy of own-stakeholder research (stakeholders/withheld.ts) is left out of the report
+ * and refused as unknown while it is withheld.
  *
  * The file of a pruned artifact comes back when the same bytes are captured again
  * (`ArtifactStore.persist` rewrites a missing file).
@@ -31,6 +33,7 @@ import type { Artifact } from '../types.js';
 import { listFeedback } from '../feedback/events.js';
 import { knowledgeSettings } from './config.js';
 import { EXTRACTORS } from './extract/index.js';
+import { artifactWithheld, captureServedSql } from '../stakeholders/withheld.js'; // stakeholder personas
 
 /** Where artifact files live (an `ArtifactStore`). */
 export type ArtifactFiles = { filePath(artifact: Artifact): string };
@@ -145,7 +148,10 @@ export function artifactReferences(store: Store, artifactId: string): ArtifactRe
 }
 
 function lastCaptured(store: Store, a: Artifact): string {
-  const row = store.db.prepare('SELECT MAX(captured_at) AS at FROM artifact_captures WHERE artifact_id = ?').get(a.id) as { at: string | null } | undefined;
+  // Stakeholder personas: a capture by withheld research is not used (it would say when that research ran).
+  const row = store.db
+    .prepare(`SELECT MAX(c.captured_at) AS at FROM artifact_captures c WHERE c.artifact_id = ? AND ${captureServedSql('c')}`)
+    .get(a.id) as { at: string | null } | undefined;
   return row?.at && row.at > a.capturedAt ? row.at : a.capturedAt;
 }
 
@@ -224,6 +230,8 @@ export function gcReport(store: Store, files: ArtifactFiles, config: Pick<BifCon
     .all(JSON.stringify(opts.workspaceIds)) as Array<{ id: string }>;
   for (const { id } of rows) {
     const a = store.artifacts.get(id)!;
+    // Stakeholder personas: a withheld page copy is neither reported nor prunable while withheld.
+    if (artifactWithheld(store, a.id)) continue;
     totals.artifacts++;
     const bytes = fileSize(files, a);
     if (bytes === undefined) {
@@ -284,8 +292,8 @@ export function pruneCheck(
   const refused: PruneRefusal[] = [];
   for (const id of [...new Set(artifactIds)]) {
     const a = store.artifacts.get(id);
-    // Unknown and other-tree ids: the same answer (design §12).
-    if (!a || !opts.treeIds.includes(a.workspaceId)) {
+    // Unknown and other-tree ids, and withheld page copies (stakeholder personas): the same answer (design §12).
+    if (!a || !opts.treeIds.includes(a.workspaceId) || artifactWithheld(store, a.id)) {
       refused.push({ artifactId: id, reason: 'not_found' });
       continue;
     }

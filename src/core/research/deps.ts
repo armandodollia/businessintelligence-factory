@@ -10,7 +10,6 @@ import type { Decision, ModelRef, Phase, Role, Task } from '../types.js';
 import { recordPromptReads, type PromptRead } from '../knowledge/promptReads.js'; // KS-4
 import { lessonsOff, tagRun } from '../learning/runTags.js'; // learning loop WP-F
 import { lessonsMode } from '../learning/lessons/mode.js'; // wave-2 integration: withLessons marks runs
-import { taskIsOffline } from './phases.js'; // stakeholder personas
 
 /** Which agent step a run is for (used by fake pickers and logs). */
 export type AgentKind = 'orchestrate' | 'work' | 'revise' | 'review' | 'escalate' | 'retro' | 'audit'; // escalate: WP-D; retro: learning loop WP-E; audit: WP-F
@@ -39,9 +38,8 @@ export type AgentRequest = {
    */
   runTags?: { auditId?: string; lessonsOff?: boolean };
   /**
-   * Stakeholder personas: the run must not reach the web (`RunOptions.offline`). Every run of a task
-   * whose type is offline (worker, reviewer, escalation, reviewer audit) is offline whatever this says:
-   * `runAgent` sets it from `task.type` too.
+   * The run must not reach the web (`RunOptions.offline`): a stakeholder read by an own stakeholder, a
+   * learning run for an own stakeholder persona, a user-persona learning run.
    */
   offline?: boolean;
   /**
@@ -94,7 +92,7 @@ export async function runAgent(
     systemPrompt: req.systemPrompt,
     needsBrowser: req.needsBrowser,
   };
-  if (req.offline || (req.task && taskIsOffline(req.task.type))) opts.offline = true;
+  if (req.offline) opts.offline = true;
   if (fake) opts.fake = fake;
   if (deps.signal) opts.signal = deps.signal;
   // Learning loop WP-B: round / task type on the AgentRun, research run for usage and budgets.

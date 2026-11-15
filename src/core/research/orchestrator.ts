@@ -23,8 +23,7 @@ import type { RetrievalResultRef } from '../types.js'; // KS-5
 import { estimateTokens } from '../knowledge/budget.js'; // KS-5
 import { anyUploadDerived } from '../knowledge/readCommon.js'; // KS-5
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
-import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES, taskIsOffline, taskNeedsBrowser } from './phases.js';
-import { NO_OFFLINE_MODEL, offlineModel } from '../harness/offline.js'; // stakeholder personas
+import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
 import { treeCompetitors } from '../stakeholders/personas.js'; // stakeholder personas
 import { ensureQuestions } from '../stakeholders/questions.js'; // stakeholder personas
 import { stakeholdersSettings } from '../stakeholders/settings.js'; // stakeholder personas
@@ -99,7 +98,7 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
     const replay = findReplay(store, ctx, 'propose_tasks', 'run', (p) => JSON.stringify(p.input) === key);
     if (replay) {
       const original = (replay.payload as { result?: Record<string, unknown> }).result ?? {};
-      return { ok: true as const, data: { ...original, duplicate: true }, decision: undefined, why: undefined };
+      return { ok: true as const, data: { ...original, duplicate: true }, decision: undefined };
     }
     const rr = currentResearchRun(store, ctx.workspaceId);
     if (!rr) return { ok: false as const, error: 'no research phase is running for this workspace' };
@@ -118,28 +117,18 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
       defaultModel: ModelRef;
       /** KS-5: facts the task is asked to re-check (shown with their claims in the worker's prompt). */
       recheckFactIds?: string[];
-      /** Stakeholder personas: the model asked for, swapped because it cannot run this offline task type. */
-      offlineSwapFrom?: ModelRef;
     }> = [];
-    /** Stakeholder personas: offline task types refused because no enabled provider can run offline. */
-    const offlineUnavailable: Array<{ index: number; type: string; model: ModelRef }> = [];
     const rejected: Array<{ index: number; type: string; reason: string; duplicateOf?: string }> = [];
     const now = new Date().toISOString();
     input.tasks.forEach((t, index) => {
       let reason: string | undefined;
       const dupOf = keys.get(taskKey(t));
       const defaultModel = defaultTaskModel(config, t.type);
-      const asked = t.model ?? defaultModel;
-      // Stakeholder personas (final review item 2): an offline task type runs on a model that can run offline.
-      const offline = taskIsOffline(t.type);
-      const model = offline ? (offlineModel(config, asked) ?? asked) : asked;
+      const model = t.model ?? defaultModel;
       if (!allowedTypes.includes(t.type)) {
         reason = `task type '${t.type}' is not allowed in phase '${rr.phase}' (allowed: ${allowedTypes.join(', ') || 'none'})`;
-      } else if (!models.some((m) => sameModel(m, asked))) {
-        reason = `model '${modelName(asked)}' is not enabled (allowed: ${models.map(modelName).join(', ')})`;
-      } else if (offline && !offlineModel(config, asked)) {
-        reason = `task type '${t.type}' runs offline and ${NO_OFFLINE_MODEL}`;
-        offlineUnavailable.push({ index, type: t.type, model: asked });
+      } else if (!models.some((m) => sameModel(m, model))) {
+        reason = `model '${modelName(model)}' is not enabled (allowed: ${models.map(modelName).join(', ')})`;
       } else if (dupOf) {
         reason = `duplicate of task ${dupOf} already in this phase run (same type, subject and brief)`;
       } else if (remaining <= 0) {
@@ -162,8 +151,7 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
         type: t.type,
         brief: t.brief,
         model,
-        // Stakeholder personas (design §6): own stakeholder research never has a browser.
-        needsBrowser: taskNeedsBrowser(t.type, t.needs_browser),
+        needsBrowser: t.needs_browser,
         acceptanceCriteria: t.acceptance_criteria,
         status: 'queued',
         step: 'work',
@@ -177,7 +165,6 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
       accepted.push({
         index, taskId: task.id, type: t.type, model, defaultModel,
         modelSource: t.model && !sameModel(t.model, defaultModel) ? 'override' : 'default',
-        ...(sameModel(model, asked) ? {} : { offlineSwapFrom: asked }),
         ...(t.recheck_fact_ids?.length ? { recheckFactIds: [...new Set(t.recheck_fact_ids)] } : {}), // KS-5
       });
     });
@@ -199,21 +186,10 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
       createdAt: now,
     };
     store.decisions.insert(decision);
-    // Stakeholder personas: one harness Decision says why offline tasks were not created.
-    const why = offlineUnavailable.length
-      ? recordHarnessDecision(
-          store,
-          { agentRunId: ctx.agentRunId, workspaceId: ctx.workspaceId, role: ctx.role, model: ctx.model, promptVersion: ctx.promptVersion },
-          'decision',
-          { event: 'offline_model_unavailable', researchRunId: rr.id, taskType: offlineUnavailable[0]!.type, refused: offlineUnavailable, reason: NO_OFFLINE_MODEL },
-          [rr.id],
-        )
-      : undefined;
-    return { ok: true as const, data: result, decision, why };
+    return { ok: true as const, data: result, decision };
   });
   if (!outcome.ok) return { ok: false, error: outcome.error };
   if (outcome.decision) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: outcome.decision });
-  if (outcome.why) events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: outcome.why });
   return { ok: true, data: outcome.data, recorded: true };
 };
 
@@ -361,7 +337,7 @@ export function orchestratorPromptWithReads(store: Store, config: BifConfig, rr:
     `## Allowed task types\n${PHASE_TASK_TYPES[rr.phase].map((t) => `- ${t}`).join('\n') || '- (none)'}`,
     `## Allowed models\n${allowedModels(config).map((m) => `- {"provider":"${m.provider}","model":"${m.model}"}`).join('\n')}`,
     `## Default model per task type (used when you omit \`model\`; set \`model\` only to override)\n${PHASE_TASK_TYPES[rr.phase]
-      .map((t) => `- ${t}: ${JSON.stringify(taskIsOffline(t) ? (offlineModel(config, defaultTaskModel(config, t)) ?? defaultTaskModel(config, t)) : defaultTaskModel(config, t))}`)
+      .map((t) => `- ${t}: ${JSON.stringify(defaultTaskModel(config, t))}`)
       .join('\n') || '- (no task types in this phase)'}`,
     `## Task budget\n${remaining} more task(s) may be proposed in this phase run (limits.maxTasksPerRun = ${config.limits.maxTasksPerRun}).`,
   ];

@@ -1,8 +1,9 @@
 /**
  * Stakeholder personas, final whole-branch review fixes: research withheld from its first run, model
- * choice for offline work, `save_stakeholder` only in stakeholder tasks, the feature switch, offline
- * reads and learning of own stakeholders, own-stakeholder research internal in the export, label
- * hygiene and the caps.
+ * choice for offline work (reads and learning of own stakeholders; own-stakeholder research itself may
+ * use the web since the user's ruling of 2026-11-15), `save_stakeholder` only in stakeholder tasks, the
+ * feature switch, offline reads and learning of own stakeholders, own-stakeholder research internal in
+ * the export, label hygiene and the caps.
  */
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -121,7 +122,7 @@ describe('own-stakeholder research is withheld from its first run', () => {
 // ---------------------------------------------------------------------------------------------------
 // item 2
 
-describe('model choice for offline work', () => {
+describe('model choice for offline work, and own-stakeholder research on the usual models', () => {
   it('canRunOffline / offlineModel follow the adapters: Codex cannot, Claude and OpenCode can', () => {
     const cfg = structuredClone(defaultConfig);
     expect(canRunOffline(cfg, 'claude')).toBe(true);
@@ -129,56 +130,30 @@ describe('model choice for offline work', () => {
     expect(canRunOffline(cfg, 'opencode')).toBe(false); // disabled by default
     expect(offlineModel(cfg, { provider: 'claude', model: 'haiku' })).toEqual({ provider: 'claude', model: 'haiku' });
     expect(offlineModel(cfg, CODEX)).toEqual({ provider: 'claude', model: 'opus' });
-    // another capable provider is preferred to `avoidProvider`; the same one when it is the only capable one
+    // only Claude disabled: the first model of OpenCode, which can run offline
     cfg.providers.opencode = { enabled: true, command: 'opencode', models: ['big-pickle'] };
-    expect(offlineModel(cfg, CODEX, { avoidProvider: 'claude' })).toEqual({ provider: 'opencode', model: 'big-pickle' });
-    cfg.providers.opencode.enabled = false;
-    expect(offlineModel(cfg, CODEX, { avoidProvider: 'claude' })).toEqual({ provider: 'claude', model: 'opus' });
-    expect(offlineModel(cfg, CODEX, { avoidProvider: 'claude', exclude: { provider: 'claude', model: 'opus' } })).toEqual({ provider: 'claude', model: 'sonnet' });
+    cfg.providers.claude = { ...cfg.providers.claude, enabled: false };
+    expect(offlineModel(cfg, CODEX)).toEqual({ provider: 'opencode', model: 'big-pickle' });
     codexOnly(cfg);
     expect(offlineModel(cfg, CODEX)).toBeUndefined();
   });
 
-  it('reviewerFor an offline task never picks a provider that cannot run offline', () => {
-    const cfg = structuredClone(defaultConfig);
-    expect(reviewerFor(CLAUDE_SONNET, cfg)).toEqual(CODEX);
-    expect(reviewerFor(CLAUDE_SONNET, cfg, { offline: true }).provider).toBe('claude');
-  });
-
-  it('reviewerFor an offline task keeps a capable configured reviewer and never the worker\'s own model when another exists', () => {
-    const cfg = structuredClone(defaultConfig);
-    // configured reviewer can run offline: it is used although the usual pick moves to Codex
-    cfg.roles.reviewer = { provider: 'claude', model: 'haiku' };
-    expect(reviewerFor(CLAUDE_SONNET, cfg)).toEqual(CODEX);
-    expect(reviewerFor(CLAUDE_SONNET, cfg, { offline: true })).toEqual({ provider: 'claude', model: 'haiku' });
-    // configured reviewer is the worker's own model: another offline-capable model reviews
-    cfg.roles.reviewer = { provider: 'claude', model: 'opus' };
-    const r = reviewerFor({ provider: 'claude', model: 'opus' }, cfg, { offline: true });
-    expect(r.provider).toBe('claude');
-    expect(r.model).not.toBe('opus');
-    // one model only: it reviews its own work rather than leaving the task unreviewed
-    cfg.providers.claude.models = ['opus'];
-    expect(reviewerFor({ provider: 'claude', model: 'opus' }, cfg, { offline: true })).toEqual({ provider: 'claude', model: 'opus' });
-  });
-
-  it('default config: the reviewer of an own_stakeholders task is a Claude model and the review runs', async () => {
+  it('default config: own-stakeholder research runs on the usual models, not offline; its reviewer may be on Codex', async () => {
     const s = setup({ pick: (r) => (r.kind === 'review' ? review(9) : async (t) => void (await t.call('submit_result', { summary: 'x' }))) });
     const runs = spyRuns(s);
     const done = await runTaskWithReview(stakeholderTask(s), s.deps);
     const reviewers = runs.filter((o) => o.ctx.role === 'reviewer');
     expect(reviewers).toHaveLength(1);
-    expect(reviewers[0]!.ctx.model.provider).toBe('claude');
-    expect(reviewers[0]!.offline).toBe(true);
+    expect(reviewers[0]!.ctx.model).toEqual(reviewerFor(CLAUDE_SONNET, s.config));
+    expect(reviewers[0]!.ctx.model).toEqual(CODEX);
+    expect(runs.map((o) => o.offline)).toEqual([undefined, undefined]);
     expect(done.status).toBe('verified');
   });
 
-  it('the reviewer audit of an own_stakeholders review picks a different model that can run offline', () => {
+  it('the reviewer audit of an own_stakeholders review picks its auditor like any other', () => {
     const cfg = structuredClone(defaultConfig);
     const original = { provider: 'claude' as const, model: 'opus' };
     expect(auditModelFor(original, CLAUDE_SONNET, cfg)).toEqual(CODEX);
-    expect(auditModelFor(original, CLAUDE_SONNET, cfg, { offline: true })).toEqual({ provider: 'claude', model: 'sonnet' });
-    codexOnly(cfg);
-    expect(auditModelFor(original, CLAUDE_SONNET, cfg, { offline: true })).toBeUndefined();
   });
 
   const propose = (s: ReturnType<typeof setup>, tasks: unknown[]) => {
@@ -192,44 +167,33 @@ describe('model choice for offline work', () => {
   };
   const own = (extra: Record<string, unknown> = {}) => ({ type: 'own_stakeholders', brief: 'who matters', needs_browser: false, acceptance_criteria: ['c'], ...extra });
 
-  it('a Codex worker override or roles.workers model for an offline task is swapped for one that can run offline', async () => {
+  it('a Codex worker for an own_stakeholders task is kept, and the task is created when no provider can run offline', async () => {
     const s = setup();
     const results = propose(s, [own({ model: CODEX })]);
     const rr = await startPhase('ws_a', 'stakeholders', s.deps);
-    const [task] = s.store.tasks.list({ runId: rr.id });
-    expect(task!.model.provider).toBe('claude');
-    expect(results[0]).toMatchObject({ accepted: [{ type: 'own_stakeholders', model: { provider: 'claude' }, offlineSwapFrom: CODEX }] });
+    expect(s.store.tasks.list({ runId: rr.id })[0]!.model).toEqual(CODEX);
+    expect(results[0]).toMatchObject({ accepted: [{ type: 'own_stakeholders', model: CODEX }] });
+    expect((results[0] as { accepted: Array<Record<string, unknown>> }).accepted[0]).not.toHaveProperty('offlineSwapFrom');
 
-    const u = setup({ config: (c) => (c.roles.workers = { ...c.roles.workers, own_stakeholders: CODEX }) });
-    propose(u, [own()]);
-    const rr2 = await startPhase('ws_a', 'stakeholders', u.deps);
-    expect(u.store.tasks.list({ runId: rr2.id })[0]!.model.provider).toBe('claude');
-  });
-
-  it('when no enabled provider can run offline, no own_stakeholders task is created and one harness Decision says why', async () => {
-    const s = setup({ config: (c) => {
+    const u = setup({ config: (c) => {
       codexOnly(c);
       for (const role of ['orchestrator', 'interviewer', 'reviewer', 'synthesizer', 'persona'] as const) c.roles[role] = CODEX;
       c.roles.workers = { default: CODEX };
     } });
-    const results = propose(s, [own(), { ...own(), type: 'competitor_stakeholders', brief: 'rivals' }]);
-    s.store.competitors.insert({
-      id: 'cmp_rival', workspaceId: 'ws_a', name: 'Rival Pay', threat: 4, directness: 5, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 },
-      evidence: [], createdAt: NOW, updatedAt: NOW, status: 'verified',
-    });
-    const rr = await startPhase('ws_a', 'stakeholders', s.deps);
-    expect(s.store.tasks.list({ runId: rr.id }).map((t) => t.type)).toEqual(['competitor_stakeholders']);
-    expect(results[0]).toMatchObject({ rejected: [{ index: 0, type: 'own_stakeholders', reason: expect.stringContaining('can run offline') }] });
-    const why = harnessEvents(s, 'offline_model_unavailable');
-    expect(why).toHaveLength(1);
-    expect(why[0]!.payload).toMatchObject({ taskType: 'own_stakeholders', reason: expect.stringContaining('can run offline') });
+    const accepted = propose(u, [own()]);
+    const rr2 = await startPhase('ws_a', 'stakeholders', u.deps);
+    expect(u.store.tasks.list({ runId: rr2.id }).map((t) => [t.type, t.model])).toEqual([['own_stakeholders', CODEX]]);
+    expect(accepted[0]).toMatchObject({ rejected: [] });
+    expect(harnessEvents(u, 'offline_model_unavailable')).toEqual([]);
   });
 
-  it('config warnings: stakeholders on and no enabled provider can run offline', () => {
+  it('config warnings: stakeholders on and no enabled provider can run offline (reads by own stakeholders and their learning are skipped)', () => {
     const cfg = structuredClone(defaultConfig);
     expect(configWarnings(cfg)).toEqual([]);
     codexOnly(cfg);
     expect(configWarnings(cfg)).toEqual([expect.stringContaining('stakeholders')]);
+    expect(configWarnings(cfg)[0]).toMatch(/reads by own stakeholders/);
+    expect(configWarnings(cfg)[0]).not.toMatch(/research/);
     cfg.stakeholders = { enabled: false };
     expect(configWarnings(cfg)).toEqual([]);
   });
