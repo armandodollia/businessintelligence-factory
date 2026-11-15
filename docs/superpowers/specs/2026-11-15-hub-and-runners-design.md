@@ -1,6 +1,6 @@
 # Shared hub and local runners — design
 
-Date: 2026-11-15. **Status: draft, revised twice after the user's answers of 2026-11-15; waiting for
+Date: 2026-11-15. **Status: draft, revised after the user's answers of 2026-11-15; waiting for
 approval. Nothing here is built.**
 
 Decisions the user did not state are marked **(my call)**.
@@ -21,19 +21,23 @@ What the user decided:
 - Where the hub runs is not decided. It must be testable for free and able to grow later (§14).
 - Rows are separated by company, and roles are given at every level of the business tree (§7).
 - A company is the top node of one business tree.
-- A person chooses which parts of the feedback they give about another person, a division or a
-  company go to the shared store. The rest stays on their machine (§8a).
-- Whatever is shared is stripped of everything that points to who gave it, including upload records
-  and other traces (§8b).
+- What a person says about another person, a division or a company stays on their machine. Only
+  results taken from it go to the hub, and the hub stores them only merged with what others said
+  (§8a, §8b). There is no step where a person picks what to share (the user's decision, replacing
+  the earlier one that a person chooses the parts).
+- Nothing the hub stores points to who said something, including upload records and other traces.
 - Improvements the retro finds still reach the shared store, without the reasons people gave (§8c).
+- A person who leaves the company, moves to another team or division, or is promoted or demoted can
+  be marked as such. Someone who left is no longer a stakeholder, and their persona stays in use
+  under the company they went to (§8d).
 
 ## 2. Goals, non-goals, anti-goals
 
 Goals
 
 1. One store. Every row belongs to one company and is never read or written from another. Every
-   action that changes shared findings is recorded under the person who did it; opinions shared
-   without a name are recorded under nobody (§8b).
+   action that changes shared findings is recorded under the person who did it; opinions reach the
+   store only as merged findings recorded under nobody (§8b).
 2. An agent run executes on a person's machine, with the CLI and login installed there.
 3. Scheduled work is handed to a person's machine too.
 4. Single-machine use keeps working exactly as today, with no sign-in and no second program.
@@ -51,8 +55,8 @@ Anti-goals
 - Private text reaching the machine of someone who may not read it: uploads, the hidden research on
   own-company stakeholders, stored site passwords.
 - A row of one company served to, or changed by, a person of another.
-- Feedback a person did not choose to share leaving their machine.
-- A shared opinion that the tool's own records can tie to the person who gave it.
+- A single opinion, or anything that only one or two people said, leaving its author's machine.
+- A stored finding that the tool's own records can tie to a person who contributed to it.
 - A hub that answers without sign-in, or over an unencrypted connection.
 - A run's access token that works after the run, or from a machine the run was not given to.
 
@@ -309,136 +313,114 @@ A role is given to a person at any node of the tree and applies to that node and
 - **Withheld research.** The hidden research on own-company stakeholders stays withheld from every
   member, the owner included, until the question round is done, as today.
 
-## 8a. Feedback stays on your machine unless you share it
-
-The user decided that a person chooses which parts of their feedback about another person, a division
-or a company go to the shared store.
+## 8a. Opinions stay on your machine
 
 - **Decisions and opinions are treated differently (my call).**
   - A *decision* changes what everyone sees: accepting or rejecting a recommendation, editing a
-    finding, overriding a result, changing a budget. It takes effect at once and is recorded under
-    the person, as today. It cannot be hidden anyway: colleagues see the change happen.
+    finding, overriding a result, changing a budget, uploading a document to the business. It takes
+    effect at once and is recorded under the person, as today. Colleagues see the change happen, so
+    it could not be hidden anyway.
   - An *opinion* is everything a person says around it: the reason typed with a decision, a rating
     and its comment, answers in the stakeholder question round, notes on a stakeholder, a division or
-    a company, stakeholder notes taken from their interview, and files they upload as background.
-    Opinions are private by default.
-- **Where private opinions live.** In a local store kept by the runner on that person's machine. The
-  hub stores nothing about them, not even that they exist **(my call; the earlier draft kept a
-  reference row, which is itself a trace)**.
+    a company, stakeholder notes taken from their interview, and files attached to any of these.
+- **Where opinions live.** In a local store kept by the runner on that person's machine. The hub
+  stores nothing about a single opinion, not even that it exists.
 - **How they get there.** The page in the browser sends opinion text straight to the runner on
   `127.0.0.1`, not to the hub. With no runner of theirs connected, the page says the text cannot be
   saved and offers to wait.
-- **Choosing what to share.** The runner splits a piece of feedback into single statements. The
-  person ticks the statements to share. Before anything leaves, the page shows the exact text that
-  will be sent (after §8b), and nothing is sent without that confirmation.
-- **What uses private opinions.** Only runs on that person's machine: stakeholder reads and learning
-  for that person, the "persona of you" learning, and that person's part of the retro (§8c).
-- **What follows (my call).** Anything learned from private opinions is private too: a private layer
-  on top of the shared stakeholder persona, and reads made with it, are stored locally and shown only
-  to that person.
-- **Costs.** Private data is lost with the machine unless the person backs up the runner's folder.
-  Shared personas and lessons improve only from what people share and from §8c.
+- **What uses them.** Runs on that person's machine: stakeholder reads and learning for that person,
+  the "persona of you" learning, that person's part of the retro (§8c), and the step that turns
+  opinions into claims (§8b).
+- **What follows (my call).** Anything learned from one person's opinions alone is private too: a
+  private layer on top of the shared stakeholder persona, and reads made with it, are stored locally
+  and shown only to that person.
+- **Costs.** Local data is lost with the machine unless the person backs up the runner's folder.
 - **Limit.** What a person types in the interview is stored on the hub as the interview record. Only
-  the notes taken from it are private.
+  the notes taken from it are local.
 
-## 8b. Sharing without a name
+## 8b. What reaches the hub: merged findings only
 
-Whatever a person shares is stripped of what points to them. Removing the name is the small part;
-most of the work is the traces and the wording.
+There is one path and no choices in it. Every opinion is turned into claims on its author's machine,
+the claims are sent each week, and the hub keeps only what several people agree on.
 
 **What this protects against, and what it cannot.** It protects against anyone who reads the pages,
-the hub's database, its logs or its backups. It does not protect against (a) a group too small to
-hide in, (b) a statement only one person could know, (c) a hub operator who changes the program to
-record who sent what, or a proxy in front of the hub that logs addresses. The tool handles (a) and
-(b) by refusing or warning; (c) needs anonymous credentials and a relay, which is noted as a later
-option and not designed here.
+the hub's database, its logs or its backups. It does not protect against a hub operator who changes
+the program to record who sent what, or a proxy in front of the hub that logs addresses. That needs
+anonymous credentials and a relay, noted as a later option.
 
-**Rule 1: the stripping happens on the contributor's machine.** The hub cannot forget what it has
-received, so the hub never receives the original.
+**On the author's machine.**
 
-1. *Rewrite.* An offline run on the person's own CLI restates each ticked statement as a neutral
-   claim about its subject: third person, no "I" or "my", no mention of when or where the person
-   learned it, no reference to their role, team or relationship to the subject. This removes writing
-   style, which identifies people in small groups.
-2. *Identifier check (code, not a prompt).* The rewritten text is refused when it contains the
-   contributor's name, sign-in name, machine name, role title, team or node names that only they
-   belong to, or wording from their private store that they did not tick. This extends the existing
-   `containsIdentifier` rule of the "persona of you".
-3. *Guessing test.* A second offline run gets the rewritten statement and the list of people who could
-   have written it, and is asked who wrote it and why. If it names the contributor with a reason
-   found in the text, the page shows that reason and the person edits, generalises or withdraws.
-4. *Confirmation.* The person sees the final text and confirms.
-5. With no CLI on the machine that can run offline, sharing without a name is not offered.
+1. *Claims.* An offline run on the person's own CLI turns each opinion into claims in a fixed shape:
+   the subject (a person, a division, a company), a topic from the company's topic list, a direction
+   (strength, concern, neutral fact), and one general sentence in neutral third person, with no "I",
+   no mention of when or where the person learned it, and no reference to their role or team.
+2. *Identifier check (code, not a prompt).* A claim is held back when its sentence contains the
+   author's name, sign-in name, machine name, role title, or the name of a team only they belong to.
+   This extends the existing `containsIdentifier` rule of the "persona of you".
+3. *Guessing test.* A second offline run gets the sentence and the list of people who could have
+   written it, and is asked who wrote it. If it names the author with a reason found in the text, the
+   sentence is generalised once and tested again; if it still fails, the claim is held back.
+4. A held-back claim still counts towards agreement through its subject, topic and direction; only
+   its sentence is not sent.
+5. With no CLI on the machine that can run offline, no claims are made.
 
-**Rule 2: the hub stores findings several people agree on, not what one person said (my call, after
-the user's remark that the findings matter and the specifics do not).**
+**On the hub.**
 
-- The runner turns each ticked statement into a *claim* in a fixed shape: the subject (a person, a
-  division, a company), a topic from the company's topic list, a direction (strength, concern,
-  neutral fact), and one general sentence. Steps 1 to 4 above apply to that sentence.
 - In the weekly release the hub groups claims by subject, topic and direction, in memory. A group
-  with claims from at least 3 different people (my number) becomes one shared finding: a merge run
-  writes one sentence from the group, and the finding is stored with "raised by 3 or more people"
-  (or the count in bands: 3–5, 6–10, more). The single claims are then dropped and never stored.
+  with claims from at least 3 different people becomes one shared finding: a merge run writes one
+  sentence from the group, and the finding is stored with a count band (3–5, 6–10, more). The single
+  claims are then dropped and never stored.
 - A group below 3 is dropped from the hub's memory. The claims stay in their runners' outboxes and
-  are offered again each week, so a finding appears when enough people have said it, however far
-  apart in time.
-- What only one or two people say is never stored without a name. The page says "waiting for others
-  to say the same" and offers "share with your name" instead.
-- The merge run is offline and goes to an owner's machine. Its prompt holds the group's stripped
-  claims in shuffled order; that machine's CLI keeps its own record of them. This is the one place a
-  single stripped claim is seen outside its author's machine.
+  are sent again each week, so a finding appears when enough people have said it, however far apart
+  in time. A finding's count band rises as more people say the same.
+- What only one or two people say never reaches the store.
+- The merge run is offline and goes to an owner's machine. Its prompt holds the group's sentences in
+  shuffled order; that machine's CLI keeps its own record of them. This is the one place a single
+  stripped sentence is seen outside its author's machine.
 - The topic list belongs to the company; owners edit it. It starts from a default list.
 
-**Considered and not used.**
-
-- *Storing the text in another language.* Anyone can translate it back, so it hides nothing, and it
-  makes the store harder to read and search. Translating to another language and back is a known way
-  to remove writing style; the rewrite in step 1 may do this, and the result is stored in the
-  original language.
-- *Storing only a numeric vector (an embedding).* Vectors are not one-way: published attacks rebuild
-  most of the original sentence from its vector (Morris et al., 2023, recovered 92% of short texts
-  exactly). The agents also cannot use a vector: the CLIs read text, a claim must stay tied to
-  evidence a person can read, and the contributor could no longer check what leaves their machine.
-  Vectors would only be useful later for matching claims that say the same thing in different words.
-
-**Rule 3: no trace of the moment or the sender.**
+**No trace of the sender or the moment.**
 
 | Trace | Handling |
 |---|---|
-| Person, runner, session on the row | Never written. The row's actor is `anonymous`. |
-| Time of sending | Statements wait in an outbox on the runner and are released once a week, with the retro. The hub stores only the week. |
-| Order of arrival | The hub collects the week's releases for one day in memory and writes them together in shuffled order, so insert order says nothing. A release that arrives later waits for the next week's write. The runner keeps its outbox until the hub confirms the write. |
-| Row ids | Ids embed the millisecond today (`newId`). Shared statements get fully random ids. |
-| Request log, live events, run log | The receiving route logs no person and no address; no live event is sent per statement, one per released batch; the rewrite and the guessing test are local runs the hub never sees. |
+| Person, runner, session on the row | Never written. |
+| Time of sending | Claims wait in an outbox on the runner and go once a week, with the retro. The hub stores only the week a finding was first reached. |
+| Order of arrival | The hub collects the week's releases for one day in memory and writes the findings together in shuffled order. A release that arrives later waits for the next week. |
+| Row ids | Ids embed the millisecond today (`newId`). Shared findings get fully random ids. |
+| Request log, live events, run log | The receiving route logs no person and no address; one live event per week's write; the claim runs are local and the hub never sees them. |
 | Usage and cost | The local runs are counted on the runner only. |
-| Who was connected | The hub accepts the weekly release from every connected runner, including those with nothing to send (an empty release), so sending is not a signal. |
-| Membership check | The hub checks the runner's key to confirm the sender has a role on the node, then drops the identity before storing. It keeps a per-week count per node, not who. |
+| Who sent anything at all | Every connected runner sends a weekly release, empty or not. |
+| Membership check | The hub checks the runner's key to confirm the sender has a role on the node, then drops the identity. To count different people it keeps, in memory and for that day only, which runner sent which group. |
 
-**Uploads (my call).** A file is the hardest thing to strip: its name, its author and last-editor
-fields, tracked changes, comments, photo location data, its checksum (which matches the copy on the
-person's disk), the upload time, and the reading job sent to "the uploader's machine" (§5.7) all
-point at the person.
+**Files.** A file attached to an opinion stays on the person's machine and is read there (OCR
+included). Only claims taken from it are sent. The hub holds no file, file name, checksum or upload
+record for it. A document uploaded to the business as research material is a decision (§8a): shared
+and recorded under the uploader, as today.
 
-- Default: the file stays on the person's machine. It is read there (OCR included), and only
-  statements taken from it go through steps 1 to 4 above. The shared store holds no file, no file
-  name, no checksum and no upload record. The statements keep the existing mark that they come from
-  an upload, so they stay out of exports by default.
-- If the person chooses to share the file itself: the runner rebuilds it as plain text or as a new
-  PDF made from the page images, with no document properties, and re-encodes pictures without their
-  embedded data; it is renamed from its content, checksummed after rebuilding, and released with the
-  weekly batch. The page warns that the content of a document often shows whose it is.
-- A file shared with a name is an ordinary upload, as today.
+**Evidence for a shared finding.** Every claim stays tied to an evidence copy: the shared finding is
+its own evidence copy, typed "view of several members, unnamed", with the week, the node and the count
+band. Readers and agents are told it is what several people think, not a verified fact.
 
-**Evidence for a shared finding.** Every claim stays tied to an evidence copy: the shared finding
-itself is the evidence copy, typed "view of several members, unnamed", with the week it was first
-reached, the node and the count band. Readers and agents are told it is what several people think,
-not a verified fact.
+**What the author sees.** A read-only list on their machine: each claim made from their opinions,
+whether it is waiting for others, held back, or part of a shared finding. Deleting an opinion deletes
+its claims that have not yet been merged.
 
-**One sweep test guards all of this.** It contributes a statement and a file as a known person
-through a real runner, then searches every table, log file and event of the hub for that person's
-id, runner id, session id, address, the original wording, the file's original name and checksum, and
-any time finer than the week. Any hit fails. A table or log added later is covered automatically.
+**Considered and not used.**
+
+- *Storing the text in another language.* Anyone can translate it back, and it makes the store harder
+  to read and search. Translating there and back is a known way to remove writing style; step 1 may
+  do this, with the result in the original language.
+- *Storing only a numeric vector (an embedding).* Vectors are not one-way: published attacks rebuild
+  most of the original sentence from its vector (Morris et al., 2023). The agents also cannot read a
+  vector, and a claim must stay tied to evidence a person can read. Vectors would only be useful
+  later for matching claims that say the same thing in different words.
+- *Letting the person pick what to share, or share with their name.* Removed by the user: with only
+  merged findings stored, there is nothing left to choose.
+
+**One sweep test guards all of this.** Three known people give opinions through real runners; the
+test then searches every table, log file and event of the hub for their ids, runner ids, session ids,
+addresses, the original wording, any attached file's name and checksum, and any time finer than the
+week. Any hit fails. With two people instead of three, nothing at all may be on the hub.
 
 ## 8c. Improvements from the retro, without the reasons
 
@@ -450,17 +432,78 @@ reasoning people gave.
 - A person's part produces proposals: a lesson rule, a persona adjustment, a prompt correction. Each
   has the rule text and, separately, why (the rationale and the feedback it rests on). Today these
   sit in the same row (`lesson_proposals.rationale`, `evidence`, `persona_proposals.rationale`).
-- Only the rule text leaves the machine, through the same path as §8b: identifier check, guessing
-  test, the weekly release, no name. One check is added: the rule may not contain the name of any
+- Only the rule text leaves the machine, automatically, with the weekly release and the same checks
+  as §8b (identifier check, guessing test), under no name. A rule does not wait for 3 people: a
+  general rule says nothing about its author once it names no subject. One check is added: the rule may not contain the name of any
   person, division or company that the contributor's private opinions are about. The local store
   knows those names, so this is checked in code. A rule must be general ("check revenue figures
   against a second source"), not about a subject ("the figures from division X are unreliable").
 - The why stays local. The person who gave the feedback can see it on their own machine.
-- **Who releases, who accepts (my call).** The contributor sees their proposals with the reasons and
-  releases the ones they agree to. An owner then accepts or rejects each for the company, seeing the
-  rule and how many people's machines proposed the same thing (as "1", "2" or "3 or more"), never why.
+- **Who accepts (my call).** An owner accepts or rejects each rule for the company, seeing the rule
+  and how many people's machines proposed the same thing (as "1", "2" or "3 or more"), never why.
 - **Cost.** Owners judge a rule without its reasons. A rule proposed from one person's machine alone
   is marked as such.
+
+## 8d. People who leave, move, or change position
+
+Two records are involved and they are kept apart: the *stakeholder persona* of a person (what the
+tool believes about how they decide) and, in hub mode, their *account* (what they may see and do).
+The first part below works on one machine today and does not depend on the hub.
+
+**Position history.** A new append-only table `stakeholder_positions`: persona, where (a node of the
+tree, or a competitor), stakeholder type, title, from, to, the kind of change (`joined`, `moved`,
+`promoted`, `demoted`, `left`, `returned`), who recorded it, a note. The persona row holds the
+current position; a change writes the history row and updates the persona in one transaction and
+raises its version. A wrong entry is corrected by a further entry, never by editing.
+
+**Leaving for another company.** An owner marks the persona as left, with the date and the company:
+
+- *A competitor of the tree.* The persona becomes a stakeholder of that competitor (`subject_kind`
+  `competitor`, `subject_id` that competitor) and keeps its id, its profile and everything learned.
+  From then on it reads recommendations as a rival does (ignore, watch, copy, counter); its earlier
+  reads as an own stakeholder stay as history.
+- *A company not yet in the tree.* The competitor is created first, marked as not yet researched.
+- *Elsewhere, or unknown.* The persona is kept as "former", takes part in nothing, and can be
+  attached to a competitor later.
+- It no longer counts as an own stakeholder: no question round, no own reads, not in the own cap,
+  no learning from the company's real decisions.
+- *What they know about us (my call).* The rival read is told the person worked here until that date
+  in that position, and may know plans and facts recorded up to then. This is what makes a former
+  colleague more useful than an ordinary competitor persona.
+- *It stays internal (my call).* The persona was built from internal uploads and from what people
+  said, so it stays out of exports and its reads run without web access, unlike other competitor
+  stakeholders. Competitor research may add public facts about the person's new role; that research
+  is given only the name and the new company, not the internal profile.
+
+**Moving team or division.** The persona's node changes. Needs an owner role covering both the old
+and the new node. The owner chooses whether the persona carries what is known (default) or starts
+fresh at the new node with the old one kept as history **(my call)**; this is the point where text
+from one branch would become readable in another, so a person with authority over both decides.
+Past reads stay at the old node. Shared findings about the person stay at the node where they were
+raised and are marked with the position held at the time.
+
+**Promotion or demotion.** The stakeholder type and title change, and the node if the new position
+sits at another level. Later reads and learning are told the date and that earlier evidence reflects
+the earlier position.
+
+**Returning.** A person who comes back is moved from the competitor to a node; the persona becomes
+an own stakeholder again, with the gap in its history.
+
+**The account, in hub mode.** A stakeholder persona can be linked to an account (§8).
+
+- *Leaving.* Access ends at once and automatically: sign-in disabled, sessions ended, machines
+  unpaired and their keys revoked, roles removed, jobs leased to those machines returned to waiting.
+  Decisions they took stay recorded under their name. Findings their claims were merged into stay;
+  claims not yet merged never arrive. Their "persona of you" is deleted. A company cannot mark its
+  last owner as left without naming another.
+- *What stays on their machine.* The runner deletes its local store when it next connects and learns
+  the account is closed. A machine that never connects again keeps it; only the company's control
+  over its devices covers that.
+- *Moving or changing position.* The page proposes the matching role changes (remove the role at the
+  old node, add one at the new) and an owner confirms them **(my call)**: access is never widened
+  silently. Claims about the old node's subjects stop being accepted once the role there is gone.
+- Marking a persona as left to a competitor uses what the company knows about a named former
+  employee. The user checks what their country and contracts allow.
 
 ## 9. Privacy
 
@@ -468,8 +511,8 @@ reasoning people gave.
   given to the machine of a person who is allowed to read everything in its prompt. The routing in §6
   follows from this.
 - The feedback log, run logs and stored prompts of a business are readable by its members. The
-  feedback log on the hub holds decisions only; opinions are local or shared without a name (§8a,
-  §8b). One exception needs a rule: another member's "persona of you" lines appear in accept events
+  feedback log on the hub holds decisions only; opinions are local and reach the hub only as merged
+  findings (§8a, §8b). One exception needs a rule: another member's "persona of you" lines appear in accept events
   and in learning prompts. In hub mode those are served only to that person and the owner
   **(my call)**.
 - Hiding who said something does not hide whom it is about. Statements about a named coworker on a
@@ -488,7 +531,7 @@ reasoning people gave.
 
 New tables: `people`, `sessions`, `roles`, `runners`, `run_jobs`, `shared_findings` (random id,
 company, node, subject, topic, direction, text, count band, week; no person, no runner, no time),
-`sharing_topics`. New columns: `company_id` on
+`sharing_topics`, `stakeholder_positions`. New columns: `company_id` on
 every table; `agent_runs` gets `initiator`, `runner_id`; requests and approvals get `addressed_to`.
 On the runner: a local store of private opinions, private files, private adjustments, private reads,
 retro proposals with their reasons, and the outbox for the weekly release.
@@ -512,16 +555,16 @@ settings live in `runners`.
 - A sign-in page; a "My machines" page (paired machines, connected or not, what each can run, the
   scheduled-work switch and limits, today's load).
 - On every node: a People page for its owners (who has which role here and below).
-- Wherever a person gives an opinion: the statements it was split into, a tick box per statement,
-  the exact text that would be shared, and what the guessing test found. Nothing is ticked by default.
-- A "Waiting to be shared" list on the person's machine: each claim, whether it is waiting for
-  others to say the same, and a button to withdraw it. Once it has become part of a shared finding it
-  cannot be recalled.
+- On the person's machine: the read-only list of claims made from their opinions (§8b).
+- On a stakeholder: its position history, and for owners the actions "left", "moved", "promoted or
+  demoted", "returned".
 - For owners: proposed rules from the retro with a count, no reasons.
 - On runs and tasks: who started it, which machine ran it, or what it is waiting for.
 
 ## 13. Order of building
 
+0. **Positions of stakeholders (§8d, first part).** Independent of everything below; works on one
+   machine. The account part of §8d belongs to step 3.
 1. **The seam.** `RunExecutor` and `LocalExecutor`, the supervisor computing the result from raw
    exit data, per-executor limits. No change in behaviour; the existing test suite passes unchanged.
 2. **Company separation.** `company_id` on every table, the company-bound store handle, the sweep
@@ -536,9 +579,8 @@ settings live in `runners`.
 6. **Private opinions.** The runner's local store, the page sending opinion text to the runner, the
    split between decisions and opinions, the private layer on stakeholder personas, per-person
    question rounds.
-7. **Sharing without a name.** Splitting into statements, claims in the fixed shape, the rewrite, the
-   identifier check, the guessing test, the outbox and weekly release, grouping and the merge run,
-   the topic list, uploads, the sweep test.
+7. **Merged findings.** Claims in the fixed shape, the identifier check, the guessing test, the
+   outbox and weekly release, grouping and the merge run, the topic list, the sweep test.
 8. **The retro on runners.** Each person's part of the retro, proposals without reasons, the owner's
    accept step.
 9. Later, separately: the hub-side API-key runner; anonymous credentials and a relay, if the hub
@@ -566,10 +608,8 @@ layer and not part of this design.
 
 Open questions for the user:
 
-1. Decisions that change shared findings (accept, reject, edit) stay recorded under the person, and
-   only opinions can be shared without a name (§8a). Is that the split you want?
-2. A view is stored without a name only once 3 different people have said the same (§8b). What one
-   or two people say waits, or is shared with their name. Is that right, and is 3 the right number?
+1. Decisions that change shared findings (accept, reject, edit, uploading research material) stay
+   recorded under the person; only opinions go through §8b. Is that the split you want?
 
 ## 15. Verification
 
@@ -577,7 +617,8 @@ Unit tests per module; the existing suite unchanged after step 1; a protocol tes
 (lease loss, cancel, restart, a token used through the wrong runner); access tests per route for
 owner, member, viewer and non-member at each level of a three-level tree; the company sweep test;
 a test that private text never reaches the hub (the hub's store and logs searched for it); the sweep
-test for shared statements and files (§8b); a test that a retro proposal reaches the hub with no
-rationale and no subject's name (§8c); the agreement rule at 2 and 3 people, and that a group below 3 leaves nothing on the hub; a
+test for merged findings (§8b); a test that a retro proposal reaches the hub with no
+rationale and no subject's name (§8c); the agreement rule at 2 and 3 people; position changes (left to a competitor, moved, promoted,
+returned) with the reads before and after, and that a closed account loses access at once; a
 two-process test on one machine (hub and runner over
 loopback with encryption); one real run through a runner with the Claude CLI on the cheapest model.
