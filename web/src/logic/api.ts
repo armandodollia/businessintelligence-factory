@@ -366,3 +366,19 @@ export const flowsApi = {
     }),
 };
 // --- end flows -----------------------------------------------------------------------------------
+// --- persona learning: what the tool has learned (`src/api/personaLearningRoutes.ts`) -------------
+export const personaLearningApi = {
+  view: (wsId: string) => get<import('./types.js').PersonaLearningView>(`${ws(wsId)}/persona-learning`),
+  signals: (wsId: string, personaId: string) =>
+    get<{ signals: import('./types.js').PersonaSignal[] }>(`${ws(wsId)}/personas/${enc(personaId)}/signals`),
+  /** `text`: the user's edit, sent only when it differs from the proposed text. */
+  accept: (wsId: string, proposalId: string, input: { text?: string; reason?: string } = {}) =>
+    post<unknown>(`${ws(wsId)}/persona-proposals/${enc(proposalId)}/accept`, {
+      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...withReason(input.reason),
+    }),
+  reject: (wsId: string, proposalId: string, reason?: string) => post<unknown>(`${ws(wsId)}/persona-proposals/${enc(proposalId)}/reject`, withReason(reason)),
+  retire: (wsId: string, adjustmentId: string, reason?: string) =>
+    post<unknown>(`${ws(wsId)}/persona-adjustments/${enc(adjustmentId)}/retire`, withReason(reason)),
+};
+// --- end persona learning ------------------------------------------------------------------------

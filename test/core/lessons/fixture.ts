@@ -10,6 +10,7 @@ import { Supervisor } from '../../../src/core/harness/supervisor.js';
 import { TokenRegistry } from '../../../src/core/harness/tokens.js';
 import { createToolHandlers } from '../../../src/core/harness/tools/handlers.js';
 import { retroToolHandlers } from '../../../src/core/learning/lessons/retro.js';
+import { personaLearningToolHandlers } from '../../../src/core/personas/learn.js';
 import type { AgentRequest, ResearchDeps } from '../../../src/core/research/deps.js';
 import { learningRepos } from '../../../src/core/learning/store.js';
 import { recordPromptVersion } from '../../../src/core/prompts/store.js';
@@ -78,12 +79,12 @@ export function lessonsSetup(opened: Store[], configure?: (c: BifConfig) => void
   return { dir, store, config, a, aChild, b, at, task, run, issue };
 }
 
-/** Supervisor + fake agents over a `lessonsSetup` store (retro tool handler registered). */
+/** Supervisor + fake agents over a `lessonsSetup` store (retro and persona learning tool handlers registered). */
 export function lessonsHarness(t: ReturnType<typeof lessonsSetup>, pick: (req: AgentRequest) => FakeScript | undefined) {
   const events = new EventBus();
   const artifacts = new ArtifactStore(t.store, t.dir);
   const tokens = new TokenRegistry(t.store);
-  const handle = createToolHandlers({ store: t.store, artifacts, config: t.config, events, extraHandlers: retroToolHandlers() });
+  const handle = createToolHandlers({ store: t.store, artifacts, config: t.config, events, extraHandlers: { ...retroToolHandlers(), ...personaLearningToolHandlers() } });
   const supervisor = new Supervisor({
     store: t.store, config: t.config, tokens, events, handle, dataDir: t.dir, mcpBaseUrl: 'http://127.0.0.1:4317',
     backoff: { baseMs: 5, maxMs: 20, maxAttempts: 2 }, killGraceMs: 100,

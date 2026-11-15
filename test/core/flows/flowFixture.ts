@@ -19,7 +19,7 @@ import { PERSONA_FIELDS } from '../../../src/core/scoring/criteria.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { newId } from '../../../src/core/store/repos.js';
 import type { Persona } from '../../../src/core/types.js';
-import { addTask, researchSetup } from '../helpers/research.js';
+import { addTask, researchSetup, type SetupOptions } from '../helpers/research.js';
 
 export const T0 = '2026-11-14T10:00:00.000Z';
 
@@ -37,8 +37,12 @@ export const isFocused = (req: AgentRequest) => req.prompt.startsWith('# Focused
 const slugOf = (req: AgentRequest) => /^name: (\S+)$/m.exec(req.systemPrompt)![1]!;
 const flowTypeOf = (req: AgentRequest) => /`flow_type`: (\w+)/.exec(req.prompt)![1]!;
 
-export function flowSetup(opened: Store[], config?: (c: BifConfig) => void) {
-  const t = researchSetup(opened, { extraHandlers: () => flowRoundToolHandlers(), ...(config ? { config } : {}) });
+/** `extraHandlers`: tool handlers registered beside the ranking round's (e.g. the retro's and persona learning's). */
+export function flowSetup(opened: Store[], config?: (c: BifConfig) => void, extraHandlers?: SetupOptions['extraHandlers']) {
+  const t = researchSetup(opened, {
+    extraHandlers: (deps) => ({ ...flowRoundToolHandlers(), ...(extraHandlers?.(deps) ?? {}) }),
+    ...(config ? { config } : {}),
+  });
   t.store.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: T0 });
   const typeId = flowTypeByKey(t.store, 'ws_a', 'sign_up')!.id;
 

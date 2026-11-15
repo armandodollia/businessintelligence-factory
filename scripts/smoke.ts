@@ -7,6 +7,7 @@
  *   npx tsx scripts/smoke.ts browser [providers]   # browser smoke (default: claude)
  *   npx tsx scripts/smoke.ts knowledge [providers] # knowledge-store flow (KS-8), per provider
  *   npx tsx scripts/smoke.ts flows [providers]     # flow records and ranking, per provider
+ *   npx tsx scripts/smoke.ts persona-learning [providers] # persona learning in the retro (default: claude)
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
  *            spawns one real worker run through the Supervisor. The agent must call
@@ -34,6 +35,12 @@
  *            broad sitting, no focused follow-up) with that provider as the persona, over two seeded verified
  *            sign-up flows. Judged from the store: the flow, its steps and walkthrough answers; the persona's
  *            verdict row and the resulting ranking.
+ * persona-learning: persona learning (design 2026-11-15 §17). Per provider, seeds four verified sign-up flows, a
+ *            verified persona, six of its verdicts on six pairs and the user's reactions to them (five disagree, with
+ *            reasons), then runs the real retro (`runRetro`) with that provider as the persona learning model. Judged
+ *            from the store: exactly one learning run and one successful `submit_persona_learning` call, the run row
+ *            (`proposed` or `no_change`, with its assumption), the stored proposals (pending, evidence among the
+ *            signals shown, the evidence and text limits) and an unchanged persona (version 1, no adjustment).
  * codex isolation (with the codex worker smoke): `codex mcp list --json` under the exact env and
  *            `-c` overrides the adapter gives a run must list only `bif`.
  *
@@ -69,6 +76,11 @@ import { flowRepos } from '../src/core/flows/repos.js';
 import { runFlowRanking } from '../src/core/flows/round.js';
 import { linkCompetitor } from '../src/core/knowledge/entityLinks.js';
 import { PERSONA_FIELDS } from '../src/core/scoring/criteria.js';
+import { reactToVerdict } from '../src/core/flows/feedback.js';
+import { recordVerdicts } from '../src/core/flows/verdicts.js';
+import { runRetro } from '../src/core/learning/lessons/retro.js';
+import { personaLearningRepos } from '../src/core/personas/store.js';
+import { ADJUSTMENT_TEXT_MAX } from '../src/core/personas/adjustments.js';
 
 const MODELS: Record<ProviderId, string> = {
   claude: process.env.BIF_SMOKE_CLAUDE_MODEL ?? 'haiku',
@@ -860,9 +872,155 @@ async function flowsSmoke(provider: ProviderId, booted: Booted): Promise<FlResul
   }
 }
 
+// ---------------------------------------------------------------------------
+// persona learning smoke (persona learning design 2026-11-15 §17)
+
+/**
+ * A workspace with its own company and three fictional competitors, a verified sign-up flow of each, one
+ * verified persona, six verdicts of that persona (one per pair, the shorter form always wins) and the user's
+ * reactions: five disagree, each with a reason pointing the same way, one agrees.
+ */
+function seedPersonaLearning(booted: Booted, provider: ProviderId) {
+  const { store, dataDir } = booted.runtime;
+  const now = new Date().toISOString();
+  const wsId = `ws_smoke_persona_learning_${provider}`;
+  const company = 'Larkspur Books';
+  store.workspaces.insert({ id: wsId, name: company, sector: 'test', createdAt: now });
+  const rivals = ['Pinecrest Ledger', 'Tamarind Accounts', 'Quillfield Invoices'];
+  for (const name of rivals) {
+    linkCompetitor(store, store.competitors.insert({
+      id: newId('cmp'), workspaceId: wsId, name, threat: 3, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 },
+      evidence: [], createdAt: now, updatedAt: now, status: 'verified',
+    }));
+  }
+  // Fields asked at sign-up: 2, 3, 5, 7 (the persona prefers fewer every time).
+  const shapes: Array<{ subject: { kind: 'company' | 'competitor'; name: string }; asked: string[]; after: string }> = [
+    { subject: { kind: 'competitor', name: rivals[0]! }, asked: ['email', 'password'], after: 'An empty ledger opens; pricing is shown only when the 14-day trial ends' },
+    { subject: { kind: 'competitor', name: rivals[1]! }, asked: ['email', 'password', 'company name'], after: 'A page lists the yearly price and what an accountant seat costs, then opens the ledger' },
+    { subject: { kind: 'company', name: company }, asked: ['name', 'email', 'password', 'company name', 'country'], after: 'A setup page shows the yearly total including tax before the ledger opens' },
+    { subject: { kind: 'competitor', name: rivals[2]! }, asked: ['name', 'email', 'phone', 'password', 'company name', 'country', 'VAT number'], after: 'A call is booked to walk through the yearly plan and the invoice import' },
+  ];
+  const flows = shapes.map(({ subject, asked, after }) => {
+    const r = saveFlow(store, { workspaceId: wsId }, {
+      subject, flowTypeKey: 'sign_up', variant: 'Email', primary: true, name: `${subject.name} sign-up`, goal: 'Create an account', reachedGoal: true,
+      steps: [
+        { action: 'Open the sign-up page', observation: `A form asks for ${asked.join(', ')}`, asked },
+        { action: 'Submit the form', observation: after },
+      ],
+    });
+    if (!r.saved) throw new Error('seed flow not saved');
+    return flowRepos(store).flows.update(r.flow.id, { status: 'verified' });
+  });
+  const profile = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, { value: `${f.replace(/_/g, ' ')}: the owner of a 6-person bookkeeping practice who picks the tools`, confidence: 0.7, evidence: [] }]));
+  const persona = store.personas.insert({
+    id: newId('per'), workspaceId: wsId, slug: 'practice-owner', segment: 'owners of small bookkeeping practices', profile, version: 1, status: 'verified',
+    agentMdPath: join(dataDir, 'personas', `practice-owner-${provider}.md`),
+  });
+  const flowTypeId = flowTypeByKey(store, wsId, 'sign_up')!.id;
+  const pairs: Array<[number, number]> = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+  const reasons = [
+    'they pay once a year, so the yearly total matters more than a short form',
+    'a form of five fields is fine for them if the yearly price is clear up front',
+    'they want to see the yearly cost before they sign up, not a trial that hides it',
+    'they never mind a few more fields; surprises on the invoice are what they hate',
+    'the call about the yearly plan is a plus for them, not a cost',
+  ];
+  let disagree = 0;
+  for (const [i, [x, y]] of pairs.entries()) {
+    const a = flows[x]!;
+    const b = flows[y]!;
+    recordVerdicts(store, { workspaceId: wsId, flowTypeId, persona, stage: 'broad', allowed: [a.id, b.id] }, [
+      { a: a.id, b: b.id, winner: 'a', strength: 2, confidence: 0.8, reason: 'Fewer fields to fill in before I can start.' },
+    ]);
+    const v = flowRepos(store).flowVerdicts.list({ personaId: persona.id }).at(-1)!;
+    if (i === 0) reactToVerdict(store, 'smoke-user', v.id, 'agree');
+    else reactToVerdict(store, 'smoke-user', v.id, 'disagree', reasons[disagree++]);
+  }
+  return { wsId, persona };
+}
+
+async function personaLearningSmoke(provider: ProviderId, booted: Booted): Promise<FlResult> {
+  const { store, config, events, research } = booted.runtime;
+  const name = `persona-learning/${provider} (${MODELS[provider]})`;
+  const started = Date.now();
+  const model = { provider, model: MODELS[provider] };
+  const short = (s: string, n = 140) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const runIds: string[] = [];
+  let toolCalls = 0;
+  try {
+    const s = seedPersonaLearning(booted, provider);
+    const bus: ToolCallLog[] = [];
+    const off = events.on((e) => {
+      if (e.type === 'tool_call' && e.workspaceId === s.wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+    });
+    let retro: Awaited<ReturnType<typeof runRetro>>;
+    try {
+      // The learning run (and the lessons retro, when the period has anything to digest) on the provider under test.
+      const lessons = config.lessons ?? {};
+      const cfg: BifConfig = {
+        ...config,
+        personaLearning: { ...(config.personaLearning ?? {}), model },
+        lessons: { ...lessons, retro: { ...(lessons.retro ?? {}), model } },
+      };
+      retro = await runRetro({ ...research, config: cfg }, s.wsId, { triggeredBy: 'user' });
+    } finally {
+      off();
+    }
+    toolCalls = bus.length;
+    const repos = personaLearningRepos(store);
+    const runs = repos.runs.list({ personaId: s.persona.id });
+    const run = runs[0];
+    if (run?.agentRunId) runIds.push(run.agentRunId);
+    if (retro?.agentRunId) runIds.push(retro.agentRunId);
+    const agentRun = run?.agentRunId ? store.agentRuns.get(run.agentRunId) : undefined;
+    steps.push({
+      step: 'L1 learning run', calls: 0,
+      pass: runs.length === 1 && (run!.status === 'proposed' || run!.status === 'no_change') && agentRun?.status === 'done' && agentRun.role === 'retro',
+      did: run
+        ? `runs=${runs.length} status=${run.status}${run.failureReason ? ` failure=${short(run.failureReason, 120)}` : ''} agent=${agentRun?.status ?? 'none'} shown=${run.shownSignalIds.length} gate n=${run.stats.n} disagree=${run.stats.disagree} items=${run.stats.items}; retro digest=${JSON.stringify({ personasEvaluated: retro?.digest.personasEvaluated, personasQualified: retro?.digest.personasQualified, personaLearningRuns: retro?.digest.personaLearningRuns, personaProposals: retro?.digest.personaProposals })}`
+        : `no learning run; retro=${retro ? `${retro.status} digest=${JSON.stringify(retro.digest)}` : 'none'}`,
+    });
+    const submits = bus.filter((c) => c.tool === 'submit_persona_learning');
+    const decisions = run?.agentRunId ? store.decisions.list({ agentRunId: run.agentRunId }).filter((d) => (d.payload as { tool?: string }).tool === 'submit_persona_learning') : [];
+    steps.push({
+      step: 'L2 submit_persona_learning', calls: submits.length,
+      pass: submits.filter((c) => c.ok).length === 1 && decisions.length === 1 && !!run?.assumption?.trim(),
+      did: `ok=${submits.filter((c) => c.ok).length} refused=${submits.filter((c) => !c.ok).map((c) => short(c.error ?? '', 160)).join(' | ') || 0}; decisions=${decisions.length}; assumption="${short(run?.assumption ?? '', 200)}"`,
+    });
+    const proposals = repos.proposals.list({ personaId: s.persona.id });
+    const shown = new Set(run?.shownSignalIds ?? []);
+    const bad = proposals.filter(
+      (p) => p.status !== 'pending' || p.runId !== run?.id || !p.evidence.every((id) => shown.has(id)) ||
+        (p.action !== 'retire' && (p.evidence.length < 3 || p.text.length > ADJUSTMENT_TEXT_MAX)),
+    );
+    steps.push({
+      step: 'L3 stored proposals', calls: 0,
+      pass: bad.length === 0 && proposals.length <= 3 && (run?.status === 'proposed' ? proposals.length >= 1 : proposals.length === 0),
+      did: proposals.length
+        ? proposals.map((p) => `${p.action}${p.field ? ` (${p.field})` : ''} evidence=${p.evidence.length} "${short(p.text, 160)}"`).join('; ') + (bad.length ? `; bad=${bad.map((p) => p.id).join(',')}` : '')
+        : 'no proposals (no_change)',
+    });
+    const persona = store.personas.get(s.persona.id)!;
+    steps.push({
+      step: 'L4 persona unchanged until the user decides', calls: 0,
+      pass: persona.version === 1 && repos.adjustments.list({ personaId: persona.id }).length === 0,
+      did: `version=${persona.version} adjustments=${repos.adjustments.list({ personaId: persona.id }).length}`,
+    });
+    for (const c of bus.filter((x) => !x.ok)) confusion.push(`${c.tool} failed: ${short(c.error ?? '', 160)}`);
+    return {
+      name, pass: steps.every((x) => x.pass), seconds: (Date.now() - started) / 1000, steps, usage: usageOf(booted, runIds), toolCalls, confusion,
+      detail: `retro=${retro?.status ?? 'none'}; learning run=${run?.status ?? 'none'}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - started) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls, confusion };
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows'].includes(args[0] ?? '') ? args.shift()! : 'all';
+  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning'].includes(args[0] ?? '') ? args.shift()! : 'all';
   const only = args.filter((a): a is ProviderId => (PROVIDERS as string[]).includes(a));
   const providers = only.length ? only : PROVIDERS;
   const results: Result[] = [];
@@ -915,6 +1073,21 @@ async function main() {
       for (const p of providers) {
         console.log(`[smoke] flows ${p} (${MODELS[p]}) …`);
         const r = await flowsSmoke(p, booted);
+        printKnowledge(r);
+        results.push(r);
+      }
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'persona-learning') {
+    const { booted, dir } = await startServer('persona-learning');
+    try {
+      for (const p of only.length ? only : (['claude'] as ProviderId[])) {
+        console.log(`[smoke] persona-learning ${p} (${MODELS[p]}) …`);
+        const r = await personaLearningSmoke(p, booted);
         printKnowledge(r);
         results.push(r);
       }

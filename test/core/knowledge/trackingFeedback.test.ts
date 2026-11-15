@@ -60,6 +60,9 @@ const EXCLUDED: Record<string, string> = {
   flow_type_decision: 'flow type decision; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
   checklist_decision: 'checklist decision; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
   review_attribution_correction: 'review mention attribution; covered in test/api/flowRoutes.test.ts',
+  persona_learning_accept: 'persona learning proposal decision; covered in test/api/personaLearningRoutes.test.ts (persona learning task 5)',
+  persona_learning_reject: 'persona learning proposal decision; covered in test/api/personaLearningRoutes.test.ts (persona learning task 5)',
+  persona_adjustment_retire: 'persona adjustment retirement; covered in test/api/personaLearningRoutes.test.ts (persona learning task 5)',
 };
 
 describe('human knowledge actions write feedback events with the configured actor (KS-6)', () => {

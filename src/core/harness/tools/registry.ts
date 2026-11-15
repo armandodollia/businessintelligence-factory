@@ -43,6 +43,8 @@ export const TOOL_NAMES = [
   'list_changes',
   // Learning loop WP-E: the retro agent's proposals
   'submit_retro',
+  // Persona learning: the learning run's proposed persona adjustments
+  'submit_persona_learning',
   // Flow ranking: a persona's head-to-head verdicts
   'submit_flow_verdicts',
   // Flow records: the worker tools (flows/tools.ts)
@@ -80,6 +82,8 @@ export const ROLE_TOOLS: Record<Role, ToolName[]> = {
   // Learning loop WP-E: the retro agent reads only its digest (no read tools) and submits proposals.
   retro: ['log_decision', 'submit_retro'],
 };
+// Persona learning (design 2026-11-15 §7): the learning run is a retro-role run.
+ROLE_TOOLS.retro.push('submit_persona_learning');
 
 // --- Knowledge store KS-1: describe_artifact (design §9) ------------------------------------------
 for (const role of ['worker', 'orchestrator', 'interviewer', 'synthesizer'] as const) ROLE_TOOLS[role].push('describe_artifact');
@@ -640,6 +644,29 @@ export const toolInputSchemas = {
       .max(10)
       .describe('Proposals for the user (each one is accepted or rejected separately); an empty list when nothing is needed'),
   }),
+  // Persona learning (design 2026-11-15 §7 step 5): one answer per learning run; the handler checks the rules.
+  submit_persona_learning: z.object({
+    persona_id: id.describe('The persona id given in your prompt'),
+    assumption: z.string().min(1).max(600).describe('How the persona misjudges, in plain words (one or two sentences)'),
+    proposals: z
+      .array(
+        z.object({
+          action: z.enum(['add', 'replace', 'retire']).describe('add: a new adjustment; replace: new text for an active one; retire: end an active one'),
+          adjustment_id: id.optional().describe('replace, retire: the id of the active adjustment'),
+          field: z.enum(PERSONA_FIELDS).optional().describe('The profile field it corrects, when one fits'),
+          text: z
+            .string()
+            .min(1)
+            .max(400)
+            .optional()
+            .describe('add, replace: the adjustment, in the second person, as a general statement (never quote a reason or detail)'),
+          why: z.string().min(1).max(400).describe('Why: what the reactions show'),
+          evidence: z.array(id).max(20).describe('Reaction ids shown in your prompt that support it'),
+        }),
+      )
+      .max(5)
+      .describe('Proposed adjustments (each one is accepted or rejected by the user); an empty list when the reactions do not point one way'),
+  }),
   // Knowledge store KS-1 (design §8.1, §9)
   describe_artifact: z.object({
     artifact_id: id,
@@ -749,6 +776,8 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Ask the user 0–3 multiple-choice questions (2–4 options each, one recommended) about a task that ended unverified or failed. Call once.',
   submit_retro:
     'Submit the retro: a short summary and 0–N proposals (prompt rule or calibration note for one role), each citing digest ids. Call once.',
+  submit_persona_learning:
+    'Submit the persona learning run: one assumption about how the persona misjudges and 0–N proposed adjustments (add, replace, retire), each citing reaction ids shown in your prompt. Call once.',
   // Knowledge store KS-1
   describe_artifact:
     'Add a description to an artifact that has none (e.g. an uploaded image), or replace the description of one you saved in this run.',

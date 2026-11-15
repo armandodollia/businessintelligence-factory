@@ -1,5 +1,8 @@
 import { shortDate } from '../logic/format.js';
+import { usePersonaLearning } from '../logic/hooks.js';
 import { ACTION_LABELS, acceptEffect, effectVerdict, pctText, useLessons, type LessonProposal } from '../logic/lessons.js';
+import { waitingText } from '../logic/personaLearning.js';
+import { workspaceHref } from '../logic/router.js';
 
 /**
  * Learning loop WP-E: lessons of this business tree. Proposals (rules from recurring signals, edits from
@@ -8,6 +11,7 @@ import { ACTION_LABELS, acceptEffect, effectVerdict, pctText, useLessons, type L
  */
 export function Lessons({ wsId }: { wsId: string }) {
   const l = useLessons(wsId);
+  const personaLearning = usePersonaLearning(wsId);
   const s = l.page?.settings;
   return (
     <div>
@@ -38,6 +42,11 @@ export function Lessons({ wsId }: { wsId: string }) {
 
       <section>
         <h3>Waiting for you ({l.pending.length})</h3>
+        {personaLearning.pending > 0 && (
+          <p>
+            <a href={workspaceHref(wsId, 'personas')}>{waitingText(personaLearning.pending)}</a> on Audience &amp; Personas.
+          </p>
+        )}
         {l.page && l.pending.length === 0 && <p className="muted">No proposals.</p>}
         {l.pending.map((p) => (
           <Proposal key={p.id} p={p} l={l} />

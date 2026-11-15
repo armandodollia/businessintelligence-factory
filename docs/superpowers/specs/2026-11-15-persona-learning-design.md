@@ -134,7 +134,9 @@ Module `src/core/personas/learn.ts`. `runPersonaLearning(deps, rootWorkspaceId, 
 1. For every usable persona in the tree, compute the gate.
 2. Engine step (no agent): for each active adjustment with at least `minEffectSignals` (default 6)
    signals since it became active, compare the disagreement rate since then with the rate recorded
-   when it was proposed. Not lower: create a pending `retire` proposal (source `engine`) unless one is
+   when it was proposed. Only reactions to output of the persona version that carries the adjustment
+   count (a reaction to older output says nothing about the adjustment). A retire the user rejected is
+   not proposed again until the adjustment changes. Not lower: create a pending `retire` proposal (source `engine`) unless one is
    already pending for it.
 3. Take the qualifying personas, most disagreements first, at most `maxPersonasPerRetro` (default 5).
    A persona with pending proposals is skipped (the user has not answered the last round).
@@ -172,7 +174,9 @@ Module `src/core/personas/learn.ts`. `runPersonaLearning(deps, rootWorkspaceId, 
    shown upload-derived text (`runIsUploadExposed`). Text is redacted and cut (`servedLine`). Zero
    proposals is a valid answer (`no_change`).
 6. The run is recorded in `persona_learning_runs` with the gate numbers, the assumption, and
-   `signalsThrough = now`. A run that fails or ends without the tool call is `failed` and consumes nothing.
+   `signalsThrough` = the time of the newest signal it was shown. A run that fails or ends without the tool call is `failed` and consumes nothing.
+   When the signals do not fit the prompt, the oldest are shown and the newer ones wait for the next retro; the persona's
+   own description takes at most half of the prompt.
 
 A learning failure never fails the retro.
 
@@ -258,7 +262,7 @@ Ids from another business tree answer 404.
 On the Personas page, each persona card gains "What the tool has learned":
 
 ```
-Reactions since the last change: 9 (4 agree, 5 disagree) on 6 different things.
+Reactions not yet used by a retro: 9 (4 agree, 5 disagree) on 6 different things.
 Not enough for a change yet: disagreement not clearly above 30%.
 
 Assumption (retro of 16 Nov): this persona overrates short sign-up forms; you preferred

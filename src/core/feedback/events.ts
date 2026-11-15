@@ -99,6 +99,14 @@ export const FEEDBACK_KINDS = [
   /** The user changed a review mention's flow type / check (target type `review_mention`). */
   'review_attribution_correction',
   // --- end flow records and ranking ---
+  // --- persona learning (design 2026-11-15-persona-learning-design.md) ---
+  /** The user accepted a persona proposal, possibly edited (target type `persona_proposal`). */
+  'persona_learning_accept',
+  /** The user rejected a persona proposal (target type `persona_proposal`). */
+  'persona_learning_reject',
+  /** The user retired an active persona adjustment (target type `persona_adjustment`). */
+  'persona_adjustment_retire',
+  // --- end persona learning ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -133,7 +141,10 @@ export type FeedbackTargetType =
   | 'flow_check'
   | 'flow_type'
   | 'checklist'
-  | 'review_mention';
+  | 'review_mention'
+  // persona learning: a persona proposal (accept / reject), a persona adjustment (retire)
+  | 'persona_proposal'
+  | 'persona_adjustment';
 
 export interface FeedbackEvent {
   id: string;

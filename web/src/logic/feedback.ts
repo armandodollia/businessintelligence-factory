@@ -47,6 +47,10 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   flow_type_decision: 'flow type decision',
   checklist_decision: 'checklist decision',
   review_attribution_correction: 'review attribution corrected',
+  // persona learning
+  persona_learning_accept: 'persona proposal accepted',
+  persona_learning_reject: 'persona proposal rejected',
+  persona_adjustment_retire: 'persona adjustment retired',
 };
 
 const short = (v: unknown, max = 80): string => {

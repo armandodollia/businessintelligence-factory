@@ -371,9 +371,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
     the export rules below, and persona verdicts are never exported as training data. API under
     `/api/workspaces/:id/flows` (`types`, `rankings/:flowTypeId`, `checklists`, `compare`, `:flowId`,
     and the reaction, override, decision and `checklists/:checklistId/edit` routes).
-  - *Not built yet.* Nothing learns from these reactions yet: personas never change here (persona
-    learning in the retro is a later project), there are no stakeholder personas, and only web flows
-    are walked, not mobile apps.
+  - *Not built yet.* Personas change only through persona learning in the weekly retro (below), never
+    at the moment you react; there are no stakeholder personas, and only web flows are walked, not
+    mobile apps.
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.
@@ -485,6 +485,48 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   reviewer audits) carry a stored lessons-off flag, so they keep it after a restart, and they feed no
   lessons either: their outcomes, ratings, feedback, failures and denials are not signals (reviewer
   audit misses count once, as described below).
+- **Persona learning.** Your reactions to what a simulated persona says teach that persona to judge
+  more like the audience you know, in the weekly retro only and only with your approval.
+  - *What counts as a signal.* Every reaction to one persona's own output, agreeing or disagreeing:
+    your agree / disagree on one of its flow verdicts; your ruling on a pair it judged (the persona's
+    winner against yours; a tie disagrees; an explicit reaction to the same verdict wins over the
+    ruling); your ratings of its panel feedback on a recommendation (appeal, adoption, willingness to
+    pay, friction) and of its profile fields; and including or leaving out the persona. The latest
+    reaction per thing counts, with the reason you typed. Reactions to a ranking position do not count
+    (a position mixes the checklist, every persona and your overrides). Signals are read from the
+    feedback log; nothing new is stored for them.
+  - *The gate.* At the retro, each persona's open reactions (since its last learning run, at most
+    `windowDays` old) are counted. A persona qualifies for a change only with at least 6 reactions
+    (`minSignals`), on at least 4 different things (`minDistinctItems`), and disagreement clearly above
+    30% (`disagreeFloor`: the lower end of the 95% Wilson interval of the disagreement rate). So 5 of 6
+    qualifies, 4 of 6 does not, 5 of 8 does, 10 of 20 does not. Agreements count against a change. A
+    persona that does not qualify shows what is missing ("4 of 6 reactions", "3 of 4 different
+    things", "disagreement not clearly above 30%").
+  - *What the retro does.* For each qualifying persona (most disagreements first, at most 5 per retro;
+    a persona whose last proposals still wait for you is skipped), one `retro`-role run states its
+    assumption (how the persona misjudges) and proposes at most 3 adjustments: add, replace or retire
+    a short second-person correction, each resting on at least 3 of the reactions it was shown (2
+    different things, 2 disagreements). The run is shown no upload-derived text; if it was, its
+    proposals are refused. An engine step also proposes retiring an adjustment whose disagreement did
+    not drop after 6 more reactions. A failed learning run never fails the retro and consumes nothing.
+  - *Changes wait for you.* Proposals appear under "What the tool has learned" on each persona card
+    (the **Lessons** page counts those waiting in the whole business). Accept (optionally with your
+    edited text, at most 400 characters), reject, or retire an active adjustment, each with an
+    optional reason; each is a feedback event and a Decision. Only an accept changes the persona: a new
+    persona version whose agent.md gains "Corrections from people who know your segment" with a
+    marker (`[A-3F9C21.v2]`), so its flow verdicts stop being live and are judged again in the next
+    ranking round, and its panel feedback is replaced at the next panel. Research that saves the
+    persona again keeps its adjustments. Each card shows each adjustment's disagreement before and
+    since. Everything stays inside its business tree; learning proposals and their decisions follow the
+    training export's treatment of lesson proposals (their Decisions join only ratings of themselves).
+  - *Settings* (`personaLearning`, all optional): `enabled` (true), `minSignals` (6),
+    `minDistinctItems` (4), `disagreeFloor` (0.3), `windowDays` (180), `maxPersonasPerRetro` (5),
+    `maxProposalsPerPersona` (3), `minEvidence` (3), `maxAdjustments` (8 per persona),
+    `minEffectSignals` (6), `model` (default: the retro model). Learning runs only when lessons and the
+    retro are on.
+  - API: `GET /api/workspaces/:id/persona-learning`, `GET …/personas/:personaId/signals`,
+    `POST …/persona-proposals/:proposalId/accept` (`{text?, reason?}`), `POST …/persona-proposals/:proposalId/reject`
+    and `POST …/persona-adjustments/:adjustmentId/retire` (`{reason?}`).
 - **Reviewer audits and experiments (learning loop WP-F).** *Audits:* a different model (another
   enabled provider than the original reviewer when there is one; `audit.model` in config overrides)
   re-reviews the N most recently verified tasks of one business tree that were not audited yet, with
@@ -556,6 +598,10 @@ of that business tree — another company's prompts never see them. Nothing is w
   notes (no browser) with `read_flow_catalog`, `save_flow` and `save_flow_checks`, then the real
   ranking round runs with that provider as the persona over two seeded flows. Both are judged from
   the store.
+- the **persona learning smoke** (`persona-learning`, default claude, only when named): six
+  reactions (five disagree) to a seeded persona's verdicts, then the real retro with that provider as
+  the learning model; it checks one `submit_persona_learning` call and the stored run and proposals,
+  and that the persona did not change.
 
 It then does an interview round-trip over HTTP with the claude CLI as interviewer.
 
@@ -576,7 +622,7 @@ Each step is judged from the store and the run's tool calls. The check covers:
 - a replay of the paged reads, which checks that every passage was served whole;
 - tokens and cost from `agent_usage`.
 
-Run one part with `worker`, `browser`, `knowledge`, `flows` or `interview`, optionally followed by providers
+Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning` or `interview`, optionally followed by providers
 (`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
 and `BIF_SMOKE_OPENCODE_MODEL`, the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
 smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).

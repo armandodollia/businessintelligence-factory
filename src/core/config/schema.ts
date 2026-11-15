@@ -399,6 +399,37 @@ export const FLOWS_DEFAULTS = {
 } as const;
 // --- end flows config ----------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Persona learning (design 2026-11-15-persona-learning-design.md §12): the user's reactions to
+// simulated personas become proposed persona adjustments in the weekly retro. Optional; read it
+// through `personaLearningSettings` (src/core/personas/settings.ts), which applies the defaults.
+
+export const personaLearningConfigSchema = z.strictObject({
+  /** Persona learning in the retro (default true). */
+  enabled: z.boolean().optional(),
+  /** Signals a persona needs before the retro looks at it (default 6). */
+  minSignals: z.number().int().min(1).optional(),
+  /** Distinct items those signals must cover (default 4). */
+  minDistinctItems: z.number().int().min(1).optional(),
+  /** Lower bound of the disagree rate a persona must reach (default 0.3). */
+  disagreeFloor: z.number().min(0).max(1).optional(),
+  /** Days of signals read (default 180). */
+  windowDays: z.number().int().min(1).optional(),
+  /** Personas one retro may look at (default 5). */
+  maxPersonasPerRetro: z.number().int().min(1).optional(),
+  /** Proposals per persona and retro (default 3). */
+  maxProposalsPerPersona: z.number().int().min(0).max(5).optional(),
+  /** Signals a proposal must cite (default 3). */
+  minEvidence: z.number().int().min(1).optional(),
+  /** Active adjustments per persona (default 8). */
+  maxAdjustments: z.number().int().min(1).max(20).optional(),
+  /** Signals under an adjustment before its effect is judged (default 6). */
+  minEffectSignals: z.number().int().min(1).optional(),
+  /** Model of the persona learning agent (default: the retro model). */
+  model: modelRefSchema.optional(),
+});
+// --- end persona learning config ---------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -479,6 +510,8 @@ export const bifConfigSchema = z
     experiments: experimentsConfigSchema.optional(),
     /** Flow records and flow ranking: thresholds, caps and the verdict model (all defaulted). */
     flows: flowsConfigSchema.optional(),
+    /** Persona learning: gates, caps and the model (all defaulted). */
+    personaLearning: personaLearningConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -505,6 +538,7 @@ export const bifConfigSchema = z
     check(cfg.lessons?.retro?.model, ['lessons', 'retro', 'model']); // learning loop WP-E
     check(cfg.audit?.model, ['audit', 'model']); // WP-F
     check(cfg.flows?.model, ['flows', 'model']); // flow ranking
+    check(cfg.personaLearning?.model, ['personaLearning', 'model']); // persona learning
     // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).
     const ex = cfg.knowledge?.extraction;
     if (ex && (ex.chunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.chunkTokens) > (ex.maxChunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.maxChunkTokens)) {

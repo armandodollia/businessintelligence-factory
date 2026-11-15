@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acceptLessonProposalAsUser } from '../../../src/core/feedback/actions.js';
 import { listFeedback, recordFeedback } from '../../../src/core/feedback/events.js';
@@ -11,6 +12,10 @@ import { promptStoreGaps } from '../../../src/core/prompts/store.js';
 import { workerSystemPrompt } from '../../../src/core/research/systemPrompts.js';
 import { calibrationScope } from '../../../src/core/scoring/calibration.js';
 import { startScheduler } from '../../../src/core/scheduler/scheduler.js';
+import { personaLearningRepos } from '../../../src/core/personas/store.js';
+import type { AgentRequest } from '../../../src/core/research/deps.js';
+import { PERSONA_FIELDS } from '../../../src/core/scoring/criteria.js';
+import { rateCriterion } from '../../../src/core/scoring/ratings.js';
 import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
 import { lessonsHarness, lessonsSetup } from './fixture.js';
@@ -40,6 +45,29 @@ function history(t: T) {
 }
 
 const nowAfter = (t: T) => new Date(Date.parse(t.at()) + 1);
+
+/** A verified persona in tree A with `n` disagreeing profile ratings, each on its own field (qualifies for learning). */
+function qualifyingPersona(t: T, n = 6) {
+  const profile = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, { value: `${f} value`, confidence: 0.7, evidence: [] }]));
+  const p = t.store.personas.insert({
+    id: 'per_smb', workspaceId: t.a.id, slug: 'smb', segment: 'smb segment', profile, version: 1, status: 'verified', agentMdPath: join(t.dir, 'smb.md'),
+  });
+  for (const criterion of PERSONA_FIELDS.slice(0, n)) {
+    t.at();
+    rateCriterion({ workspaceId: t.a.id, targetType: 'persona', targetId: p.id, criterion, verdict: 'disagree', userValue: 0.2 }, t);
+  }
+  return p;
+}
+const isLearning = (req: AgentRequest) => req.prompt.startsWith('# Persona learning');
+/** Persona learning answer: one add on the first three reactions shown, or none. */
+const learn = (req: AgentRequest, propose = true) => async (tc: { call(name: string, input: unknown): Promise<unknown> }) => {
+  const ids = [...req.prompt.matchAll(/^- (\S+) disagree\b/gm)].map((m) => m[1]!).slice(0, 3);
+  await tc.call('submit_persona_learning', {
+    persona_id: 'per_smb', assumption: 'Overrates its confidence.',
+    proposals: propose ? [{ action: 'add', text: 'You are less sure of your profile than you think.', why: 'w', evidence: ids }] : [],
+  });
+};
+const PERSONA_COUNTS = ['personasEvaluated', 'personasQualified', 'personaLearningRuns', 'personaProposals'];
 
 describe('weekly retro', () => {
   it('digest: fixed budget, redacted then cut, fenced, no upload-derived text; logged as a read before the run starts', async () => {
@@ -88,7 +116,7 @@ describe('weekly retro', () => {
     // The lessons engine ran first: its add proposal is pending too.
     expect(lessonRepos(t.store).proposals.list({ rootWorkspaceId: t.a.id, source: 'engine' })).toHaveLength(1);
     // Retro role sees only its own tools; the run's prompt resolves in the prompt store.
-    expect(ROLE_TOOLS.retro).toEqual(['log_decision', 'submit_retro']);
+    expect(ROLE_TOOLS.retro).toEqual(['log_decision', 'submit_retro', 'submit_persona_learning']);
     expect(promptStoreGaps(t.store)).toEqual([]);
   });
 
@@ -181,6 +209,47 @@ describe('weekly retro', () => {
     const digest = retroDigest({ store: t.store, config: t.config }, t.b.id, { since: '2000-01-01T00:00:00Z', until: nowAfter(t).toISOString() });
     expect(digest.active).toBe(false);
     expect(digest.briefing.section).not.toMatch(/tsk_/);
+  });
+});
+
+describe('persona learning in the retro', () => {
+  it('runs after the lessons engine and stores its four counts in the retro digest', async () => {
+    const t = lessonsSetup(opened);
+    history(t);
+    qualifyingPersona(t);
+    const h = harness(t, (req) =>
+      req.kind !== 'retro' ? undefined : isLearning(req) ? learn(req) : async (tc) => void (await tc.call('submit_retro', { summary: 'ok', proposals: [] })),
+    );
+    const retro = (await runRetro(h.deps, t.a.id, { now: nowAfter(t) }))!;
+    expect(retro).toMatchObject({ status: 'done', summary: 'ok' });
+    expect(retro.digest).toMatchObject({ personasEvaluated: 1, personasQualified: 1, personaLearningRuns: 1, personaProposals: 1 });
+    expect(lessonRepos(t.store).retros.get(retro.id)!.digest).toMatchObject({ personaLearningRuns: 1 });
+    expect(personaLearningRepos(t.store).runs.list({ retroId: retro.id })).toEqual([expect.objectContaining({ status: 'proposed', personaId: 'per_smb' })]);
+    expect(h.requests.map((r) => isLearning(r))).toEqual([true, false]);
+  });
+
+  it('stores the counts for a skipped retro too', async () => {
+    const t = lessonsSetup(opened);
+    qualifyingPersona(t); // reactions older than the retro window: the period itself is empty
+    const h = harness(t, (req) => (isLearning(req) ? learn(req, false) : undefined));
+    const now = new Date(Date.parse(t.at()) + 10 * 86_400_000);
+    const retro = (await runRetro(h.deps, t.a.id, { now }))!;
+    expect(retro.status).toBe('skipped');
+    expect(retro.digest).toMatchObject({ personasEvaluated: 1, personasQualified: 1, personaLearningRuns: 1, personaProposals: 0 });
+    expect(h.requests.filter((r) => !isLearning(r))).toEqual([]);
+  });
+
+  it('a throw inside persona learning leaves the retro result unchanged', async () => {
+    const t = lessonsSetup(opened);
+    history(t);
+    qualifyingPersona(t);
+    t.store.db.exec('DROP TABLE persona_learning_runs');
+    const h = harness(t, (req) => (isLearning(req) ? learn(req) : async (tc) => void (await tc.call('submit_retro', { summary: 'ok', proposals: [] }))));
+    const retro = (await runRetro(h.deps, t.a.id, { now: nowAfter(t) }))!;
+    expect(retro).toMatchObject({ status: 'done', summary: 'ok' });
+    for (const k of PERSONA_COUNTS) expect(retro.digest).not.toHaveProperty(k);
+    expect(retro.digest).toHaveProperty('tasks', 3);
+    expect(h.requests.filter((r) => isLearning(r))).toEqual([]);
   });
 });
 

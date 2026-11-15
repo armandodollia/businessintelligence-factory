@@ -16,6 +16,7 @@ const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId',
 
 /** The primary subject id a (non-persona_feedback) decision judges, if its payload names one. */
 function primarySubject(d: Decision): string | undefined {
+  if (isPersonaLearningRecord(d)) return undefined;
   const p = (d.payload ?? {}) as Record<string, unknown>;
   for (const k of PRIMARY_KEYS) if (typeof p[k] === 'string') return p[k] as string;
   return undefined;
@@ -33,6 +34,18 @@ function outputOf(store: Store, id: string): { status?: string | undefined } | u
     store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id) ?? store.competitors.get(id) ??
     store.symptomHypotheses.get(id) ?? flowRepos(store).flows.get(id)
   );
+}
+
+/**
+ * Persona learning records (persona learning design §15): a learning run's `submit_persona_learning` and
+ * the user's accept / reject / retire (`persona_learning`). Treated as lesson proposals' decisions are: a
+ * line of their own that joins only ratings of itself, never a judgment of the persona their payload
+ * names (no primary subject), under the same upload rule as any decision. The proposal and adjustment
+ * rows are not lines; their feedback events are `feedback_event` lines.
+ */
+function isPersonaLearningRecord(d: Decision): boolean {
+  const tool = (d.payload as { tool?: unknown } | null)?.tool;
+  return tool === 'persona_learning' || tool === 'submit_persona_learning';
 }
 
 /**
@@ -160,6 +173,8 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  * - a decision with a primary subject (`findingId` / `symptomId` / `recommendationId` /
  *   `personaId` in its payload) joins that subject's ratings made while it was the latest judgment
  *   of the subject (`judgmentFor`);
+ * - a persona learning record (`isPersonaLearningRecord`) joins only ratings of itself, like a lesson
+ *   decision;
  * - any other decision joins ratings of its refs.
  * Decisions referencing an internal upload — directly or via the evidence of a referenced item
  * (`expandedRefs`) — are excluded unless `includeUploads`. Flow ranking records (`isFlowRankingRecord`:
@@ -229,7 +244,7 @@ export function exportTrainingDataWithSummary(
       const refs = new Set(decision.refs);
       joined = ratings.filter((r) => {
         if (self(r)) return true;
-        if (r.targetType === 'persona_feedback' || r.targetType === 'decision') return false;
+        if (r.targetType === 'persona_feedback' || r.targetType === 'decision' || isPersonaLearningRecord(decision)) return false;
         if (subject) return r.targetId === subject && judgmentFor(judgments, r)?.id === decision.id;
         return refs.has(r.targetId);
       });

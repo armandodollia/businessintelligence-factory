@@ -54,6 +54,7 @@ import { recordLessonsPromptVersions } from '../core/learning/lessons/switch.js'
 import { mountWpfRoutes } from './experimentRoutes.js'; // learning loop WP-F
 import { mountMetricsRoutes } from './metricsRoutes.js'; // learning loop WP-G
 import { mountFlowRoutes } from './flowRoutes.js'; // flow records and ranking
+import { mountPersonaLearningRoutes } from './personaLearningRoutes.js'; // persona learning
 
 export type AppDeps = {
   store: Store;
@@ -728,6 +729,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- flow records and ranking: flow types, rankings, flows, reactions, overrides, decisions -----
   mountFlowRoutes(app, { store, config, artifacts }, workspace);
   // --- end flow records and ranking ------------------------------------------------------------
+  // --- persona learning: gate, adjustments, proposals, signals, the user's decisions -------------
+  mountPersonaLearningRoutes(app, { store, config }, workspace);
+  // --- end persona learning --------------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

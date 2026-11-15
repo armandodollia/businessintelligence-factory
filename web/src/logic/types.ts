@@ -529,3 +529,36 @@ export type ChecklistEditInput = { coverage?: number; items: ChecklistItemEdit[]
 /** `POST .../flows/checklists/:checklistId/decision`. */
 export type ChecklistDecisionInput = { action: 'accept'; coverage?: number } | { action: 'reject' };
 export type FlowReaction = 'agree' | 'disagree';
+
+// ---------------------------------------------------------------------------
+// Persona learning: the "What the tool has learned" block (`src/api/personaLearningRoutes.ts` shapes)
+
+export type {
+  GateResult,
+  GateStats,
+  PersonaAdjustment,
+  PersonaLearningRun,
+  PersonaProposal,
+  PersonaSignal,
+} from '../../../src/core/personas/types.js';
+type CoreGateStats = import('../../../src/core/personas/types.js').GateStats;
+/** Gate numbers when the adjustment was proposed (`before`) and of the persona's signals since it last changed. */
+export type AdjustmentEffect = { before: Partial<CoreGateStats>; since: CoreGateStats };
+/** One persona of the node in `GET .../persona-learning`. */
+export interface PersonaLearningEntry {
+  personaId: string;
+  segment: string;
+  version: number;
+  gate: import('../../../src/core/personas/types.js').GateResult;
+  adjustments: Array<import('../../../src/core/personas/types.js').PersonaAdjustment & { effect: AdjustmentEffect }>;
+  /** Pending first, then decided, newest first, at most 20. */
+  proposals: import('../../../src/core/personas/types.js').PersonaProposal[];
+  lastRun?: Pick<import('../../../src/core/personas/types.js').PersonaLearningRun, 'id' | 'status' | 'assumption' | 'createdAt' | 'stats'>;
+}
+/** `GET .../persona-learning`. */
+export interface PersonaLearningView {
+  enabled: boolean;
+  personas: PersonaLearningEntry[];
+  /** Pending persona proposals in the whole business tree (the Lessons page count). */
+  pendingInTree?: number;
+}

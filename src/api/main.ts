@@ -36,6 +36,7 @@ import { configuredOcrReader, type OcrReader } from '../core/knowledge/ocr/haiku
 import { OcrQueue } from '../core/knowledge/ocr/worker.js';
 import { backfillEntityLinks } from '../core/knowledge/entityLinks.js'; // knowledge store KS-3
 import { retroToolHandlers } from '../core/learning/lessons/retro.js'; // learning loop WP-E
+import { personaLearningToolHandlers } from '../core/personas/learn.js'; // persona learning
 import { recordLessonsPromptVersions } from '../core/learning/lessons/switch.js'; // ruling R1
 import { recoverExperiments } from '../core/learning/experiments.js'; // learning loop WP-F
 
@@ -124,6 +125,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...marketToolHandlers({ dataDir }),
       ...escalationToolHandlers(), // WP-D
       ...retroToolHandlers(), // learning loop WP-E
+      ...personaLearningToolHandlers(), // persona learning (retro role)
       ...flowRoundToolHandlers(), // flow ranking: persona verdicts
       ...flowToolHandlers(), // flow records: worker tools
     },

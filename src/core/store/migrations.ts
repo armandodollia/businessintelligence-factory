@@ -1461,4 +1461,77 @@ export const MIGRATIONS: readonly string[] = [
     AND NOT EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE value = 'flow_ranking')
   ELSE 0 END;
   `,
+  // 24: persona learning (design 2026-11-15-persona-learning-design.md §11): accepted persona
+  // adjustments (tracking marker, version, status), the proposals the user accepts or rejects (evidence
+  // = signal ids) and one learning run per persona and retro (the signals shown to the agent). Per
+  // business tree (`root_workspace_id`) and persona. JSON columns (named by the Repo field, as in
+  // migration 19): stats, evidence, shown_signal_ids. `persona_version`: the persona version an accepted
+  // add or replace made (reactions to output of older versions do not count toward its effect).
+  // Repositories: `personas/store.ts`.
+  `
+  CREATE TABLE persona_adjustments (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    field TEXT,
+    marker TEXT NOT NULL,
+    text TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    proposal_id TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    stats TEXT NOT NULL DEFAULT '{}',
+    internal INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    changed_at TEXT NOT NULL,
+    ended_at TEXT,
+    persona_version INTEGER
+  );
+  CREATE UNIQUE INDEX persona_adjustments_marker ON persona_adjustments (marker);
+  CREATE INDEX persona_adjustments_persona ON persona_adjustments (root_workspace_id, persona_id);
+
+  CREATE TABLE persona_proposals (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    run_id TEXT,
+    action TEXT NOT NULL,
+    adjustment_id TEXT,
+    field TEXT,
+    text TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '[]',
+    stats TEXT NOT NULL DEFAULT '{}',
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    final_text TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    actor TEXT,
+    reason TEXT,
+    decision_id TEXT,
+    feedback_event_id TEXT
+  );
+  CREATE INDEX persona_proposals_persona ON persona_proposals (root_workspace_id, persona_id);
+
+  CREATE TABLE persona_learning_runs (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    retro_id TEXT,
+    status TEXT NOT NULL,
+    signals_through TEXT NOT NULL,
+    shown_signal_ids TEXT NOT NULL DEFAULT '[]',
+    stats TEXT NOT NULL DEFAULT '{}',
+    assumption TEXT,
+    agent_run_id TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    ended_at TEXT
+  );
+  CREATE INDEX persona_learning_runs_persona ON persona_learning_runs (root_workspace_id, persona_id);
+  `,
 ];

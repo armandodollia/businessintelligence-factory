@@ -1,11 +1,13 @@
-import { usePersonas } from '../logic/hooks.js';
+import { usePersonaLearning, usePersonas } from '../logic/hooks.js';
 import { CriterionRating } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
 import { LastReviewNote } from './LastReviewNote.js';
+import { Learning } from './personas/Learning.js';
 
 export function Personas({ wsId }: { wsId: string }) {
   const ps = usePersonas(wsId);
   const { personas, loading, error } = ps;
+  const learning = usePersonaLearning(wsId);
   return (
     <div>
       <h2>Audience & Personas</h2>
@@ -14,6 +16,9 @@ export function Personas({ wsId }: { wsId: string }) {
       </p>
       {error && <div className="error">{error}</div>}
       {ps.actionError && <div className="error">{ps.actionError}</div>}
+      {learning.view && !learning.view.enabled && <p className="small muted">Persona learning is off (config personaLearning.enabled).</p>}
+      {learning.actionError && <div className="error">{learning.actionError}</div>}
+      {learning.signalError && <div className="error">{learning.signalError}</div>}
       {loading && <div className="muted">loading…</div>}
       {!loading && personas.length === 0 && <p className="muted">No personas yet — run research.</p>}
       {personas.map((p) => (
@@ -74,6 +79,7 @@ export function Personas({ wsId }: { wsId: string }) {
               ))}
             </tbody>
           </table>
+          <Learning personaId={p.id} l={learning} />
         </div>
       ))}
     </div>

@@ -3,9 +3,10 @@
  * live here; views render what these return and call the returned actions.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, api, artifactUrl, exportUrl, flowsApi } from './api.js';
+import { ApiError, api, artifactUrl, exportUrl, flowsApi, personaLearningApi } from './api.js';
 import { plural } from './flows.js';
 import { exportSummaryView } from './exportSummary.js';
+import { asPersonaLearningView, pendingProposals } from './personaLearning.js';
 import { subscribe } from './sse.js';
 import {
   COMPETITOR_CRITERIA,
@@ -30,6 +31,9 @@ import type {
   ChecklistEditInput,
   FlowReaction,
   FlowTypeDecisionInput,
+  PersonaAdjustment,
+  PersonaProposal,
+  PersonaSignal,
   BusEvent,
   CreateWorkspaceInput,
   Criteria,
@@ -1601,4 +1605,111 @@ export function useFlowChecklists(wsId: string | null | undefined, flowTypeId: s
 export function useFlowCompare(wsId: string | null | undefined, a: string | null | undefined, b: string | null | undefined) {
   const res = useResource(`flowCompare:${wsId ?? ''}:${a ?? ''}:${b ?? ''}`, wsId && a && b ? () => flowsApi.compare(wsId, a, b) : null);
   return { compare: res.data, loading: res.loading, error: res.error };
+}
+
+// ---------------------------------------------------------------------------
+// persona learning: "What the tool has learned" on each persona card
+
+/**
+ * The node's persona learning block: per persona, the gate, active adjustments, proposals and last
+ * run; the user's accept (optionally with edited text) / reject / retire, each with an optional
+ * reason; and a persona's signals, loaded when the user asks to see them (and fetched again after a
+ * decision on that persona, which changes them). Reloads when a task ends or a decision is recorded
+ * (the retro records its proposals with a Decision).
+ */
+export function usePersonaLearning(wsId: string | null | undefined) {
+  const res = useResource(`personaLearning:${wsId ?? ''}`, wsId ? () => personaLearningApi.view(wsId) : null);
+  useBusEvents(wsId, (e) => {
+    if (e.type === 'task_status' || e.type === 'decision') void res.reload();
+  });
+  const action = useAction();
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [signals, setSignals] = useState<Record<string, PersonaSignal[]>>({});
+  const [shown, setShown] = useState<Record<string, boolean>>({});
+  const [signalError, setSignalError] = useState<string | null>(null);
+  const view = asPersonaLearningView(res.data);
+  const reasonOf = (id: string) => reasons[id]?.trim() || undefined;
+
+  /** Fetches a persona's signals again when they are loaded; on a failure drops them, so "show" loads them anew. */
+  const refreshSignals = useCallback(
+    async (personaId: string) => {
+      if (!wsId || !signals[personaId]) return;
+      try {
+        const out = await personaLearningApi.signals(wsId, personaId);
+        setSignals((s) => ({ ...s, [personaId]: out.signals }));
+      } catch (e) {
+        setSignalError(errMsg(e));
+        setSignals(({ [personaId]: _, ...rest }) => rest);
+        setShown((s) => Object.fromEntries(Object.entries(s).filter(([k]) => !k.startsWith(`${personaId}:`))));
+      }
+    },
+    [wsId, signals],
+  );
+
+  const decide = useCallback(
+    async (fn: () => Promise<unknown>, id: string, personaId: string) => {
+      const ok = (await action.run(async () => (await fn(), true))) === true;
+      if (ok) {
+        setReasons((r) => ({ ...r, [id]: '' }));
+        setEdits(({ [id]: _, ...rest }) => rest);
+        await Promise.all([res.reload(), refreshSignals(personaId)]);
+      }
+      return ok;
+    },
+    [action.run, res.reload, refreshSignals],
+  );
+
+  /** Shows or hides a persona's signals; the first show loads them. */
+  const toggleSignals = useCallback(
+    async (key: string, personaId: string) => {
+      const open = !shown[key];
+      setShown((s) => ({ ...s, [key]: open }));
+      if (!open || !wsId || signals[personaId]) return;
+      setSignalError(null);
+      try {
+        const out = await personaLearningApi.signals(wsId, personaId);
+        setSignals((s) => ({ ...s, [personaId]: out.signals }));
+      } catch (e) {
+        setSignalError(errMsg(e));
+        setShown((s) => ({ ...s, [key]: false }));
+      }
+    },
+    [wsId, shown, signals],
+  );
+
+  return {
+    view,
+    entryOf: (personaId: string) => view?.personas.find((p) => p.personaId === personaId),
+    pending: pendingProposals(view),
+    reason: (id: string) => reasons[id] ?? '',
+    setReason: (id: string, v: string) => setReasons((r) => ({ ...r, [id]: v })),
+    /** The user's edit of a proposal's text; `undefined` when not editing. */
+    edit: (id: string): string | undefined => edits[id],
+    startEdit: (p: PersonaProposal) => setEdits((e) => ({ ...e, [p.id]: e[p.id] ?? p.text })),
+    setEdit: (id: string, v: string) => setEdits((e) => ({ ...e, [id]: v })),
+    /** False while the edit box is open but empty or only spaces (Accept is disabled rather than sending the original). */
+    canAccept: (id: string) => edits[id] === undefined || edits[id].trim() !== '',
+    accept: (p: PersonaProposal) => {
+      const edited = edits[p.id]?.trim();
+      if (edited === '') return Promise.resolve(false);
+      const reason = reasonOf(p.id);
+      return wsId
+        ? decide(() => personaLearningApi.accept(wsId, p.id, { ...(edited && edited !== p.text ? { text: edited } : {}), ...(reason ? { reason } : {}) }), p.id, p.personaId)
+        : Promise.resolve(false);
+    },
+    reject: (p: Pick<PersonaProposal, 'id' | 'personaId'>) =>
+      wsId ? decide(() => personaLearningApi.reject(wsId, p.id, reasonOf(p.id)), p.id, p.personaId) : Promise.resolve(false),
+    retire: (a: Pick<PersonaAdjustment, 'id' | 'personaId'>) =>
+      wsId ? decide(() => personaLearningApi.retire(wsId, a.id, reasonOf(a.id)), a.id, a.personaId) : Promise.resolve(false),
+    signalsOf: (personaId: string): PersonaSignal[] | undefined => signals[personaId],
+    signalsShown: (key: string) => shown[key] === true,
+    toggleSignals,
+    signalError,
+    busy: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
 }

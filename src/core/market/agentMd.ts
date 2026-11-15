@@ -1,3 +1,4 @@
+import type { PersonaAdjustment } from '../personas/types.js';
 import { PERSONA_FIELDS, type PersonaField } from '../scoring/criteria.js';
 import type { Persona } from '../types.js';
 
@@ -21,7 +22,22 @@ export const AGENT_MD_HEADINGS: Record<PersonaField, string> = {
 export type AgentMdOptions = {
   /** Name of the workspace scope (company, division or slice) the persona relates to. */
   scopeName?: string;
+  /** The persona's active adjustments, oldest first (persona learning, design §10). */
+  adjustments?: Array<Pick<PersonaAdjustment, 'marker' | 'version' | 'field' | 'text'>>;
 };
+
+/** The "Corrections" section: one bullet per adjustment, `- [<marker>.v<version>] (<field>) <text>`; none without adjustments. */
+function correctionsSection(adjustments: AgentMdOptions['adjustments'] = []): string[] {
+  if (!adjustments.length) return [];
+  return [
+    '',
+    '## Corrections from people who know your segment',
+    '',
+    'Where a correction conflicts with the profile above, the correction wins.',
+    '',
+    ...adjustments.map((a) => `- [${a.marker}.v${a.version}]${a.field ? ` (${a.field})` : ''} ${a.text.replace(/\s+/g, ' ').trim()}`),
+  ];
+}
 
 /** YAML-safe scalar: plain when harmless, double-quoted (JSON string syntax is valid YAML) otherwise. */
 function yamlScalar(s: string): string {
@@ -31,7 +47,8 @@ function yamlScalar(s: string): string {
 /**
  * Compiles a persona profile into a system prompt (`agent.md`) loadable by any configured CLI.
  * Output: YAML frontmatter (`name`, `description`, `version`, `simulated: true`, `audience`), an
- * identity paragraph, one section per `PERSONA_FIELDS` entry, then fixed instructions (stay in
+ * identity paragraph, one section per `PERSONA_FIELDS` entry, the user's corrections (active persona
+ * adjustments; omitted when there are none), then fixed instructions (stay in
  * character, be candid not agreeable, say when something is irrelevant to you). Internal personas
  * are framed as employees / internal users of the scope; external ones as (prospective) customers.
  */
@@ -77,6 +94,8 @@ export function compileAgentMd(persona: Persona, opts: AgentMdOptions = {}): str
     const ev = f.evidence.length ? f.evidence.join(', ') : 'none';
     out.push('', `_Confidence: ${f.confidence} · Evidence: ${ev}_`);
   }
+
+  out.push(...correctionsSection(opts.adjustments));
 
   out.push(
     '',

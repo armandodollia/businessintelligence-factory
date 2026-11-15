@@ -64,6 +64,45 @@ verdict row (pair, persona, stage, reason) and the ranking it produces.
 
 No agent confusion was flagged: no failed tool call, no new artifact saved, no repeated call.
 
+## Persona learning smoke (`feat/persona-learning`, 2026-11-15)
+
+Run on 2026-11-15 with `BIF_SMOKE_TIMEOUT_MS=300000 npm run smoke -- persona-learning claude` (macOS,
+Node 25; claude 2.1.322). One run, claude only (the cheapest model, haiku). Codex and OpenCode were
+not run.
+
+How to run it: `npm run smoke -- persona-learning [providers]` (default `claude`; the mode runs only
+when named, not as part of the default `all`). The script boots the real server and, per provider,
+seeds a workspace with its own company and three fictional competitors, a verified sign-up flow of
+each (2, 3, 5 and 7 fields asked), one verified persona and six of its verdicts on the six pairs (the
+shorter form always wins). The user's reactions: one agree, five disagree, each with a reason about
+the yearly cost mattering more than a short form. It then runs the real retro (`runRetro`) with that
+provider as the persona learning model and the retro model. Judged from the store:
+
+- **L1** exactly one learning run for the persona, `proposed` or `no_change`, its agent run `done`;
+- **L2** exactly one successful `submit_persona_learning` call, its Decision, and a non-empty
+  assumption;
+- **L3** the stored proposals: at most 3, pending, of that run, evidence only among the signals the
+  run was shown, an add or replace with at least 3 evidence ids and at most 400 characters of text;
+- **L4** the persona unchanged (version 1, no adjustment) until the user decides.
+
+| Check | Result | Detail |
+|---|---|---|
+| persona-learning/claude (haiku) | **PASS**, 4 of 4 steps | 24.5 s, 2 bif tool calls (`submit_persona_learning` and the lessons retro's `submit_retro`), $0.0113, `promptStoreGaps` `[]`; gate n=6, 5 disagree, 6 items, 6 signals shown; retro digest `personasEvaluated` 1, `personasQualified` 1, `personaLearningRuns` 1, `personaProposals` 2; run `proposed` |
+| persona-learning/codex, opencode | not run | not attempted |
+
+The assumption it stated: "The persona treats a short sign-up form as the mark of a good flow, when
+this segment judges a sign-up mainly by how clearly it shows the total yearly cost before
+commitment, and it does not mind a lo…" (cut by the script's log). Its two proposals, each citing 3
+reactions:
+
+- add (buying_behavior): "You judge a sign-up by how clearly it states the total yearly cost before
+  you commit, and you give a plan extra credit when it makes the yearly option visible u…" (cut by
+  the script's log);
+- add (pain_points): "You do not count extra form fields against a sign-up when the yearly price is
+  clear; hidden charges and surprises on the invoice are what put you off."
+
+No refused call, no failed tool call.
+
 ## Results (2026-11-12)
 
 | Check | Result | Time | Detail |

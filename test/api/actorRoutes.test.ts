@@ -114,6 +114,10 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/flows/checklists/:checklistId/decision': { test: 'test/api/flowRoutes.test.ts' },
   'POST /api/workspaces/:id/flows/checklists/:checklistId/edit': { test: 'test/api/flowRoutes.test.ts' },
   'POST /api/workspaces/:id/flows/mentions/:mentionId/attribution': { test: 'test/api/flowRoutes.test.ts' },
+  // persona learning
+  'POST /api/workspaces/:id/persona-proposals/:proposalId/accept': { test: 'test/api/personaLearningRoutes.test.ts' },
+  'POST /api/workspaces/:id/persona-proposals/:proposalId/reject': { test: 'test/api/personaLearningRoutes.test.ts' },
+  'POST /api/workspaces/:id/persona-adjustments/:adjustmentId/retire': { test: 'test/api/personaLearningRoutes.test.ts' },
 };
 
 /**

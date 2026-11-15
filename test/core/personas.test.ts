@@ -7,6 +7,8 @@ import type { RunContext } from '../../src/core/harness/tokens.js';
 import { AGENT_MD_HEADINGS, compileAgentMd } from '../../src/core/market/agentMd.js';
 import { panelSummary, personaPanelRunner, runPersonaPanel } from '../../src/core/market/panel.js';
 import { marketToolHandlers } from '../../src/core/market/personas.js';
+import { acceptPersonaProposal } from '../../src/core/personas/adjustments.js';
+import { personaLearningRepos } from '../../src/core/personas/store.js';
 import { startPhase } from '../../src/core/research/orchestrator.js';
 import { PERSONA_FIELDS } from '../../src/core/scoring/criteria.js';
 import type { Store } from '../../src/core/store/db.js';
@@ -142,6 +144,23 @@ describe('save_persona', () => {
     expect(ds.every((d) => d.kind === 'score' && d.refs.includes(data.personaId) && d.refs.includes(t.art))).toBe(true);
   });
 
+  it('a persona saved again keeps its active adjustments in the new agent.md', async () => {
+    const t = setup();
+    const first = await t.handle(ctx(), 'save_persona', personaInput([t.art], { slug: 'smb-finance' }));
+    const { personaId, agentMdPath } = (first as { data: { personaId: string; agentMdPath: string } }).data;
+    const p = personaLearningRepos(t.store).proposals.insert({
+      id: newId('ppr'), rootWorkspaceId: 'ws_a', workspaceId: 'ws_a', personaId, action: 'add', field: 'buying_behavior',
+      text: 'You compare on total yearly cost.', rationale: 'r', evidence: [], stats: {}, source: 'retro', status: 'pending', createdAt: 'now',
+    });
+    const { adjustment } = acceptPersonaProposal(t.store, 'local-user', 'ws_a', p.id);
+    const again = await t.handle(ctx(), 'save_persona', personaInput([t.art], { slug: 'smb-finance' }));
+    expect(again.ok).toBe(true);
+    expect(t.store.personas.get(personaId)!.version).toBe(3);
+    const md = readFileSync(agentMdPath, 'utf8');
+    expect(md).toMatch(/version: 3\n/);
+    expect(md).toContain(`- [${adjustment.marker}.v1] (buying_behavior) You compare on total yearly cost.`);
+  });
+
   it('slug defaults to the slugified segment', async () => {
     const t = setup();
     const r = await t.handle(ctx(), 'save_persona', personaInput([t.art], { segment: 'IT Ops Lead (EU)' }));
@@ -189,6 +208,36 @@ describe('compileAgentMd', () => {
     expect(ext).toMatch(/audience: external/);
     expect(ext).toMatch(/customer/i);
     expect(ext).not.toMatch(/you work (at|in|inside)/i);
+  });
+});
+
+describe('compileAgentMd corrections', () => {
+  const persona: Persona = {
+    id: 'per_1', workspaceId: 'ws_a', slug: 'smb-finance', segment: 'SMB finance lead', version: 3, audience: 'external',
+    agentMdPath: '/x', profile: Object.fromEntries(PERSONA_FIELDS.map((f) => [f, { value: `${f} value`, confidence: 0.7, evidence: ['art_1'] }])),
+  };
+  const heading = '## Corrections from people who know your segment';
+
+  it('puts one bullet per adjustment between the last profile section and the instructions', () => {
+    const md = compileAgentMd(persona, {
+      adjustments: [
+        { marker: 'A-3F9C21', version: 2, field: 'buying_behavior', text: 'You compare on total yearly cost, not the monthly price.' },
+        { marker: 'A-00AB12', version: 1, text: 'You never\nbuy on a first call.' },
+      ],
+    });
+    const at = md.indexOf(heading);
+    expect(at).toBeGreaterThan(md.indexOf(`## ${AGENT_MD_HEADINGS.segment_size_value}`));
+    expect(at).toBeLessThan(md.indexOf('## Instructions'));
+    expect(md.slice(at, md.indexOf('## Instructions'))).toBe(
+      `${heading}\n\nWhere a correction conflicts with the profile above, the correction wins.\n\n` +
+        '- [A-3F9C21.v2] (buying_behavior) You compare on total yearly cost, not the monthly price.\n' +
+        '- [A-00AB12.v1] You never buy on a first call.\n\n',
+    );
+  });
+
+  it('has no corrections section without adjustments', () => {
+    expect(compileAgentMd(persona)).not.toContain(heading);
+    expect(compileAgentMd(persona, { adjustments: [] })).not.toContain('Corrections');
   });
 });
 
