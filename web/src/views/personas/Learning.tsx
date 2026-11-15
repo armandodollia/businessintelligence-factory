@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { shortDate } from '../../logic/format.js';
 import type { usePersonaLearning } from '../../logic/hooks.js';
 import { citedSignals, editable, effectLine, evidenceLine, gateLines, proposalLabel, reactionsLine } from '../../logic/personaLearning.js';
@@ -88,9 +89,41 @@ function Block({ entry, l }: { entry: PersonaLearningEntry; l: L }) {
 }
 
 function Pending({ p, personaId, l }: { p: PersonaProposal; personaId: string; l: L }) {
-  const edit = l.edit(p.id);
   const key = `${personaId}:${p.id}`;
   const signals = l.signalsOf(personaId);
+  return (
+    <ProposalCard p={p} c={l}>
+      <div className="small muted">
+        {evidenceLine(p, signals)}{' '}
+        <button type="button" className="link" onClick={() => void l.toggleSignals(key, personaId)}>
+          {l.signalsShown(key) ? '▾ hide' : '▸ show'}
+        </button>
+      </div>
+      {l.signalsShown(key) && <SignalList signals={signals && citedSignals(p, signals)} />}
+    </ProposalCard>
+  );
+}
+
+/** What a page holding proposals offers for each: its edit box, its reason box, Accept / Edit / Reject. */
+export type ProposalControls = {
+  edit: (id: string) => string | undefined;
+  startEdit: (p: PersonaProposal) => void;
+  setEdit: (id: string, v: string) => void;
+  reason: (id: string) => string;
+  setReason: (id: string, v: string) => void;
+  canAccept: (id: string) => boolean;
+  accept: (p: PersonaProposal) => Promise<boolean>;
+  reject: (p: PersonaProposal) => Promise<boolean>;
+  busy: boolean;
+};
+
+/**
+ * A pending proposal: its action and field, its text (or the edit box), its rationale, `children` (what
+ * it rests on), and a reason box with Accept / Edit / Reject. Every text is rendered as text. Shared by
+ * the persona cards and the You page.
+ */
+export function ProposalCard({ p, c, children }: { p: PersonaProposal; c: ProposalControls; children?: ReactNode }) {
+  const edit = c.edit(p.id);
   return (
     <div className="pending">
       <div>
@@ -103,27 +136,21 @@ function Pending({ p, personaId, l }: { p: PersonaProposal; personaId: string; l
           <b>"{p.text}"</b>
         </div>
       ) : (
-        <textarea aria-label={`text of ${p.id}`} value={edit} maxLength={400} onChange={(e) => l.setEdit(p.id, e.target.value)} />
+        <textarea aria-label={`text of ${p.id}`} value={edit} maxLength={400} onChange={(e) => c.setEdit(p.id, e.target.value)} />
       )}
       {p.rationale && <div className="small">{p.rationale}</div>}
-      <div className="small muted">
-        {evidenceLine(p, signals)}{' '}
-        <button type="button" className="link" onClick={() => void l.toggleSignals(key, personaId)}>
-          {l.signalsShown(key) ? '▾ hide' : '▸ show'}
-        </button>
-      </div>
-      {l.signalsShown(key) && <SignalList signals={signals && citedSignals(p, signals)} />}
+      {children}
       <div className="row">
-        <input aria-label={`reason for ${p.id}`} placeholder="Reason (optional)" value={l.reason(p.id)} onChange={(e) => l.setReason(p.id, e.target.value)} />
-        <button type="button" disabled={l.busy || !l.canAccept(p.id)} onClick={() => void l.accept(p)}>
+        <input aria-label={`reason for ${p.id}`} placeholder="Reason (optional)" value={c.reason(p.id)} onChange={(e) => c.setReason(p.id, e.target.value)} />
+        <button type="button" disabled={c.busy || !c.canAccept(p.id)} onClick={() => void c.accept(p)}>
           Accept
         </button>
         {editable(p) && edit === undefined && (
-          <button type="button" disabled={l.busy} onClick={() => l.startEdit(p)}>
+          <button type="button" disabled={c.busy} onClick={() => c.startEdit(p)}>
             Edit
           </button>
         )}
-        <button type="button" disabled={l.busy} onClick={() => void l.reject(p)}>
+        <button type="button" disabled={c.busy} onClick={() => void c.reject(p)}>
           Reject
         </button>
       </div>

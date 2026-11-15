@@ -10,10 +10,41 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-15-user-persona-design.md` (read it first; section numbers below refer to it). It builds on `docs/superpowers/specs/2026-11-15-persona-learning-design.md`.
 
+## Amendment (2026-11-15): one persona per person per tree
+
+The tool will later be used by several people on one shared store. To avoid rework the user persona is
+keyed by person from the start. Where this section conflicts with a task below, this section holds.
+
+- **Row.** `kind: 'user'`, workspace = the tree root, `subjectId` = the actor id exactly as stored on
+  feedback events (the only place the id is stored for the persona), `subjectKind` unset, slug
+  `user-<first 8 hex characters of sha256(actor id)>`, label and the rest as in Task 1. One row per
+  (tree, actor).
+- **Signatures gain `actor: string`:** `collectInteractions(store, rootWorkspaceId, actor, window?)`,
+  `openInteractions(store, settings, rootWorkspaceId, actor, now)`, `userPersonaOf(store, workspaceId, actor)`,
+  `ensureUserPersona(store, rootWorkspaceId, actor)`, `userLines(store, rootWorkspaceId, actor)`,
+  `userBrief(store, rootWorkspaceId, actor)`, `userLearningPrompt(store, config, rootWorkspaceId, actor, open)`.
+  Interactions are only the feedback events and ratings whose `actor` equals it; a row with no actor
+  counts for the default actor (`actorOf(undefined)`).
+- **Learning.** `runUserPersonaLearning` runs once per actor that has open interactions in the tree, in
+  actor id order, each with its own gate, persona, pending-proposal check and run; the report sums them.
+- **Brief.** Prompt assembly passes `actorOf(config)`. (A later multi-person build will pass the person
+  who started the run; keep the actor an explicit parameter, never read config inside `userBrief`.)
+- **Routes.** They act for `actorOf(config)`. Accepting, rejecting or retiring a proposal or line of
+  another actor's user persona answers 404.
+- **Identifier rule.** Unchanged: the actor id never appears in clear in the slug, label, a line, a
+  prompt or a request to an agent.
+- **Tests added to the tasks:** two actors in one tree get separate personas, interactions, gates,
+  lines and briefs, and neither sees the other's (Tasks 1, 2, 3 and the isolation test of Task 4).
+- **Explicit `kind: 'user'` branches.** `src/core/personas/learn.ts` (fields, prompt header, handler),
+  `writeAgentMd` and `treePersonas` currently branch on "stakeholder, else segment". Add an explicit
+  `user` branch in each; a user persona is never returned by `segmentPersonas` or
+  `stakeholderPersonas` and never reaches a panel, round, read, question or `runPersonaLearning`.
+- **Migrations.** The latest is 27. This build needs none.
+
 ## Global Constraints
 
 - `src/core` never imports from `src/api` or `web`.
-- One user persona per business tree; every read and write is checked against the tree; another tree's id answers 404.
+- One user persona per person per business tree (see the amendment); every read and write is checked against the tree; another tree's id answers 404.
 - Input is the tree's feedback log and ratings only: no interview text, no upload text. A learning run shown upload-derived text has its proposals refused.
 - No identifier of the user (configured user id, name, email address) is stored in the persona, a line, a prompt or a request. Lines say "the person you work for".
 - Nothing changes the persona outside a user decision on a proposal; nothing proposes outside `runRetro`.
@@ -31,6 +62,7 @@
 3. The configured user id contains characters special in regular expressions, or equals a common word: the identifier check still redacts it and nothing else (Task 2 test).
 4. A node below the root asks for the user persona: it gets the tree's persona; accept through a child node's route works (Task 3 test).
 5. `useInPrompts: false`, or no active lines: the three roles' prompts are byte-identical to before this build (Task 2 test).
+6. Two actors act in one tree: each has their own interactions, gate, persona, lines and brief, and a decision on the other's proposal is refused.
 
 ## File Structure
 

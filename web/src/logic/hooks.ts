@@ -3,11 +3,12 @@
  * live here; views render what these return and call the returned actions.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, api, artifactUrl, exportUrl, flowsApi, personaLearningApi, stakeholdersApi } from './api.js';
+import { ApiError, api, artifactUrl, exportUrl, flowsApi, personaLearningApi, stakeholdersApi, userPersonaApi } from './api.js';
 import { plural } from './flows.js';
 import { exportSummaryView } from './exportSummary.js';
 import { asPersonaLearningView, pendingProposals } from './personaLearning.js';
 import { subscribe } from './sse.js';
+import { asUserPersonaView } from './userPersona.js';
 import { answersToSend, asStakeholdersView, isHiddenView, isOpenView } from './stakeholders.js';
 import {
   COMPETITOR_CRITERIA,
@@ -57,6 +58,7 @@ import type {
   TreeNode,
   UnitProposal,
   UnitProposalEdits,
+  UserInteraction,
   UserRequest,
   WorkspaceNode,
 } from './types.js';
@@ -1685,6 +1687,8 @@ export function usePersonaLearning(wsId: string | null | undefined) {
     view,
     entryOf: (personaId: string) => view?.personas.find((p) => p.personaId === personaId),
     pending: pendingProposals(view),
+    /** Of `pending`, the proposals about the person using the tool (the You page). */
+    pendingUser: view?.pendingUser ?? 0,
     reason: (id: string) => reasons[id] ?? '',
     setReason: (id: string, v: string) => setReasons((r) => ({ ...r, [id]: v })),
     /** The user's edit of a proposal's text; `undefined` when not editing. */
@@ -1709,6 +1713,98 @@ export function usePersonaLearning(wsId: string | null | undefined) {
     signalsShown: (key: string) => shown[key] === true,
     toggleSignals,
     signalError,
+    busy: action.busy,
+    actionError: action.error,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// user persona: the You page
+
+/** A user persona line as the evidence cache keys it (a replace bumps the version). */
+type LineRef = { id: string; version: number };
+const lineKey = (line: LineRef) => `${line.id}:${line.version}`;
+
+/**
+ * The You page: how the tool sees the person using it (their user persona of this business tree), the
+ * user's accept (optionally with edited text) / reject / retire with an optional reason (through the
+ * persona learning routes), and the interactions a line rests on, loaded when the user asks to see them.
+ * A reason or edit stays in its box until the request succeeds. Reloads when a decision is recorded.
+ */
+export function useUserPersona(wsId: string | null | undefined) {
+  const res = useResource(`userPersona:${wsId ?? ''}`, wsId ? () => userPersonaApi.view(wsId) : null);
+  useBusEvents(wsId, (e) => {
+    if (e.type === 'decision') void res.reload();
+  });
+  const action = useAction();
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [evidence, setEvidence] = useState<Record<string, UserInteraction[]>>({});
+  const [shown, setShown] = useState<Record<string, boolean>>({});
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const view = asUserPersonaView(res.data);
+  const reasonOf = (id: string) => reasons[id]?.trim() || undefined;
+
+  const decide = useCallback(
+    async (fn: () => Promise<unknown>, id: string) => {
+      const ok = (await action.run(async () => (await fn(), true))) === true;
+      if (ok) {
+        setReasons((r) => ({ ...r, [id]: '' }));
+        setEdits(({ [id]: _, ...rest }) => rest);
+        await res.reload();
+      }
+      return ok;
+    },
+    [action.run, res.reload],
+  );
+
+  /**
+   * Shows or hides the interactions a line rests on; the first show loads them. Keyed by line id and
+   * version, so a replaced line (a new version, new evidence) loads its own.
+   */
+  const toggleEvidence = useCallback(
+    async (line: LineRef) => {
+      const key = lineKey(line);
+      const open = !shown[key];
+      setShown((s) => ({ ...s, [key]: open }));
+      if (!open || !wsId || evidence[key]) return;
+      setEvidenceError(null);
+      try {
+        const out = await userPersonaApi.lineInteractions(wsId, line.id);
+        setEvidence((s) => ({ ...s, [key]: out.interactions }));
+      } catch (e) {
+        setEvidenceError(errMsg(e));
+        setShown((s) => ({ ...s, [key]: false }));
+      }
+    },
+    [wsId, shown, evidence],
+  );
+
+  return {
+    view,
+    reason: (id: string) => reasons[id] ?? '',
+    setReason: (id: string, v: string) => setReasons((r) => ({ ...r, [id]: v })),
+    edit: (id: string): string | undefined => edits[id],
+    startEdit: (p: Pick<PersonaProposal, 'id' | 'text'>) => setEdits((e) => ({ ...e, [p.id]: e[p.id] ?? p.text })),
+    setEdit: (id: string, v: string) => setEdits((e) => ({ ...e, [id]: v })),
+    canAccept: (id: string) => edits[id] === undefined || edits[id].trim() !== '',
+    accept: (p: Pick<PersonaProposal, 'id' | 'text'>) => {
+      const edited = edits[p.id]?.trim();
+      if (edited === '') return Promise.resolve(false);
+      const reason = reasonOf(p.id);
+      return wsId
+        ? decide(() => personaLearningApi.accept(wsId, p.id, { ...(edited && edited !== p.text ? { text: edited } : {}), ...(reason ? { reason } : {}) }), p.id)
+        : Promise.resolve(false);
+    },
+    reject: (p: Pick<PersonaProposal, 'id'>) => (wsId ? decide(() => personaLearningApi.reject(wsId, p.id, reasonOf(p.id)), p.id) : Promise.resolve(false)),
+    retire: (a: { id: string }) => (wsId ? decide(() => personaLearningApi.retire(wsId, a.id, reasonOf(a.id)), a.id) : Promise.resolve(false)),
+    evidenceOf: (line: LineRef): UserInteraction[] | undefined => evidence[lineKey(line)],
+    evidenceShown: (line: LineRef) => shown[lineKey(line)] === true,
+    toggleEvidence,
+    evidenceError,
     busy: action.busy,
     actionError: action.error,
     loading: res.loading,

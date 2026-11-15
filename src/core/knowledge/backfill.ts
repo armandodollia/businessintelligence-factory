@@ -185,7 +185,8 @@ function entities(store: Store, r: BackfillReport, now: Date): void {
     r.linked.competitors++;
   }
   for (const p of store.personas.list({ entityId: null })) {
-    if (!entityNameKey(p.segment)) continue;
+    // A user persona (user persona design §5) is the person using the tool, not a thing of the market.
+    if (p.kind === 'user' || !entityNameKey(p.segment)) continue;
     store.personas.update(p.id, { entityId: ensure(p.workspaceId, 'persona', p.segment).id });
     r.linked.personas++;
   }

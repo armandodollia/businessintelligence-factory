@@ -453,6 +453,33 @@ export const stakeholdersConfigSchema = z.strictObject({
 });
 // --- end stakeholders config -----------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// User persona (design 2026-11-15-user-persona-design.md §10): one persona per person per business
+// tree, learned in the retro from their actions. Optional; read it through `userPersonaSettings`
+// (src/core/userPersona/settings.ts), which applies the defaults. The model is persona learning's.
+
+export const userPersonaConfigSchema = z.strictObject({
+  /** User persona learning in the retro (default true). */
+  enabled: z.boolean().optional(),
+  /** Open actions (not neutral) a learning run needs (default 12). */
+  minInteractions: z.number().int().min(1).optional(),
+  /** Different things those actions must be on (default 6). */
+  minDistinctTargets: z.number().int().min(1).optional(),
+  /** Actions an add or replace must cite (default 3). */
+  minEvidence: z.number().int().min(1).optional(),
+  /** Proposals per learning run (default 3). */
+  maxProposals: z.number().int().min(0).max(5).optional(),
+  /** Active lines in all (default 12). */
+  maxAdjustments: z.number().int().min(1).max(30).optional(),
+  /** Active lines per field (default 3). */
+  maxPerField: z.number().int().min(1).optional(),
+  /** Days of actions read (default 180). */
+  windowDays: z.number().int().min(1).optional(),
+  /** The brief goes to the orchestrator, synthesizer and interviewer (default true). */
+  useInPrompts: z.boolean().optional(),
+});
+// --- end user persona config ---------------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -537,6 +564,8 @@ export const bifConfigSchema = z
     personaLearning: personaLearningConfigSchema.optional(),
     /** Stakeholder personas: on / off and caps (all defaulted). */
     stakeholders: stakeholdersConfigSchema.optional(),
+    /** User persona: gates, caps and the brief in prompts (all defaulted). */
+    userPersona: userPersonaConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.

@@ -382,6 +382,14 @@ export const personaLearningApi = {
     post<unknown>(`${ws(wsId)}/persona-adjustments/${enc(adjustmentId)}/retire`, withReason(reason)),
 };
 // --- end persona learning ------------------------------------------------------------------------
+// --- user persona: the You page (`src/api/userPersonaRoutes.ts`); decisions use `personaLearningApi` ---
+export const userPersonaApi = {
+  view: (wsId: string) => get<import('./types.js').UserPersonaView>(`${ws(wsId)}/user-persona`),
+  /** The interactions a line rests on. */
+  lineInteractions: (wsId: string, adjustmentId: string) =>
+    get<{ interactions: import('./types.js').UserInteraction[] }>(`${ws(wsId)}/user-persona/interactions?line=${enc(adjustmentId)}`),
+};
+// --- end user persona ----------------------------------------------------------------------------
 // --- stakeholder personas: the Stakeholders page and reads on a recommendation (`src/api/stakeholderRoutes.ts`) ---
 type SV = import('./types.js').StakeholderView;
 type Statement = import('./types.js').StakeholderStatement;

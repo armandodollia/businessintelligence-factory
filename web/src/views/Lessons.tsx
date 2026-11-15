@@ -2,6 +2,7 @@ import { shortDate } from '../logic/format.js';
 import { usePersonaLearning } from '../logic/hooks.js';
 import { ACTION_LABELS, acceptEffect, effectVerdict, pctText, useLessons, type LessonProposal } from '../logic/lessons.js';
 import { waitingText } from '../logic/personaLearning.js';
+import { aboutYouText } from '../logic/userPersona.js';
 import { workspaceHref } from '../logic/router.js';
 
 /**
@@ -42,9 +43,14 @@ export function Lessons({ wsId }: { wsId: string }) {
 
       <section>
         <h3>Waiting for you ({l.pending.length})</h3>
-        {personaLearning.pending > 0 && (
+        {personaLearning.pending - personaLearning.pendingUser > 0 && (
           <p>
-            <a href={workspaceHref(wsId, 'personas')}>{waitingText(personaLearning.pending)}</a> on Audience &amp; Personas.
+            <a href={workspaceHref(wsId, 'personas')}>{waitingText(personaLearning.pending - personaLearning.pendingUser)}</a> on Audience &amp; Personas.
+          </p>
+        )}
+        {personaLearning.pendingUser > 0 && (
+          <p>
+            <a href={workspaceHref(wsId, 'you')}>{aboutYouText(personaLearning.pendingUser)}</a> on You.
           </p>
         )}
         {l.page && l.pending.length === 0 && <p className="muted">No proposals.</p>}

@@ -52,6 +52,22 @@ export const STAKEHOLDER_FIELDS = [
 ] as const;
 export type StakeholderField = (typeof STAKEHOLDER_FIELDS)[number];
 
+/**
+ * Fields of the user persona's lines (user persona design §5), in the order the brief shows them.
+ * The user persona has no profile values: each active line is tagged with one of these.
+ */
+export const USER_FIELDS = [
+  'priorities',
+  'quality_bar',
+  'evidence_standards',
+  'decision_style',
+  'risk_appetite',
+  'domain_knowledge',
+  'communication',
+  'recurring_corrections',
+] as const;
+export type UserField = (typeof USER_FIELDS)[number];
+
 /** Evidence-backed recommendation criteria combined into `priority`. */
 export const RECOMMENDATION_KEYS = [
   'upside',

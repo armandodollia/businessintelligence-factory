@@ -12,6 +12,9 @@ import { resolveTarget } from './ratings.js';
 import { ratingsWithSignals, signalDelta } from '../feedback/signals.js';
 import { lessonsAppendix, type LessonsTarget } from '../learning/lessons/appendix.js'; // learning loop WP-E
 import { experimentTaskIds, isTaggedDecision, taggedRunIds } from '../learning/runTags.js'; // ruling R3
+import { actorOf } from '../feedback/events.js';
+import { promptUserBrief } from '../userPersona/persona.js';
+import { userBriefSettings } from '../userPersona/settings.js';
 
 export type CalibrationRow = { targetType: TargetType; criterion: string; n: number; agreeRate: number; meanDelta: number };
 /**
@@ -26,11 +29,12 @@ export type CalibrationReport = { byCriterion: CalibrationRow[]; byRoleTask: Cal
  * Calibration scope (business tree root + data dir) of a workspace. `config` (or just the data dir):
  * with a config, `lessons.enabled: false` leaves the accepted lesson rules out (ruling R1); a bare data
  * dir (tests, read-only callers) keeps them. `target`: the task / run the prompt is built for, so the
- * stored lessons-off flag applies (wave-2 integration).
+ * stored lessons-off flag applies (wave-2 integration). With a config, the orchestrator, synthesizer and
+ * interviewer prompts also carry the configured person's user persona brief (user persona design §9).
  */
 export function calibrationScope(
   store: Store,
-  config: string | Pick<BifConfig, 'dataDir' | 'lessons'>,
+  config: string | Pick<BifConfig, 'dataDir' | 'lessons' | 'userPersona' | 'user'>,
   workspaceId: string,
   target: LessonsTarget = {},
 ): CalibrationScope {
@@ -39,7 +43,13 @@ export function calibrationScope(
   // Read when the prompt is built, so a config change applies to the next prompt.
   const enabled = () => typeof config === 'string' || config.lessons?.enabled !== false;
   // Learning loop WP-E: the tree's accepted lesson rules are appended with the calibration appendix.
-  return { dataDir, rootWorkspaceId, lessons: (name) => (enabled() ? lessonsAppendix(store, rootWorkspaceId, name, target) : '') };
+  return {
+    dataDir,
+    rootWorkspaceId,
+    lessons: (name) => (enabled() ? lessonsAppendix(store, rootWorkspaceId, name, target) : ''),
+    // User persona (design §9): the brief of the configured person (a bare data dir: none).
+    userBrief: (name) => (typeof config === 'string' ? '' : promptUserBrief(store, userBriefSettings(config), rootWorkspaceId, actorOf(config), name)),
+  };
 }
 
 export type PromptPatchExample = {

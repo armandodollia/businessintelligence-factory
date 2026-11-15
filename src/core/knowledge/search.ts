@@ -395,7 +395,8 @@ function searchEntities(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
  */
 const RECORD_TABLES = [
   { table: 'competitors', type: 'competitor', cols: ['name', 'site'], usable: outputUsableSql('r'), title: 'name', entityCols: ['entity_id'] },
-  { table: 'personas', type: 'persona', cols: ['segment', 'slug'], usable: outputUsableSql('r'), title: 'segment', entityCols: ['entity_id'] },
+  // A user persona (user persona design §5) is never a record of the store: never a hit.
+  { table: 'personas', type: 'persona', cols: ['segment', 'slug'], usable: outputUsableSql('r'), title: 'segment', entityCols: ['entity_id'], always: `r.kind <> 'user'` },
   { table: 'symptoms', type: 'symptom', cols: ['title', 'detail'], usable: '1', title: 'title', entityCols: ['entity_id'] },
   { table: 'symptom_hypotheses', type: 'hypothesis', cols: ['hypothesis'], usable: outputUsableSql('r'), title: 'hypothesis', entityCols: ['entity_id'] },
   { table: 'recommendations', type: 'recommendation', cols: ['title', 'summary'], usable: outputUsableSql('r'), title: 'title', entityCols: [] },

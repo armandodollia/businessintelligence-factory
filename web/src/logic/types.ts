@@ -562,6 +562,45 @@ export interface PersonaLearningView {
   personas: PersonaLearningEntry[];
   /** Pending persona proposals in the whole business tree (the Lessons page count). */
   pendingInTree?: number;
+  /** Of those, the proposals about the person using the tool (their user persona; the You page). */
+  pendingUser?: number;
+}
+
+// ---------------------------------------------------------------------------
+// User persona: the You page (`src/api/userPersonaRoutes.ts` shapes; mirrors `src/core/userPersona/interactions.ts`)
+
+export type UserStance = 'accept' | 'reject' | 'edit' | 'neutral';
+/** One of the person's actions in the tree, as the learning run reads it. */
+export interface UserInteraction {
+  id: string;
+  kind: string;
+  stance: UserStance;
+  target: string;
+  topic: string;
+  detail: string;
+  reason?: string;
+  refs: string[];
+  at: string;
+}
+/** Open actions toward the next retro and what is missing ("7 of 12 actions"). */
+export type UserInteractionGate = { n: number; targets: number; qualifies: boolean; missing: string[] };
+/** The person's actions over the window, by kind and stance. */
+export type UserInteractionStats = { byKind: Record<string, Partial<Record<UserStance, number>>>; total: number };
+type CorePersonaAdjustment = import('../../../src/core/personas/types.js').PersonaAdjustment;
+/** An active line of the user persona (served without `actor`) and the number of actions it rests on. */
+export type UserPersonaLine = Omit<CorePersonaAdjustment, 'actor'> & { evidence: number };
+/** `GET .../user-persona`. */
+export interface UserPersonaView {
+  enabled: boolean;
+  usedBy: string[];
+  useInPrompts: boolean;
+  gate: UserInteractionGate;
+  stats: UserInteractionStats;
+  persona?: { id: string; version: number };
+  fields: Array<{ field: string; lines: UserPersonaLine[] }>;
+  /** Pending first, then decided, newest first, at most 20 (served without `actor`). */
+  proposals: import('../../../src/core/personas/types.js').PersonaProposal[];
+  lastRun?: Pick<import('../../../src/core/personas/types.js').PersonaLearningRun, 'id' | 'status' | 'assumption' | 'createdAt'>;
 }
 
 // ---------------------------------------------------------------------------

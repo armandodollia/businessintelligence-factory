@@ -29,6 +29,7 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import { recordSystemDecision } from '../systemDecision.js';
 import type { Persona } from '../types.js';
+import { containsIdentifier } from '../userPersona/persona.js';
 import { sameTree } from '../workspace/tree.js';
 import { gateStats } from './gate.js';
 import { collectPersonaSignals } from './signals.js';
@@ -117,9 +118,11 @@ const adjustmentState = (a: PersonaAdjustment) => ({ adjustmentId: a.id, marker:
 
 /**
  * The user accepts a pending proposal: `add` creates an active adjustment (409 when the persona already
- * has `maxAdjustments` active ones, default 8), `replace` changes its text and bumps its version,
+ * has `maxAdjustments` active ones, default 8, or, with `maxPerField`, that many active ones in the
+ * proposal's field), `replace` changes its text and bumps its version,
  * `retire` ends it. `text` replaces the proposed text (stored as `finalText` when it differs; ignored
- * for `retire`). A `replace` / `retire` of an adjustment that is no longer active is refused (409) and
+ * for `retire`). For a user persona the accepted text is refused (400) when it holds an identifier of
+ * the person (`containsIdentifier` over the persona's actor id and `actor`, or an email-like string). A `replace` / `retire` of an adjustment that is no longer active is refused (409) and
  * the proposal becomes `superseded`.
  */
 export function acceptPersonaProposal(
@@ -127,12 +130,18 @@ export function acceptPersonaProposal(
   actor: string,
   workspaceId: string,
   proposalId: string,
-  opts: { text?: string; reason?: string; maxAdjustments?: number } = {},
+  opts: { text?: string; reason?: string; maxAdjustments?: number; maxPerField?: number } = {},
 ): { proposal: PersonaProposal; adjustment: PersonaAdjustment; persona: Persona } {
   const repos = personaLearningRepos(store);
   const { p, persona } = ownPendingProposal(store, workspaceId, proposalId);
   const why = reasonOf(store, persona.workspaceId, opts.reason);
   const text = p.action === 'retire' ? p.text : acceptedText(store, persona.workspaceId, p, opts.text);
+  // A line of the person you work for never names or identifies them (user persona design §13): the
+  // persona's actor id and the accepting actor's id (whole token, any case; the default actor id is
+  // exempt) and email-like strings are refused, not redacted, so the user can rewrite the line.
+  if (persona.kind === 'user' && p.action !== 'retire' && containsIdentifier(text, [persona.subjectId ?? actor, actor])) {
+    throw new PersonaLearningError('text names or identifies the person (their user id or an email address): write about "the person you work for"', 400);
+  }
   const now = new Date().toISOString();
 
   let before: PersonaAdjustment | undefined;
@@ -140,6 +149,12 @@ export function acceptPersonaProposal(
     const max = opts.maxAdjustments ?? DEFAULT_MAX_ADJUSTMENTS;
     const active = activeAdjustments(store, persona.id).length;
     if (active >= max) throw new PersonaLearningError(`persona '${persona.slug}' already has ${active} active adjustments (max ${max}); retire one first`, 409);
+    if (opts.maxPerField !== undefined && p.field !== undefined) {
+      const inField = activeAdjustments(store, persona.id).filter((a) => a.field === p.field).length;
+      if (inField >= opts.maxPerField) {
+        throw new PersonaLearningError(`persona '${persona.slug}' already has ${inField} active adjustment(s) in field '${p.field}' (max ${opts.maxPerField}); retire one first`, 409);
+      }
+    }
   } else {
     before = p.adjustmentId ? repos.adjustments.get(p.adjustmentId) : undefined;
     if (!before || before.personaId !== persona.id || before.status !== 'active') {

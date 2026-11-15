@@ -47,9 +47,11 @@ export function versionedAgentMdPath(latestPath: string, version: number): strin
  * Compiles the persona's agent.md (framed to its workspace scope, with its active adjustments) and writes it as
  * `<slug>.v<version>.md` (kept per version, spec §8b.3) and as `persona.agentMdPath` (`<slug>.md`,
  * a copy of the latest version, so CLIs always load one stable path). A stakeholder persona compiles with
- * `compileStakeholderMd` (stakeholder design §6), named after its competitor when it has one.
+ * `compileStakeholderMd` (stakeholder design §6), named after its competitor when it has one. A user
+ * persona (user persona design §5) has no agent.md: nothing is written and '' is returned.
  */
 export function writeAgentMd(store: Store, persona: Persona): string {
+  if (persona.kind === 'user') return '';
   const ws = store.workspaces.get(persona.workspaceId);
   const scope = ws ? { scopeName: scopeOf(ws).name } : {};
   const adjustments = activeAdjustments(store, persona.id);

@@ -198,7 +198,9 @@ export function mountFlowRoutes(app: Hono, deps: FlowRouteDeps, workspace: (id: 
       const variants = c.req.query('variants');
       if (variants !== undefined && variants !== '' && variants !== 'all') throw new BadRequest('variants must be "all"');
       const personaId = c.req.query('persona') || undefined;
-      if (personaId !== undefined && store.personas.get(personaId)?.workspaceId !== ws.id) {
+      const asked = personaId !== undefined ? store.personas.get(personaId) : undefined;
+      // A user persona judges no flows (user persona design §5): it answers like an unknown id.
+      if (personaId !== undefined && (asked?.workspaceId !== ws.id || asked.kind === 'user')) {
         return c.json({ error: `persona '${personaId}' not found` }, 404);
       }
       refreshOverrides(store, ws.id);

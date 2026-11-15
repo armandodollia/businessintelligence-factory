@@ -18,6 +18,7 @@ import { ReviewQueue } from './ReviewQueue.js';
 import { Schedule } from './Schedule.js';
 import { Settings } from './Settings.js';
 import { Stakeholders } from './Stakeholders.js'; // stakeholder personas
+import { You } from './You.js'; // user persona
 import { Strategy } from './Strategy.js';
 import { Usage } from './Usage.js';
 import { Workspaces } from './Workspaces.js';
@@ -110,5 +111,7 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Experiments wsId={wsId} />;
     case 'metrics': // learning loop WP-G
       return <Metrics wsId={wsId} />;
+    case 'you': // user persona
+      return <You wsId={wsId} />;
   }
 }

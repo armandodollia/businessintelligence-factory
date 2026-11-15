@@ -9,6 +9,7 @@
  *   npx tsx scripts/smoke.ts flows [providers]     # flow records and ranking, per provider
  *   npx tsx scripts/smoke.ts persona-learning [providers] # persona learning in the retro (default: claude)
  *   npx tsx scripts/smoke.ts stakeholders [providers]     # offline own-stakeholder research (default: claude)
+ *   npx tsx scripts/smoke.ts user-persona [providers]     # the user persona's learning run in the retro (default: claude)
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
  *            spawns one real worker run through the Supervisor. The agent must call
@@ -52,6 +53,15 @@
  *            Providers are enabled as in the default config (plus those named), so the reviewer is picked as
  *            on a default install. Codex refuses offline runs, so the codex worker is expected to fail with
  *            that refusal.
+ * user-persona: a persona of the user (design 2026-11-15-user-persona-design.md §15). Per provider, seeds a node of a
+ *            fictional company with six verified competitors and twelve actions of the configured person through the real
+ *            action functions (each competitor excluded with a reason, its threat rated down), then runs the real retro
+ *            (`runRetro`) with that provider as the learning model. Judged from the store and the run's files: exactly one
+ *            learning run for the user persona, offline (for a Claude run the CLI offered only `mcp__bif__*` tools; no call
+ *            outside the harness tools), exactly one successful `submit_persona_learning` call with an assumption, the stored
+ *            proposals (pending, a user field, evidence among the actions shown, at least 3 on 2 different things, no
+ *            identifier of the person) and no line or brief until the user decides.
+ *            Providers are enabled as in the default config (plus those named), as in the stakeholders mode.
  * codex isolation (with the codex worker smoke): `codex mcp list --json` under the exact env and
  *            `-c` overrides the adapter gives a run must list only `bif`.
  *
@@ -102,6 +112,12 @@ import { ensureQuestions, NODE_QUESTIONS, PEOPLE_TEMPLATES, questionText, SYSTEM
 import { stakeholdersSettings } from '../src/core/stakeholders/settings.js';
 import { stakeholderRepos } from '../src/core/stakeholders/store.js';
 import { withholding } from '../src/core/stakeholders/withheld.js';
+import { setIncludeOverride } from '../src/core/feedback/actions.js';
+import { actorOf } from '../src/core/feedback/events.js';
+import { rateCriterion } from '../src/core/scoring/ratings.js';
+import { USER_FIELDS } from '../src/core/scoring/criteria.js';
+import { collectInteractions } from '../src/core/userPersona/interactions.js';
+import { containsIdentifier, userBrief, userPersonaOf } from '../src/core/userPersona/persona.js';
 
 const MODELS: Record<ProviderId, string> = {
   claude: process.env.BIF_SMOKE_CLAUDE_MODEL ?? 'haiku',
@@ -1195,9 +1211,136 @@ async function stakeholdersSmoke(provider: ProviderId, booted: Booted): Promise<
   }
 }
 
+// ---------------------------------------------------------------------------
+// user persona smoke (user persona design 2026-11-15 §15)
+
+const UP_COMPANY = 'Larkspur Tiles';
+/** Fictional competitors of the fictional company. */
+const UP_RIVALS = ['Pinecrest Ceramics', 'Tamarind Stone', 'Quillfield Floors', 'Harrowgate Tile Co', 'Brackenridge Mosaics', 'Oakmere Surfaces'];
+
+async function userPersonaSmoke(provider: ProviderId, booted: Booted): Promise<FlResult> {
+  const { store, config, events, research, dataDir } = booted.runtime;
+  const name = `user-persona/${provider} (${MODELS[provider]})`;
+  const started = Date.now();
+  const model = { provider, model: MODELS[provider] };
+  const short = (s: string, n = 140) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const runIds: string[] = [];
+  const wsId = `ws_smoke_user_persona_${provider}`;
+  const actor = actorOf(config);
+  try {
+    const now = new Date().toISOString();
+    store.workspaces.insert({ id: wsId, name: UP_COMPANY, sector: 'test', createdAt: now });
+    const rivals = UP_RIVALS.map((rival) => {
+      const c = store.competitors.insert({
+        id: newId('cmp'), workspaceId: wsId, name: rival, threat: 4, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 },
+        evidence: [], createdAt: now, updatedAt: now, status: 'verified',
+      });
+      linkCompetitor(store, c);
+      return c;
+    });
+    // Twelve actions of the person on six things, through the real action functions: each competitor left out,
+    // with a reason that points one way, and its threat rated down.
+    const reasons = [
+      'the only source is one review site', 'its numbers come from a single forum thread', 'no dated source backs this up',
+      'one blog post is not enough to call it a threat', 'the claim rests on a single press release', 'nothing but one marketplace listing',
+    ];
+    for (const [i, c] of rivals.entries()) {
+      setIncludeOverride(store, 'competitor', c.id, false, { actor, reason: reasons[i]! });
+      rateCriterion({ workspaceId: wsId, actor, targetType: 'competitor', targetId: c.id, criterion: 'threat', verdict: 'disagree', userValue: 2, reason: 'the evidence is too thin to rate it this high' }, { store });
+    }
+    const bus: ToolCallLog[] = [];
+    const off = events.on((e) => {
+      if (e.type === 'tool_call' && e.workspaceId === wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+    });
+    let retro: Awaited<ReturnType<typeof runRetro>>;
+    try {
+      // The learning run (and the lessons retro, when the period has anything to digest) on the provider under test.
+      const lessons = config.lessons ?? {};
+      const cfg: BifConfig = {
+        ...config,
+        personaLearning: { ...(config.personaLearning ?? {}), model },
+        lessons: { ...lessons, retro: { ...(lessons.retro ?? {}), model } },
+      };
+      retro = await runRetro({ ...research, config: cfg }, wsId, { triggeredBy: 'user' });
+    } finally {
+      off();
+    }
+    const repos = personaLearningRepos(store);
+    const persona = userPersonaOf(store, wsId, actor);
+    const runs = persona ? repos.runs.list({ personaId: persona.id }) : [];
+    const run = runs[0];
+    if (run?.agentRunId) runIds.push(run.agentRunId);
+    if (retro?.agentRunId) runIds.push(retro.agentRunId);
+    const agentRun = run?.agentRunId ? store.agentRuns.get(run.agentRunId) : undefined;
+    const digest = retro?.digest as Record<string, unknown> | undefined;
+    steps.push({
+      step: 'U1 learning run', calls: 0,
+      pass: runs.length === 1 && (run!.status === 'proposed' || run!.status === 'no_change') && agentRun?.status === 'done' && agentRun.role === 'retro' && digest?.userLearningRuns === 1,
+      did: run
+        ? `runs=${runs.length} status=${run.status}${run.failureReason ? ` failure=${short(run.failureReason, 120)}` : ''} agent=${agentRun?.status ?? 'none'} shown=${run.shownSignalIds.length} gate n=${run.stats.n} items=${run.stats.items}; retro ${retro?.status} digest=${JSON.stringify({ userInteractions: digest?.userInteractions, userLearningRuns: digest?.userLearningRuns, userProposals: digest?.userProposals })}`
+        : `no learning run; persona=${persona ? 'created' : 'none'}; retro=${retro ? `${retro.status} digest=${JSON.stringify(retro.digest)}` : 'none'}`,
+    });
+
+    // Offline: the CLI offered and was called with harness tools only (Claude prints what it offers).
+    const harness = new Set<string>(TOOL_NAMES);
+    const offered = agentRun ? offeredTools(dataDir, agentRun.workspaceId, agentRun.id) : undefined;
+    const builtInOffered = offered?.filter((x) => !x.startsWith('mcp__bif__')) ?? [];
+    const called = agentRun ? calledTools(dataDir, agentRun.workspaceId, agentRun.id) : [];
+    const builtInCalled = called.filter((x) => !harness.has(x));
+    steps.push({
+      step: 'U2 offline: harness tools only', calls: called.length,
+      pass: !!agentRun && builtInCalled.length === 0 && (provider !== 'claude' || (offered !== undefined && builtInOffered.length === 0)),
+      did: agentRun
+        ? `${agentRun.model.provider}/${agentRun.model.model}: offered=${offered ? `${offered.length} (${builtInOffered.length} built-in${builtInOffered.length ? `: ${builtInOffered.join(',')}` : ''})` : 'unknown'}; called=${called.join(',') || 'none'}${builtInCalled.length ? ` (built-in: ${builtInCalled.join(',')})` : ''}`
+        : 'no agent run',
+    });
+
+    const submits = bus.filter((c) => c.tool === 'submit_persona_learning');
+    const decisions = run?.agentRunId ? store.decisions.list({ agentRunId: run.agentRunId }).filter((d) => (d.payload as { tool?: string }).tool === 'submit_persona_learning') : [];
+    steps.push({
+      step: 'U3 submit_persona_learning', calls: submits.length,
+      pass: submits.filter((c) => c.ok).length === 1 && decisions.length === 1 && (decisions[0]!.payload as { personaId?: string }).personaId === persona?.id && !!run?.assumption?.trim(),
+      did: `ok=${submits.filter((c) => c.ok).length} refused=${submits.filter((c) => !c.ok).map((c) => short(c.error ?? '', 160)).join(' | ') || 0}; decisions=${decisions.length}; assumption="${short(run?.assumption ?? '', 200)}"`,
+    });
+
+    const proposals = persona ? repos.proposals.list({ personaId: persona.id }) : [];
+    const shown = new Set(run?.shownSignalIds ?? []);
+    const targetOf = new Map(collectInteractions(store, wsId, actor).map((x) => [x.id, x.target]));
+    const bad = proposals.filter(
+      (p) => p.status !== 'pending' || p.runId !== run?.id || !p.evidence.every((id) => shown.has(id)) || containsIdentifier(p.text, [actor]) ||
+        (p.action === 'add' && !(USER_FIELDS as readonly string[]).includes(p.field ?? '')) ||
+        (p.action !== 'retire' && (p.evidence.length < 3 || new Set(p.evidence.map((id) => targetOf.get(id))).size < 2 || p.text.length > ADJUSTMENT_TEXT_MAX)),
+    );
+    steps.push({
+      step: 'U4 stored proposals', calls: 0,
+      pass: bad.length === 0 && proposals.length <= 3 && (run?.status === 'proposed' ? proposals.length >= 1 : proposals.length === 0),
+      did: proposals.length
+        ? proposals.map((p) => `${p.action}${p.field ? ` (${p.field})` : ''} evidence=${p.evidence.length} "${short(p.text, 160)}"`).join('; ') + (bad.length ? `; bad=${bad.map((p) => p.id).join(',')}` : '')
+        : 'no proposals (no_change)',
+    });
+
+    const lines = persona ? repos.adjustments.list({ personaId: persona.id }).length : 0;
+    steps.push({
+      step: 'U5 no line until the user decides', calls: 0,
+      pass: !!persona && persona.version === 1 && lines === 0 && userBrief(store, wsId, actor) === undefined,
+      did: `version=${persona?.version ?? 'none'} lines=${lines} brief=${userBrief(store, wsId, actor) === undefined ? 'none' : 'present'}`,
+    });
+
+    for (const c of bus.filter((x) => !x.ok)) confusion.push(`${c.tool} failed: ${short(c.error ?? '', 160)}`);
+    return {
+      name, pass: steps.every((x) => x.pass), seconds: (Date.now() - started) / 1000, steps, usage: usageOf(booted, runIds), toolCalls: bus.length, confusion,
+      detail: `retro=${retro?.status ?? 'none'}; learning run=${run?.status ?? 'none'}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - started) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls: 0, confusion };
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders'].includes(args[0] ?? '') ? args.shift()! : 'all';
+  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'user-persona'].includes(args[0] ?? '') ? args.shift()! : 'all';
   const only = args.filter((a): a is ProviderId => (PROVIDERS as string[]).includes(a));
   const providers = only.length ? only : PROVIDERS;
   const results: Result[] = [];
@@ -1281,6 +1424,22 @@ async function main() {
       for (const p of shProviders) {
         console.log(`[smoke] stakeholders ${p} (${MODELS[p]}) …`);
         const r = await stakeholdersSmoke(p, booted);
+        printKnowledge(r);
+        results.push(r);
+      }
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'user-persona') {
+    const upProviders = only.length ? only : (['claude'] as ProviderId[]);
+    const { booted, dir } = await startServer('user-persona', { defaultEnabled: true, providers: upProviders });
+    try {
+      for (const p of upProviders) {
+        console.log(`[smoke] user-persona ${p} (${MODELS[p]}) …`);
+        const r = await userPersonaSmoke(p, booted);
         printKnowledge(r);
         results.push(r);
       }

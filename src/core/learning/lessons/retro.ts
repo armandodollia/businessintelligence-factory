@@ -30,6 +30,7 @@ import type { Decision, Role } from '../../types.js';
 import { rootOf } from '../../workspace/tree.js';
 import { listFeedback } from '../../feedback/events.js';
 import { runPersonaLearning, type PersonaLearningReport } from '../../personas/learn.js';
+import { runUserPersonaLearning, type UserLearningReport } from '../../userPersona/learn.js';
 import { activeRules } from './appendix.js';
 import { evaluateLessons, rulesWithEffect } from './engine.js';
 import { LessonPrivacy } from './privacy.js';
@@ -236,7 +237,8 @@ export type RunRetroOptions = { triggeredBy?: RetroRecord['triggeredBy']; now?: 
 
 /**
  * Runs the retro of one business tree: the lessons engine, persona learning (`runPersonaLearning`; its
- * four counts join the digest counts, a throw inside it leaves the retro unchanged), then (when
+ * four counts join the digest counts, a throw inside it leaves the retro unchanged), user persona
+ * learning (`runUserPersonaLearning`; likewise, three counts), then (when
  * anything happened since the last retro) the retro agent on the digest. Returns the retro row, or undefined when lessons or the
  * retro are disabled or one is already running for the tree. Never throws for an agent failure (the
  * row ends `failed`).
@@ -261,11 +263,13 @@ export async function runRetro(deps: ResearchDeps, workspaceId: string, opts: Ru
     evaluateLessons({ store, config }, root, { now });
     // Persona learning (design 2026-11-15 §8): after the lessons engine, whatever the digest; its failure never fails the retro.
     const personaCounts = await runPersonaLearning(deps, root, { now, retroId }).catch((): PersonaLearningReport | undefined => undefined);
+    // User persona learning (user persona design §8): after persona learning, on its own; its failure never fails the retro.
+    const userCounts = await runUserPersonaLearning(deps, root, { now, retroId }).catch((): UserLearningReport | undefined => undefined);
     const window = { since: retroWindowStart(store, root, now, settings.retro.windowDays), until: now.toISOString() };
     const digest = retroDigest({ store, config }, root, window, settings.retro.model.provider);
     const base: RetroRecord = {
       id: retroId, rootWorkspaceId: root, status: 'running', triggeredBy: opts.triggeredBy ?? 'user', windowStart: window.since,
-      windowEnd: window.until, digest: { ...digest.counts, ...personaCounts }, evidenceIds: digest.briefing.results.map((r) => r.id), proposalIds: [], createdAt: now.toISOString(),
+      windowEnd: window.until, digest: { ...digest.counts, ...personaCounts, ...userCounts }, evidenceIds: digest.briefing.results.map((r) => r.id), proposalIds: [], createdAt: now.toISOString(),
     };
     if (!digest.active || !digest.briefing.section) {
       return repo.insert({ ...base, status: 'skipped', endedAt: now.toISOString() });

@@ -107,7 +107,10 @@ Stance by kind: accepting, agreeing, including and applying are `accept`; reject
 excluding, retracting, retiring and reverting are `reject`; anything accepted with changes, a
 correction, an override or an edit is `edit`; the rest (`user_action`, schedule and config changes)
 are `neutral` and are counted in the statistics but not shown as evidence. Ratings: verdict `agree`
-is `accept`, `disagree` is `edit` (the user set another value).
+is `accept`, `disagree` is `edit` (the user set another value). A change of the scoring weights
+(`weights_change`) is `edit`, the clearest statement of the person's priorities; other config and
+schedule changes are `neutral`. Only an answered `approval` request is a judgement (resolved `accept`,
+denied `reject`); answering any other request kind is `neutral`.
 
 **Open interactions**: newer than the `signalsThrough` of the user persona's latest finished learning
 run, not older than `windowDays` (default 180).
@@ -197,7 +200,7 @@ Proposed by the retro of 16 Nov
 
 What the tool has seen you do (last 180 days)
   Included 14, excluded 9 · proposals accepted 5, edited 3, rejected 2 · verdicts agreed 6, disagreed 9
-  Next retro: 7 of 12 actions since the last change.
+  Next retro: 7 of 12 actions since the last learning run.
 ```
 
 ## 13. Privacy and isolation
@@ -218,3 +221,31 @@ component split.
 Unit tests per module; end to end (actions → retro → proposal → accept → brief in the orchestrator's
 prompt, absent from a reviewer's); a test that nothing changes outside the retro; isolation across two
 trees; the identifier test; a smoke mode `user-persona` for the real CLIs.
+
+## 16. Amendment: one persona per person
+
+Decided after the design, when the user said several people will use one shared store. The persona is
+one per person per business tree, not one per tree: the row carries the actor id (the same id the
+feedback log records on every action) in `subjectId`, interactions are only that person's actions, the
+retro runs the learning once per person with enough actions, and the brief given to a run is the brief
+of the person acting (today the one configured user). Only that person can decide their own lines. The
+actor id still never appears in a line, a prompt or a request to an agent. Where §5–§13 say "per
+business tree", read "per person per business tree".
+
+## 17. As built: where the build differs from this design
+
+- The retro learns only for people the tool can show proposals to. Today that is the configured
+  person; actions recorded under another id are not learned from.
+- The learning run is offline (no web tools), and is skipped with a recorded Decision when no enabled
+  provider can run offline.
+- `userPersona.enabled: false` switches off both learning and the brief; `useInPrompts: false` only the
+  brief.
+- A line the person edits is refused when it contains their user id or an email-like string. The
+  default id `local-user` is not treated as an identifier.
+- A change of the scoring weights counts as `edit`. Only an answered approval request counts as a
+  judgement; other requests are neutral.
+- The user persona is kept out of knowledge search, entity cards, the orchestrator's knowledge briefing
+  and every persona list.
+- The page has no on/off switch for the brief; it is set in the config file.
+- Not separated by person (matters once several people share a store): the feedback log, run logs and
+  stored prompts of a business.

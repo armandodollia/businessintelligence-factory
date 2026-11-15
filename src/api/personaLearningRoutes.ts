@@ -13,6 +13,12 @@
  * - Stakeholder personas (stakeholder design §7, §14): open ones are served like segment personas; a
  *   hidden one is absent from the list, left out of `pendingInTree`, and its persona, proposal and
  *   adjustment ids answer 404 on every route here, exactly like unknown ids.
+ * - User personas (user persona design §11, §16): not listed here (the You page has its own routes,
+ *   `userPersonaRoutes.ts`), and their signals answer 404. Accept, reject and retire take the configured
+ *   person's own user persona from any node of the tree, with `userPersona.maxAdjustments` and
+ *   `maxPerField`; another person's answers 404 exactly like an unknown id. A decision on a user persona
+ *   answers without the actor id (no `subjectId`, no `actor`). Its pending proposals count in
+ *   `pendingInTree` (and in `pendingUser`); another person's do not.
  * - Nothing here is shown to an agent; text is served as stored (redacted) plain data for the browser.
  */
 import type { Context, Hono } from 'hono';
@@ -26,11 +32,12 @@ import { personaGate } from '../core/personas/gate.js';
 import { personaLearningSettings } from '../core/personas/settings.js';
 import { collectPersonaSignals, openSignals } from '../core/personas/signals.js';
 import { activeAdjustments, personaLearningRepos } from '../core/personas/store.js';
-import type { PersonaLearningRun, PersonaProposal } from '../core/personas/types.js';
+import type { PersonaAdjustment, PersonaLearningRun, PersonaProposal } from '../core/personas/types.js';
 import { isHidden, segmentPersonas, stakeholderPersonas } from '../core/stakeholders/personas.js';
 import type { Store } from '../core/store/db.js';
 import { rootOf } from '../core/workspace/tree.js';
-import type { Workspace } from '../core/types.js';
+import type { Persona, Workspace } from '../core/types.js';
+import { userPersonaSettings } from '../core/userPersona/settings.js';
 
 export type PersonaLearningRouteDeps = { store: Store; config: BifConfig };
 
@@ -64,35 +71,55 @@ async function body<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer
 const newestFirst = (x: string | undefined, y: string | undefined) => (y ?? '').localeCompare(x ?? '');
 
 /** Pending proposals (newest first), then decided ones (newest decision first), at most `PROPOSAL_LIMIT`. */
-function servedProposals(all: PersonaProposal[]): PersonaProposal[] {
+export function servedProposals(all: PersonaProposal[]): PersonaProposal[] {
   const pending = all.filter((p) => p.status === 'pending').sort((a, b) => newestFirst(a.createdAt, b.createdAt));
   const decided = all.filter((p) => p.status !== 'pending').sort((a, b) => newestFirst(a.decidedAt ?? a.createdAt, b.decidedAt ?? b.createdAt));
   return [...pending, ...decided].slice(0, PROPOSAL_LIMIT);
 }
 
 /** The newest run with an assumption (a later failed run does not hide it); without one, the newest run. */
-function lastRunOf(runs: PersonaLearningRun[]): Pick<PersonaLearningRun, 'id' | 'status' | 'assumption' | 'createdAt' | 'stats'> | undefined {
+export function lastRunOf(runs: PersonaLearningRun[]): Pick<PersonaLearningRun, 'id' | 'status' | 'assumption' | 'createdAt' | 'stats'> | undefined {
   const sorted = [...runs].sort((a, b) => newestFirst(a.createdAt, b.createdAt));
   const r = sorted.find((x) => x.assumption) ?? sorted[0];
   if (!r) return undefined;
   return { id: r.id, status: r.status, ...(r.assumption !== undefined ? { assumption: r.assumption } : {}), createdAt: r.createdAt, stats: r.stats };
 }
 
+/** A user persona row as served: without `subjectId` (the actor id never leaves the server). */
+export function servedUserPersona(p: Persona): Omit<Persona, 'subjectId'> {
+  const { subjectId: _, ...rest } = p;
+  return rest;
+}
+
+/** A proposal or line of a user persona as served: without `actor` (the actor id never leaves the server). */
+export function withoutActor<T extends PersonaProposal | PersonaAdjustment>(x: T): Omit<T, 'actor'> {
+  const { actor: _, ...rest } = x;
+  return rest;
+}
+
+/** Whether `p` is a user persona of someone else than `actor`: never served or decided here (404, as an unknown id). */
+export const othersUserPersona = (p: Pick<Persona, 'kind' | 'subjectId'>, actor: string): boolean => p.kind === 'user' && p.subjectId !== actor;
+
 /** Mounts the persona learning routes. Call before the `/api/*` 404 fallback; `workspace` resolves an id or throws the app's 404. */
 export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRouteDeps, workspace: (id: string) => Workspace): void {
   const { store, config } = deps;
   const base = '/api/workspaces/:id';
   const repos = personaLearningRepos(store);
-  /** Whether the persona is a hidden stakeholder: nothing about it is served (stakeholder design §7). */
-  const hiddenPersona = (personaId: string) => {
+  /**
+   * Whether nothing about the persona is served to the caller: a hidden stakeholder (stakeholder design
+   * §7), or another person's user persona (user persona design §16).
+   */
+  const unservedPersona = (personaId: string) => {
     const p = store.personas.get(personaId);
-    return !!p && isHidden(p);
+    return !!p && (isHidden(p) || othersUserPersona(p, actorOf(config)));
   };
-  /** 404, exactly as for an unknown id, for a proposal of a hidden stakeholder. */
-  const notHiddenProposal = (proposalId: string) => {
+  /** 404, exactly as for an unknown id, for a proposal of an unserved persona. */
+  const servedProposal = (proposalId: string): PersonaProposal | undefined => {
     const p = repos.proposals.get(proposalId);
-    if (p && hiddenPersona(p.personaId)) throw new PersonaLearningError(`persona proposal '${proposalId}' not found`, 404);
+    if (p && unservedPersona(p.personaId)) throw new PersonaLearningError(`persona proposal '${proposalId}' not found`, 404);
+    return p;
   };
+  const isUserPersona = (personaId: string | undefined) => personaId !== undefined && store.personas.get(personaId)?.kind === 'user';
 
   const wrap =
     (fn: (c: Context, ws: Workspace) => Promise<Response> | Response) =>
@@ -127,13 +154,12 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
           ...(lastRun ? { lastRun } : {}),
         };
       });
-      const pendingInTree = repos.proposals
-        .list({ rootWorkspaceId: rootOf(store, ws.id), status: 'pending' })
-        .filter((p) => !hiddenPersona(p.personaId)).length;
+      const pending = repos.proposals.list({ rootWorkspaceId: rootOf(store, ws.id), status: 'pending' }).filter((p) => !unservedPersona(p.personaId));
+      const pendingUser = pending.filter((p) => isUserPersona(p.personaId)).length;
       // Whether persona learning would run at all: the retro runs it only with all three enabled.
       const lessons = lessonsSettings(config);
       const enabled = settings.enabled && lessons.enabled && lessons.retro.enabled;
-      return c.json({ enabled, personas, pendingInTree });
+      return c.json({ enabled, personas, pendingInTree: pending.length, pendingUser });
     }),
   );
 
@@ -143,7 +169,8 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
     wrap((c, ws) => {
       const personaId = c.req.param('personaId')!;
       const persona = store.personas.get(personaId);
-      if (persona?.workspaceId !== ws.id || isHidden(persona)) throw new PersonaLearningError(`persona '${personaId}' not found`, 404);
+      // A user persona has no signals (its interactions: `GET …/user-persona/interactions`).
+      if (persona?.workspaceId !== ws.id || isHidden(persona) || persona.kind === 'user') throw new PersonaLearningError(`persona '${personaId}' not found`, 404);
       return c.json({ signals: collectPersonaSignals(store, personaId).reverse() });
     }),
   );
@@ -153,14 +180,16 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
     `${base}/persona-proposals/:proposalId/accept`,
     wrap(async (c, ws) => {
       const proposalId = c.req.param('proposalId')!;
-      notHiddenProposal(proposalId);
+      const user = isUserPersona(servedProposal(proposalId)?.personaId);
       const input = await body(c, schemas.accept);
+      const u = userPersonaSettings(config);
       const out = acceptPersonaProposal(store, actorOf(config), ws.id, proposalId, {
         ...(input.text !== undefined ? { text: input.text } : {}),
         ...(input.reason !== undefined ? { reason: input.reason } : {}),
-        maxAdjustments: personaLearningSettings(config).maxAdjustments,
+        ...(user ? { maxAdjustments: u.maxAdjustments, maxPerField: u.maxPerField } : { maxAdjustments: personaLearningSettings(config).maxAdjustments }),
       });
-      return c.json(out);
+      if (!user) return c.json(out);
+      return c.json({ proposal: withoutActor(out.proposal), adjustment: withoutActor(out.adjustment), persona: servedUserPersona(out.persona) });
     }),
   );
 
@@ -168,9 +197,10 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
     `${base}/persona-proposals/:proposalId/reject`,
     wrap(async (c, ws) => {
       const proposalId = c.req.param('proposalId')!;
-      notHiddenProposal(proposalId);
+      const user = isUserPersona(servedProposal(proposalId)?.personaId);
       const input = await body(c, schemas.reasonOnly);
-      return c.json(rejectPersonaProposal(store, actorOf(config), ws.id, proposalId, input.reason !== undefined ? { reason: input.reason } : {}));
+      const out = rejectPersonaProposal(store, actorOf(config), ws.id, proposalId, input.reason !== undefined ? { reason: input.reason } : {});
+      return c.json(user ? withoutActor(out) : out);
     }),
   );
 
@@ -180,9 +210,11 @@ export function mountPersonaLearningRoutes(app: Hono, deps: PersonaLearningRoute
     wrap(async (c, ws) => {
       const adjustmentId = c.req.param('adjustmentId')!;
       const adjustment = repos.adjustments.get(adjustmentId);
-      if (adjustment && hiddenPersona(adjustment.personaId)) throw new PersonaLearningError(`persona adjustment '${adjustmentId}' not found`, 404);
+      if (adjustment && unservedPersona(adjustment.personaId)) throw new PersonaLearningError(`persona adjustment '${adjustmentId}' not found`, 404);
       const input = await body(c, schemas.reasonOnly);
-      return c.json(retireAdjustment(store, actorOf(config), ws.id, adjustmentId, input.reason !== undefined ? { reason: input.reason } : {}));
+      const out = retireAdjustment(store, actorOf(config), ws.id, adjustmentId, input.reason !== undefined ? { reason: input.reason } : {});
+      if (!isUserPersona(adjustment?.personaId)) return c.json(out);
+      return c.json({ adjustment: withoutActor(out.adjustment), persona: servedUserPersona(out.persona) });
     }),
   );
 }

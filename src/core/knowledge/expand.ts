@@ -505,7 +505,8 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
     }
     case 'persona': {
       const p = store.personas.get(id);
-      if (!p || !recordReadable(env, p.workspaceId) || (usableOnly(env.role) && !usable(p))) throw expandNotFound(id);
+      // A user persona (user persona design §5) is not a record of the store: it answers like an unknown id.
+      if (!p || p.kind === 'user' || !recordReadable(env, p.workspaceId) || (usableOnly(env.role) && !usable(p))) throw expandNotFound(id);
       home = p.workspaceId;
       name = p.slug;
       status = p.status;

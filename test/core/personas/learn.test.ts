@@ -282,6 +282,36 @@ describe('runPersonaLearning', () => {
     expect(t.repos.runs.list({ personaId: smb.id })[0]).toMatchObject({ status: 'proposed' });
   });
 
+  it('submit_persona_learning refuses a replace or retire naming another field than the line it changes; an omitted field keeps the line\'s', async () => {
+    const t = setup();
+    const smb = t.persona('smb');
+    t.repos.adjustments.insert({
+      id: 'pad_f', rootWorkspaceId: 'ws_a', workspaceId: 'ws_a', personaId: smb.id, field: 'demographics', marker: 'A-0F0F0F', text: 'You are 40.', version: 1,
+      status: 'active', source: 'retro', actor: 'local-user', stats: {}, internal: false, createdAt: T0, changedAt: T0,
+    });
+    t.react(smb, 6);
+    const dis = collectPersonaSignals(t.store, smb.id).map((s) => s.id);
+    const errors: string[] = [];
+    t.answer(() => async (tc) => {
+      for (const input of [
+        submit(smb.id, [{ action: 'replace', adjustment_id: 'pad_f', field: 'socioeconomic', text: 'You are 50.', why: 'w', evidence: dis.slice(0, 3) }]),
+        submit(smb.id, [{ action: 'retire', adjustment_id: 'pad_f', field: 'socioeconomic', why: 'w', evidence: dis.slice(0, 3) }]),
+      ]) {
+        try {
+          await tc.call('submit_persona_learning', input);
+          errors.push('accepted');
+        } catch (e) {
+          errors.push((e as Error).message);
+        }
+      }
+      await tc.call('submit_persona_learning', submit(smb.id, [{ action: 'replace', adjustment_id: 'pad_f', text: 'You are 50.', why: 'w', evidence: dis.slice(0, 3) }]));
+    });
+    await t.run();
+    expect(errors).toHaveLength(2);
+    for (const e of errors) expect(e).toMatch(/proposals\[0\]\.field: 'socioeconomic' is not the field of adjustment 'pad_f' \('demographics'\)/);
+    expect(t.repos.proposals.list({ personaId: smb.id })).toEqual([expect.objectContaining({ action: 'replace', adjustmentId: 'pad_f', field: 'demographics' })]);
+  });
+
   it('submit_persona_learning refuses the proposals of a run that was shown upload-derived text', async () => {
     const t = setup();
     const smb = t.persona('smb');

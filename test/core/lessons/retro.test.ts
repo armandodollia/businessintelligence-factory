@@ -21,8 +21,20 @@ import type { Store } from '../../../src/core/store/db.js';
 import { knowledgeRepos, newId } from '../../../src/core/store/repos.js';
 import { lessonsHarness, lessonsSetup } from './fixture.js';
 
+// User persona learning (user persona design §8): a test makes it throw to check the retro is unchanged.
+const userLearning = vi.hoisted(() => ({ fail: false }));
+vi.mock('../../../src/core/userPersona/learn.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../../src/core/userPersona/learn.js')>();
+  return {
+    ...original,
+    runUserPersonaLearning: (...args: Parameters<typeof original.runUserPersonaLearning>) =>
+      userLearning.fail ? Promise.reject(new Error('user persona learning broke')) : original.runUserPersonaLearning(...args),
+  };
+});
+
 const opened: Store[] = [];
 afterEach(() => {
+  userLearning.fail = false;
   vi.useRealTimers();
   for (const s of opened.splice(0)) s.close();
 });
@@ -281,6 +293,74 @@ describe('persona learning in the retro', () => {
     for (const k of PERSONA_COUNTS) expect(retro.digest).not.toHaveProperty(k);
     expect(retro.digest).toHaveProperty('tasks', 3);
     expect(h.requests.filter((r) => isLearning(r))).toEqual([]);
+  });
+});
+
+describe('user persona learning in the retro', () => {
+  /** `n` include overrides by the user on `n` different findings of tree A (open, non-neutral interactions). */
+  const userActions = (t: T, n: number) => {
+    for (let i = 0; i < n; i++) {
+      t.at();
+      recordFeedback(t.store, { workspaceId: t.a.id, kind: 'include_override', targetType: 'finding', targetId: `fnd_u${i}`, afterJson: { include: false } });
+    }
+  };
+  const isUserLearning = (req: AgentRequest) => req.prompt.startsWith('# User persona learning');
+  /** The user learning run proposes one add on the first three actions shown. */
+  const learnUser = (req: AgentRequest) => async (tc: { call(name: string, input: unknown): Promise<unknown> }) => {
+    const ids = [...req.prompt.matchAll(/^- (\S+) reject —/gm)].map((m) => m[1]!).slice(0, 3);
+    await tc.call('submit_persona_learning', {
+      persona_id: /persona_id `(\w+)`/.exec(req.prompt)![1], assumption: 'Excludes much.',
+      proposals: [{ action: 'add', field: 'quality_bar', text: 'Excludes findings without a dated source.', why: 'w', evidence: ids }],
+    });
+  };
+  const USER_COUNTS = ['userInteractions', 'userLearningRuns', 'userProposals'];
+
+  it('runs after persona learning and stores its three counts in the retro digest', async () => {
+    const t = lessonsSetup(opened);
+    history(t);
+    qualifyingPersona(t);
+    userActions(t, 12);
+    const h = harness(t, (req) =>
+      req.kind !== 'retro'
+        ? undefined
+        : isUserLearning(req)
+          ? learnUser(req)
+          : isLearning(req)
+            ? learn(req)
+            : async (tc) => void (await tc.call('submit_retro', { summary: 'ok', proposals: [] })),
+    );
+    const retro = (await runRetro(h.deps, t.a.id, { now: nowAfter(t) }))!;
+    expect(retro).toMatchObject({ status: 'done', summary: 'ok' });
+    // 12 overrides, the history's override and the 6 persona ratings: 19 open actions.
+    expect(retro.digest).toMatchObject({ userInteractions: 19, userLearningRuns: 1, userProposals: 1, personaLearningRuns: 1 });
+    expect(lessonRepos(t.store).retros.get(retro.id)!.digest).toMatchObject({ userLearningRuns: 1, userProposals: 1 });
+    expect(h.requests.map((r) => (isUserLearning(r) ? 'user' : isLearning(r) ? 'persona' : 'retro'))).toEqual(['persona', 'user', 'retro']);
+  });
+
+  it('stores the counts for a skipped retro too', async () => {
+    const t = lessonsSetup(opened);
+    userActions(t, 12);
+    const h = harness(t, (req) => (isUserLearning(req) ? learnUser(req) : undefined));
+    const now = new Date(Date.parse(t.at()) + 10 * 86_400_000);
+    const retro = (await runRetro(h.deps, t.a.id, { now }))!;
+    expect(retro.status).toBe('skipped');
+    expect(retro.digest).toMatchObject({ userInteractions: 12, userLearningRuns: 1, userProposals: 1 });
+  });
+
+  it('a throw inside user persona learning leaves the retro result unchanged', async () => {
+    const t = lessonsSetup(opened);
+    history(t);
+    qualifyingPersona(t);
+    userActions(t, 12);
+    userLearning.fail = true;
+    const h = harness(t, (req) =>
+      req.kind !== 'retro' ? undefined : isLearning(req) ? learn(req) : async (tc) => void (await tc.call('submit_retro', { summary: 'ok', proposals: [] })),
+    );
+    const retro = (await runRetro(h.deps, t.a.id, { now: nowAfter(t) }))!;
+    expect(retro).toMatchObject({ status: 'done', summary: 'ok' });
+    for (const k of USER_COUNTS) expect(retro.digest).not.toHaveProperty(k);
+    expect(retro.digest).toMatchObject({ tasks: 3, personaLearningRuns: 1, personaProposals: 1 });
+    expect(h.requests.filter((r) => isUserLearning(r))).toEqual([]);
   });
 });
 

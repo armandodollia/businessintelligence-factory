@@ -42,6 +42,9 @@ relation and stakeholder fields, and two more kinds of input:
 For a stakeholder, write adjustments about how they decide ("You approve only what pays back within a
 year."), never quote a statement, and use a stakeholder field when one fits.
 
+When you replace or retire an adjustment, leave `field` out or give the field that adjustment already
+has; a different field is refused.
+
 Call `submit_persona_learning` exactly once with the persona id, your assumption and your proposals,
 each citing the ids it rests on: reaction ids, and for a stakeholder statement ids too (a proposal may
 cite either or both). When the reactions and statements do not point one way, call it with no

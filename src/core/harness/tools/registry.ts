@@ -4,7 +4,7 @@ import { entityKindSchema, modelRefSchema, taskTypeSchema } from '../../config/s
 import { READ_FLOOR_TOKENS } from '../../knowledge/floors.js';
 import { QUOTE_MAX_CHARS, QUOTE_TOO_LONG } from '../../knowledge/factTools.js';
 import { RELATION_TYPES } from '../../knowledge/relations.js';
-import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, type PersonaField, type StakeholderField } from '../../scoring/criteria.js';
+import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, USER_FIELDS, type PersonaField, type StakeholderField } from '../../scoring/criteria.js';
 import { OWN_STANCES, RIVAL_STANCES, STAKEHOLDER_TYPES } from '../../stakeholders/types.js';
 import { FLOW_LABEL_MAX, FLOW_TEXT_MAX, type CheckAnsweredBy, type CheckKind, type ReviewSourceType, type StopReason } from '../../flows/types.js';
 import type { Role } from '../../types.js';
@@ -701,9 +701,12 @@ export const toolInputSchemas = {
           action: z.enum(['add', 'replace', 'retire']).describe('add: a new adjustment; replace: new text for an active one; retire: end an active one'),
           adjustment_id: id.optional().describe('replace, retire: the id of the active adjustment'),
           field: z
-            .enum([...PERSONA_FIELDS, ...STAKEHOLDER_FIELDS])
+            .enum([...PERSONA_FIELDS, ...STAKEHOLDER_FIELDS, ...USER_FIELDS])
             .optional()
-            .describe('The profile field it corrects, when one fits: a persona field for a segment persona, a stakeholder field for a stakeholder'),
+            .describe(
+              'The profile field it corrects, when one fits: a persona field for a segment persona, a stakeholder field for a stakeholder; ' +
+                'for the person you work for, one of their fields (required for an add)',
+            ),
           text: z
             .string()
             .min(1)

@@ -58,6 +58,7 @@ export function resolveTarget(
     case 'persona': {
       const p = own(store.personas.get(targetId));
       if (p && isHidden(p)) return undefined; // stakeholder design §7: answers like an unknown id
+      if (p?.kind === 'user') return undefined; // user persona design §5: not a persona the user rates; answers like an unknown id
       return p && { agentValue: scalar(p.profile[criterion]?.confidence), title: p.segment, role: 'worker' };
     }
     case 'persona_feedback': {

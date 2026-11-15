@@ -58,6 +58,7 @@ import { mountMetricsRoutes } from './metricsRoutes.js'; // learning loop WP-G
 import { mountFlowRoutes } from './flowRoutes.js'; // flow records and ranking
 import { mountPersonaLearningRoutes } from './personaLearningRoutes.js'; // persona learning
 import { mountStakeholderRoutes } from './stakeholderRoutes.js'; // stakeholder personas
+import { mountUserPersonaRoutes } from './userPersonaRoutes.js'; // user persona
 
 export type AppDeps = {
   store: Store;
@@ -432,7 +433,8 @@ export function createApp(deps: AppDeps): Hono {
     const { include } = await body(c, schemas.includeFinding);
     const persona = store.personas.get(id);
     // A hidden stakeholder answers like an unknown id (stakeholder design §7): the response is the whole record.
-    if (!persona || isHidden(persona)) throw new HttpError(404, `persona '${id}' not found`);
+    // So does a user persona (user persona design §5): it is never included in or excluded from anything.
+    if (!persona || isHidden(persona) || persona.kind === 'user') throw new HttpError(404, `persona '${id}' not found`);
     return c.json(setIncludeOverride(store, 'persona', id, include, { actor: actorOf(config) })); // WP-A
   });
   app.get('/api/workspaces/:id/symptoms', (c) => c.json(store.symptoms.list({ workspaceId: workspace(c.req.param('id')).id })));
@@ -747,6 +749,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- stakeholder personas: question round, statements, reads (hidden personas never served) ------
   mountStakeholderRoutes(app, { store, config }, workspace);
   // --- end stakeholder personas ----------------------------------------------------------------
+  // --- user persona: the You page (accept / reject / retire use the persona learning routes) ------
+  mountUserPersonaRoutes(app, { store, config }, workspace);
+  // --- end user persona ------------------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

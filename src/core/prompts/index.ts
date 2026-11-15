@@ -19,6 +19,11 @@ export type CalibrationScope = {
    * store by `calibrationScope`); '' when there are none or lessons are off for the run.
    */
   lessons?: (name: string) => string;
+  /**
+   * User persona (design 2026-11-15-user-persona-design.md §9): the brief of the person the run works
+   * for, for the roles that get it (`promptUserBrief`, bound by `calibrationScope`); '' otherwise.
+   */
+  userBrief?: (name: string) => string;
 };
 
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
@@ -58,8 +63,8 @@ export function calibrationAppendix(name: string, scope?: CalibrationScope): str
 }
 
 /**
- * Appends `calibrationAppendix(name, scope)` to an assembled system prompt (unchanged when there
- * is no appendix). Use for prompts not loaded via `loadPrompt(name)` — e.g. persona agent.md
+ * Appends `calibrationAppendix(name, scope)`, then the accepted lessons, then the user persona brief
+ * to an assembled system prompt (unchanged when there is none of them). Use for prompts not loaded via `loadPrompt(name)` — e.g. persona agent.md
  * (`persona`), synthesizer runs that share `worker.md` (`synthesizer`) — so the recorded prompt
  * version changes when a calibration patch is applied.
  */
@@ -68,8 +73,11 @@ export function withCalibration(text: string, name: string, scope?: CalibrationS
   const out = extra ? `${text.trimEnd()}\n\n${extra}\n` : text;
   // --- learning loop WP-E: accepted lesson rules follow the calibration appendix ---
   const lessons = scope?.lessons?.(name).trim() ?? '';
-  return lessons ? `${out.trimEnd()}\n\n${lessons}\n` : out;
+  const withLessons = lessons ? `${out.trimEnd()}\n\n${lessons}\n` : out;
   // --- end WP-E ---
+  // User persona: the brief follows the lessons appendix (orchestrator, synthesizer, interviewer only).
+  const brief = scope?.userBrief?.(name).trim() ?? '';
+  return brief ? `${withLessons.trimEnd()}\n\n${brief}\n` : withLessons;
 }
 
 /** First 8 hex chars of the sha256 of `text` (same scheme as `loadPrompt().version`). */

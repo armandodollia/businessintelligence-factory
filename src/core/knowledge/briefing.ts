@@ -311,8 +311,10 @@ export function symptomLines(env: ReadEnv, opts: { kind?: 'symptom' | 'strength'
 function recordLines(env: ReadEnv, table: 'personas' | 'recommendations', max: number): BriefLine[] {
   const ws = env.scope.workspaceId;
   const order = table === 'recommendations' ? 'r.priority DESC, r.rowid' : 'r.rowid';
+  // A user persona (user persona design §5) is not a persona of the market: never listed here.
+  const kind = table === 'personas' ? ` AND r.kind <> 'user'` : '';
   const rows = env.store.db
-    .prepare(`SELECT r.id AS id FROM ${table} r WHERE ${outputUsableSql('r')} AND ${recordVisibleSql('r')} ORDER BY ${order} LIMIT ${Math.max(0, Math.floor(max))}`)
+    .prepare(`SELECT r.id AS id FROM ${table} r WHERE ${outputUsableSql('r')} AND ${recordVisibleSql('r')}${kind} ORDER BY ${order} LIMIT ${Math.max(0, Math.floor(max))}`)
     .all({ ids: visParams(env.scope, 'node').ids }) as Array<{ id: string }>;
   return rows.map(({ id }) => {
     const upload = itemIsUploadDerived(env.store, id);

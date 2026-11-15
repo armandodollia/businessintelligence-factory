@@ -152,6 +152,51 @@ What happened:
   not support), the worker fixed them, and the task was `verified` in round 2 with nits left open.
   Both are the review loop working as built; the difference is the model's variance on haiku.
 
+## User persona smoke (`feat/user-persona`, 2026-11-15)
+
+Run once on 2026-11-15 with `BIF_SMOKE_TIMEOUT_MS=300000 npm run smoke -- user-persona claude` (macOS,
+Node 25.8.1; claude 2.1.322). Claude only, on the cheapest model (haiku). Codex and OpenCode were not
+run.
+
+How to run it: `npm run smoke -- user-persona [providers]` (default `claude`; the mode runs only when
+named). The script boots the real server (providers enabled as in the default config, plus those
+named, as in the stakeholders mode) and, per provider, seeds a node of a fictional tile company with
+six fictional verified competitors. The configured person then takes twelve actions through the real
+action functions: each competitor left out with a reason about thin or single-source evidence, and its
+threat rated down from 4 to 2. It then runs the real retro (`runRetro`) with that provider as the
+learning model and the retro model. Judged from the store and the run's files:
+
+- **U1** exactly one learning run for the person's user persona, `proposed` or `no_change`, its agent
+  run `done` in the `retro` role, and `userLearningRuns` 1 in the retro digest;
+- **U2** the run offline: no tool call in `events.jsonl` outside the harness tools, and for a Claude
+  run the tools its CLI offered (the `system/init` line of `stdout.log`) all `mcp__bif__*`;
+- **U3** exactly one successful `submit_persona_learning` call, its Decision for the user persona,
+  and a non-empty assumption;
+- **U4** the stored proposals: at most 3, pending, of that run, an add with one of the user topics,
+  evidence only among the actions the run was shown, an add or replace with at least 3 evidence ids
+  on at least 2 different things and at most 400 characters, and no identifier of the person;
+- **U5** no line and no brief (persona version 1, no adjustment) until the user decides.
+
+| Check | Result | Detail |
+|---|---|---|
+| user-persona/claude (haiku) | **PASS**, 5 of 5 steps | 19.7 s, 2 bif tool calls (`submit_persona_learning` and the lessons retro's `submit_retro`), $0.0092, `promptStoreGaps` `[]`; gate n=12 on 6 things, 12 actions shown; retro `done`, digest `userInteractions` 12, `userLearningRuns` 1, `userProposals` 2; run `proposed` |
+| user-persona/codex, opencode | not run | not attempted |
+
+U2: the learning run's CLI offered 3 tools, none built in, and called only `submit_persona_learning`.
+
+The assumption it stated: "The person you work for treats competitor claims as unproven until several
+independent, dated sources back them. The tool tends to rate threats and include competitors on
+single-source evidence, which…" (cut by the script's log). Its two proposals:
+
+- add (evidence_standards), citing 9 actions: "Does not count a competitor as included or a threat on
+  the strength of a single source; requires several independent, dated sources before a competitor
+  claim is…" (cut by the script's log);
+- add (risk_appetite), citing 6 actions: "Prefers under-calling a competitor's threat level to
+  over-calling it when the support is thin, and expects threat ratings to be lowered to match the
+  strength of…" (cut by the script's log).
+
+No refused call, no failed tool call.
+
 ## Results (2026-11-12)
 
 | Check | Result | Time | Detail |
