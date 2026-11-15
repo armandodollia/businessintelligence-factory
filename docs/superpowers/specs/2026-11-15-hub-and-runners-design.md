@@ -1,6 +1,7 @@
 # Shared hub and local runners — design
 
-Date: 2026-11-15. **Status: draft, waiting for the user's approval. Nothing here is built.**
+Date: 2026-11-15. **Status: draft, revised after the user's answers of 2026-11-15; waiting for approval. Nothing here
+is built.**
 
 Decisions the user did not state are marked **(my call)**.
 
@@ -17,12 +18,16 @@ What the user decided:
 - Both ways of running agents are wanted eventually. First: keep local CLIs on subscriptions while the
   data is central.
 - Scheduled jobs also run on local machines.
+- Where the hub runs is not decided. It must be testable for free and able to grow later (§14).
+- A person can choose to keep what they say about coworkers on their own machine only (§8a).
+- Rows are separated by company, and roles are given at every level of the business tree (§7).
 
 ## 2. Goals, non-goals, anti-goals
 
 Goals
 
-1. One store for the company. Every action is recorded under the person who did it.
+1. One store. Every row belongs to one company and is never read or written from another. Every
+   action is recorded under the person who did it.
 2. An agent run executes on a person's machine, with the CLI and login installed there.
 3. Scheduled work is handed to a person's machine too.
 4. Single-machine use keeps working exactly as today, with no sign-in and no second program.
@@ -31,7 +36,6 @@ Goals
 Non-goals
 
 - Working offline on a laptop and syncing later.
-- Several companies on one hub. One hub serves one company.
 - Company single sign-on **(my call)**; see §14.
 - The hub-side API-key runner itself. This design leaves room for it and does not build it.
 
@@ -40,6 +44,8 @@ Anti-goals
 - One person's subscription silently doing everyone's work.
 - Private text reaching the machine of someone who may not read it: uploads, the hidden research on
   own-company stakeholders, stored site passwords.
+- A row of one company served to, or changed by, a person of another.
+- What a person marked as private about a coworker leaving their machine.
 - A hub that answers without sign-in, or over an unencrypted connection.
 - A run's access token that works after the run, or from a machine the run was not given to.
 
@@ -228,26 +234,53 @@ Each run gets an **initiator**: the person whose action started the research, pi
 - Later: a runner on the hub with an API key registers like any other runner and can be made the
   fallback for jobs that have waited longer than a set time.
 
-## 7. People and access
+## 7. Companies, people and access
 
-- Tables: `people` (id, sign-in name, password hash), `sessions`, `memberships` (person, business
-  tree, role), `runners`.
-- Roles per business tree **(my call)**: `owner` (everything, including members, budgets and hidden
-  stakeholders), `member` (run research, decide, give feedback), `viewer` (read only).
+### 7.1 Companies
+
+A **company** is the top node of a business tree **(my call; the user may want one company to hold
+several trees)**. A hub can hold several companies. A person can belong to more than one.
+
+- Every table gets a `company_id`. Rows that today carry only a node id get it by migration from their
+  node's top node.
+- Code reaches the store only through a handle bound to one company. The handle adds the company to
+  every read and refuses a write for another. There is no unbound handle in request or run code;
+  start-up, migrations and the scheduler's "what is due" query are the only unbound uses.
+- SQLite has no built-in row-level security, so this rule lives in the storage layer. A test walks
+  every table and every repository method and fails when one can return or change a row of another
+  company. A table added later without `company_id` fails that test.
+- A run token is bound to its company, so an agent can never reach another company's rows.
+
+### 7.2 Roles at every level
+
+A role is given to a person at any node of the tree and applies to that node and everything below it.
+
+- Roles **(my call)**: `owner` (everything at that level: members, budgets, schedules), `member` (run
+  research, decide, give feedback), `viewer` (read only).
+- A person with a role on a division sees and acts on that division and its slices. Sibling divisions
+  and the levels above answer 404, except that the names of the levels above are shown so the person
+  can see where they are.
+- A role given lower down can raise, never lower, what a person may do there.
+- Findings at a higher level that a lower node's work relies on (the company profile, shared facts)
+  are readable from below **(my call)**; uploads and hidden stakeholder research of a higher level are
+  not.
+- The person who creates a company is its owner.
+
+### 7.3 People and sign-in
+
+- Tables: `people` (id, sign-in name, password hash), `sessions`, `roles` (person, node, role),
+  `runners`.
 - One more role for the hub as a whole, **hub admin** (the first account) **(my call)**: changes the
-  hub's settings (providers, limits), invites people and sees total cost. Any signed-in person may
-  create a business and becomes its owner.
-- A business a person is not a member of answers 404, as another tree does today. Routes addressed by
-  an id with no business in the path (a run, a request, an evidence copy, a rating, an experiment)
-  look up the business first and apply the same check.
+  hub's settings (providers, limits) and invites people. It gives no access to any company's data.
+- Routes addressed by an id with no node in the path (a run, a request, an evidence copy, a rating, an
+  experiment) look up the node first and apply the same check.
 - The acting person comes from the session and is passed into the core functions that record or use
   it. Several core modules read `actorOf(config)` directly today (learning for personas and the user
   persona, stakeholder statements, calibration, the feedback actions' fallback); each gets the person
   as a parameter. `actorOf(config)` remains only as the person of `local` mode.
-- Sessions use a same-site cookie, and every changing request is checked for its origin, replacing
-  today's rule that only local hosts may call the server.
-- Sign-in **(my call)**: the owner creates an invite link; the person sets a password. No outside
-  identity service is contacted.
+- Sign-in **(my call)**: an owner creates an invite link; the person sets a password. No outside
+  identity service is contacted. Sessions use a same-site cookie, and every changing request is
+  checked for its origin, replacing today's rule that only local hosts may call the server.
 
 ## 8. What changes when several people act
 
@@ -257,11 +290,41 @@ Each run gets an **initiator**: the person whose action started the research, pi
   the answer is recorded under who gave it. Budget extensions need the owner.
 - **Segment persona learning.** Reactions of all members are pooled, each recorded with its person:
   the persona models the market, not a member **(my call)**.
-- **Stakeholder question round.** Open question for the user, see §14.
+- **Stakeholder question round.** Each person with a role on the node gets their own round. A
+  stakeholder opens for a person when that person has answered or skipped its questions; it stays
+  hidden for the others until they have done the same **(my call)**. Answers are private by default
+  (§8a).
+- **A colleague who is a stakeholder.** An owner can mark a stakeholder persona as being about a
+  person of the hub. It is then never shown to that person **(my call)**.
 - **Live updates.** Events are sent only to sessions with access to the business they belong to; the
   stream of all businesses' events is limited to the businesses of the person asking.
 - **Withheld research.** The hidden research on own-company stakeholders stays withheld from every
   member, the owner included, until the question round is done, as today.
+
+## 8a. Keeping what you say about coworkers on your machine
+
+The user decided that a person can keep the data they provide about coworkers on their own machine.
+
+- **What it covers.** A person's answers in the stakeholder question round, their notes on a
+  stakeholder, the reasons they record with a real decision, and stakeholder notes taken from their
+  interview.
+- **Where it lives.** In a small local store kept by the runner on that person's machine. The hub
+  stores only that a private statement exists (its id, the stakeholder, the date), never its text.
+- **How it gets there.** The page in the browser sends private text straight to the runner on
+  `127.0.0.1`, not to the hub. With no runner of theirs connected, the page says the answer cannot be
+  saved privately and offers to wait.
+- **What uses it.** Runs on that person's machine: the runner adds the person's private statements to
+  the prompt of a stakeholder read or a stakeholder learning run for that person.
+- **What follows from it (my call).** Anything learned from private statements stays private too: the
+  adjustments are a private layer on top of the shared stakeholder persona, and reads made with that
+  layer are stored locally and shown only to that person. Colleagues see the shared persona and shared
+  reads.
+- **Default (my call).** Private. A person can share an answer, which sends it to the hub as a normal
+  statement. Sharing cannot be undone by the tool once others' runs have read it.
+- **Costs.** Private data is lost with the machine unless the person backs up the runner's folder.
+  Shared stakeholder personas improve only from what people share.
+- **Limit.** What a person types in the interview is stored on the hub as the interview record. Only
+  the stakeholder notes taken from it can be kept local.
 
 ## 9. Privacy
 
@@ -279,8 +342,10 @@ Each run gets an **initiator**: the person whose action started the research, pi
 
 ## 10. Storage and settings
 
-New tables: `people`, `sessions`, `memberships`, `runners`, `run_jobs`. New columns: `agent_runs`
-gets `initiator`, `runner_id`; requests and approvals get `addressed_to`.
+New tables: `people`, `sessions`, `roles`, `runners`, `run_jobs`, `private_statement_refs`. New
+columns: `company_id` on every table; `agent_runs` gets `initiator`, `runner_id`; requests and
+approvals get `addressed_to`. On the runner: a local store of private statements, private
+adjustments and private reads.
 
 Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`,
 `server.allowInsecure`; `runners.leaseSeconds` 60, `runners.heartbeatSeconds` 15,
@@ -289,7 +354,7 @@ Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`
 ## 11. API
 
 - Sign-in: `POST /api/session`, `DELETE /api/session`, `POST /api/invites`, `POST /api/invites/:code`.
-- Members: `GET/POST/DELETE /api/workspaces/:id/members`.
+- Roles at a node: `GET/POST/DELETE /api/workspaces/:id/roles`.
 - Machines: `POST /api/runners/pairing`, `GET /api/runners`, `PATCH/DELETE /api/runners/:id`.
 - Runner protocol (runner key required): `POST /runner/hello`, `GET /runner/jobs` (held open),
   `POST /runner/jobs/:id/lease`, `POST /runner/jobs/:id/lines`, `POST /runner/jobs/:id/end`,
@@ -299,38 +364,57 @@ Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`
 
 - A sign-in page; a "My machines" page (paired machines, connected or not, what each can run, the
   scheduled-work switch and limits, today's load).
-- On a business: a Members page for the owner.
+- On every node: a People page for its owners (who has which role here and below).
+- On the stakeholder question round: a "keep on this machine" switch per answer, on by default.
 - On runs and tasks: who started it, which machine ran it, or what it is waiting for.
 
 ## 13. Order of building
 
 1. **The seam.** `RunExecutor` and `LocalExecutor`, the supervisor computing the result from raw
    exit data, per-executor limits. No change in behaviour; the existing test suite passes unchanged.
-2. **People.** `server.mode: hub` with sign-in, hub admin, memberships, the acting person passed
-   through the core, access checks on every route and on live events. Runs still start on the hub
-   machine (useful on its own: several people on one machine's CLI login).
-3. **Runners.** Pairing, the job and lease protocol, output streaming, cancel, the local tool gateway,
+2. **Company separation.** `company_id` on every table, the company-bound store handle, the sweep
+   test. Still one person and one machine.
+3. **People and roles.** `server.mode: hub` with sign-in, hub admin, roles at every level, the acting
+   person passed through the core, access checks on every route and on live events. Runs still start
+   on the hub machine.
+4. **Runners.** Pairing, the job and lease protocol, output streaming, cancel, the local tool gateway,
    evidence upload, the local browser, OCR jobs; the hub's agent endpoint closed to the network.
-4. **Routing.** Initiator, eligibility, waiting, scheduled work with limits, private runs, the brief
+5. **Routing.** Initiator, eligibility, waiting, scheduled work with limits, private runs, the brief
    rule, the pipeline lock rule, usage per person and machine.
-5. Later, separately: the hub-side API-key runner.
+6. **Private notes on coworkers.** The runner's local store, the page sending private text to the
+   runner, the private layer on stakeholder personas, per-person question rounds.
+7. Later, separately: the hub-side API-key runner.
 
 Each step is its own plan and merge.
 
-## 14. Open questions for the user
+## 14. Where the hub runs, and open questions
 
-1. **Where does the hub run, and who looks after it?** A machine in the office, a company server, or
-   a rented one. This decides how the encrypted connection is set up and who can reach it from home.
-2. **Stakeholders when colleagues are the stakeholders.** With several members, a member may be one of
-   the researched own-company stakeholders. Proposal: only the owner sees and answers the hidden
-   question round; opened own-company stakeholder personas are visible to the owner and to members the
-   owner names. Is that the right default?
-3. **Who sees which business?** Proposal: membership per business, as in §7. The alternative is that
-   every signed-in person sees every business.
+The hub is one program and one data folder. It needs an address the runners and browsers can reach
+over an encrypted connection; moving it is copying the folder. Options checked on 2026-11-15 (third-
+party pages; confirm on the providers' own pricing pages):
+
+| Option | Cost | Notes |
+|---|---|---|
+| Your own machine on a private network (Tailscale) | Free for 6 users on the personal plan, which is for non-commercial use; $8 per user per month otherwise | Nothing exposed to the internet; connection already encrypted |
+| Your own machine behind a tunnel (Cloudflare Tunnel with Access) | Free up to 50 users | Public address with a sign-in in front; needs a domain |
+| A free cloud server (Oracle Cloud Always Free) | Free | Always on; idle servers are stopped; the free size was reportedly reduced in 2026 |
+| A small rented server | About €5 a month | Simplest to operate; grows by resizing |
+
+Recommendation: test on your own machine on a private network, then move the folder to a small rented
+server when more than a handful of people use it. Beyond one company-sized team on one server, the
+next step is a database server with built-in row-level security, which is a rewrite of the storage
+layer and not part of this design.
+
+Open questions for the user:
+
+1. Is a company the top node of one business tree, or can one company hold several separate trees?
+2. Is "private by default" right for what you say about coworkers, or should sharing be the default?
 
 ## 15. Verification
 
 Unit tests per module; the existing suite unchanged after step 1; a protocol test with a fake runner
 (lease loss, cancel, restart, a token used through the wrong runner); access tests per route for
-owner, member, viewer and non-member; a two-process test on one machine (hub and runner over
+owner, member, viewer and non-member at each level of a three-level tree; the company sweep test;
+a test that private text never reaches the hub (the hub's store and logs searched for it); a
+two-process test on one machine (hub and runner over
 loopback with encryption); one real run through a runner with the Claude CLI on the cheapest model.
