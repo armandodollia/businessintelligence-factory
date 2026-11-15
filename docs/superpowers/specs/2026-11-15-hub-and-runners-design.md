@@ -1,7 +1,7 @@
 # Shared hub and local runners — design
 
-Date: 2026-11-15. **Status: draft, revised after the user's answers of 2026-11-15; waiting for approval. Nothing here
-is built.**
+Date: 2026-11-15. **Status: draft, revised twice after the user's answers of 2026-11-15; waiting for
+approval. Nothing here is built.**
 
 Decisions the user did not state are marked **(my call)**.
 
@@ -19,15 +19,21 @@ What the user decided:
   data is central.
 - Scheduled jobs also run on local machines.
 - Where the hub runs is not decided. It must be testable for free and able to grow later (§14).
-- A person can choose to keep what they say about coworkers on their own machine only (§8a).
 - Rows are separated by company, and roles are given at every level of the business tree (§7).
+- A company is the top node of one business tree.
+- A person chooses which parts of the feedback they give about another person, a division or a
+  company go to the shared store. The rest stays on their machine (§8a).
+- Whatever is shared is stripped of everything that points to who gave it, including upload records
+  and other traces (§8b).
+- Improvements the retro finds still reach the shared store, without the reasons people gave (§8c).
 
 ## 2. Goals, non-goals, anti-goals
 
 Goals
 
 1. One store. Every row belongs to one company and is never read or written from another. Every
-   action is recorded under the person who did it.
+   action that changes shared findings is recorded under the person who did it; opinions shared
+   without a name are recorded under nobody (§8b).
 2. An agent run executes on a person's machine, with the CLI and login installed there.
 3. Scheduled work is handed to a person's machine too.
 4. Single-machine use keeps working exactly as today, with no sign-in and no second program.
@@ -45,7 +51,8 @@ Anti-goals
 - Private text reaching the machine of someone who may not read it: uploads, the hidden research on
   own-company stakeholders, stored site passwords.
 - A row of one company served to, or changed by, a person of another.
-- What a person marked as private about a coworker leaving their machine.
+- Feedback a person did not choose to share leaving their machine.
+- A shared opinion that the tool's own records can tie to the person who gave it.
 - A hub that answers without sign-in, or over an unencrypted connection.
 - A run's access token that works after the run, or from a machine the run was not given to.
 
@@ -238,8 +245,8 @@ Each run gets an **initiator**: the person whose action started the research, pi
 
 ### 7.1 Companies
 
-A **company** is the top node of a business tree **(my call; the user may want one company to hold
-several trees)**. A hub can hold several companies. A person can belong to more than one.
+A **company** is the top node of a business tree (the user's decision). A hub can hold several
+companies. A person can belong to more than one.
 
 - Every table gets a `company_id`. Rows that today carry only a node id get it by migration from their
   node's top node.
@@ -288,8 +295,9 @@ A role is given to a person at any node of the tree and applies to that node and
   run carries the brief of its initiator.
 - **Requests from agents** (approvals, logins, captchas) go to the initiator; any member may answer;
   the answer is recorded under who gave it. Budget extensions need the owner.
-- **Segment persona learning.** Reactions of all members are pooled, each recorded with its person:
-  the persona models the market, not a member **(my call)**.
+- **Segment persona learning.** The persona models the market, not a member. Reactions people shared
+  are pooled on the hub. Reasons people kept private are read only by the learning step on their own
+  machine, which sends back proposals without those reasons (§8c).
 - **Stakeholder question round.** Each person with a role on the node gets their own round. A
   stakeholder opens for a person when that person has answered or skipped its questions; it stays
   hidden for the others until they have done the same **(my call)**. Answers are private by default
@@ -301,40 +309,147 @@ A role is given to a person at any node of the tree and applies to that node and
 - **Withheld research.** The hidden research on own-company stakeholders stays withheld from every
   member, the owner included, until the question round is done, as today.
 
-## 8a. Keeping what you say about coworkers on your machine
+## 8a. Feedback stays on your machine unless you share it
 
-The user decided that a person can keep the data they provide about coworkers on their own machine.
+The user decided that a person chooses which parts of their feedback about another person, a division
+or a company go to the shared store.
 
-- **What it covers.** A person's answers in the stakeholder question round, their notes on a
-  stakeholder, the reasons they record with a real decision, and stakeholder notes taken from their
-  interview.
-- **Where it lives.** In a small local store kept by the runner on that person's machine. The hub
-  stores only that a private statement exists (its id, the stakeholder, the date), never its text.
-- **How it gets there.** The page in the browser sends private text straight to the runner on
-  `127.0.0.1`, not to the hub. With no runner of theirs connected, the page says the answer cannot be
-  saved privately and offers to wait.
-- **What uses it.** Runs on that person's machine: the runner adds the person's private statements to
-  the prompt of a stakeholder read or a stakeholder learning run for that person.
-- **What follows from it (my call).** Anything learned from private statements stays private too: the
-  adjustments are a private layer on top of the shared stakeholder persona, and reads made with that
-  layer are stored locally and shown only to that person. Colleagues see the shared persona and shared
-  reads.
-- **Default (my call).** Private. A person can share an answer, which sends it to the hub as a normal
-  statement. Sharing cannot be undone by the tool once others' runs have read it.
+- **Decisions and opinions are treated differently (my call).**
+  - A *decision* changes what everyone sees: accepting or rejecting a recommendation, editing a
+    finding, overriding a result, changing a budget. It takes effect at once and is recorded under
+    the person, as today. It cannot be hidden anyway: colleagues see the change happen.
+  - An *opinion* is everything a person says around it: the reason typed with a decision, a rating
+    and its comment, answers in the stakeholder question round, notes on a stakeholder, a division or
+    a company, stakeholder notes taken from their interview, and files they upload as background.
+    Opinions are private by default.
+- **Where private opinions live.** In a local store kept by the runner on that person's machine. The
+  hub stores nothing about them, not even that they exist **(my call; the earlier draft kept a
+  reference row, which is itself a trace)**.
+- **How they get there.** The page in the browser sends opinion text straight to the runner on
+  `127.0.0.1`, not to the hub. With no runner of theirs connected, the page says the text cannot be
+  saved and offers to wait.
+- **Choosing what to share.** The runner splits a piece of feedback into single statements. The
+  person ticks the statements to share. Before anything leaves, the page shows the exact text that
+  will be sent (after §8b), and nothing is sent without that confirmation.
+- **What uses private opinions.** Only runs on that person's machine: stakeholder reads and learning
+  for that person, the "persona of you" learning, and that person's part of the retro (§8c).
+- **What follows (my call).** Anything learned from private opinions is private too: a private layer
+  on top of the shared stakeholder persona, and reads made with it, are stored locally and shown only
+  to that person.
 - **Costs.** Private data is lost with the machine unless the person backs up the runner's folder.
-  Shared stakeholder personas improve only from what people share.
+  Shared personas and lessons improve only from what people share and from §8c.
 - **Limit.** What a person types in the interview is stored on the hub as the interview record. Only
-  the stakeholder notes taken from it can be kept local.
+  the notes taken from it are private.
+
+## 8b. Sharing without a name
+
+Whatever a person shares is stripped of what points to them. Removing the name is the small part;
+most of the work is the traces and the wording.
+
+**What this protects against, and what it cannot.** It protects against anyone who reads the pages,
+the hub's database, its logs or its backups. It does not protect against (a) a group too small to
+hide in, (b) a statement only one person could know, (c) a hub operator who changes the program to
+record who sent what, or a proxy in front of the hub that logs addresses. The tool handles (a) and
+(b) by refusing or warning; (c) needs anonymous credentials and a relay, which is noted as a later
+option and not designed here.
+
+**Rule 1: the stripping happens on the contributor's machine.** The hub cannot forget what it has
+received, so the hub never receives the original.
+
+1. *Rewrite.* An offline run on the person's own CLI restates each ticked statement as a neutral
+   claim about its subject: third person, no "I" or "my", no mention of when or where the person
+   learned it, no reference to their role, team or relationship to the subject. This removes writing
+   style, which identifies people in small groups.
+2. *Identifier check (code, not a prompt).* The rewritten text is refused when it contains the
+   contributor's name, sign-in name, machine name, role title, team or node names that only they
+   belong to, or wording from their private store that they did not tick. This extends the existing
+   `containsIdentifier` rule of the "persona of you".
+3. *Guessing test.* A second offline run gets the rewritten statement and the list of people who could
+   have written it, and is asked who wrote it and why. If it names the contributor with a reason
+   found in the text, the page shows that reason and the person edits, generalises or withdraws.
+4. *Confirmation.* The person sees the final text and confirms.
+5. With no CLI on the machine that can run offline, sharing without a name is not offered.
+
+**Rule 2: enough people to hide among (my call: 4).** A statement about a node can be shared without
+a name only when at least 4 people could have written it (people with a member or owner role there).
+Below that the page says so and offers two choices: share it with your name, or keep it private.
+
+**Rule 3: no trace of the moment or the sender.**
+
+| Trace | Handling |
+|---|---|
+| Person, runner, session on the row | Never written. The row's actor is `anonymous`. |
+| Time of sending | Statements wait in an outbox on the runner and are released once a week, with the retro. The hub stores only the week. |
+| Order of arrival | The hub collects the week's releases for one day in memory and writes them together in shuffled order, so insert order says nothing. A release that arrives later waits for the next week's write. The runner keeps its outbox until the hub confirms the write. |
+| Row ids | Ids embed the millisecond today (`newId`). Shared statements get fully random ids. |
+| Request log, live events, run log | The receiving route logs no person and no address; no live event is sent per statement, one per released batch; the rewrite and the guessing test are local runs the hub never sees. |
+| Usage and cost | The local runs are counted on the runner only. |
+| Who was connected | The hub accepts the weekly release from every connected runner, including those with nothing to send (an empty release), so sending is not a signal. |
+| Membership check | The hub checks the runner's key to confirm the sender has a role on the node, then drops the identity before storing. It keeps a per-week count per node, not who. |
+
+**Uploads (my call).** A file is the hardest thing to strip: its name, its author and last-editor
+fields, tracked changes, comments, photo location data, its checksum (which matches the copy on the
+person's disk), the upload time, and the reading job sent to "the uploader's machine" (§5.7) all
+point at the person.
+
+- Default: the file stays on the person's machine. It is read there (OCR included), and only
+  statements taken from it go through steps 1 to 4 above. The shared store holds no file, no file
+  name, no checksum and no upload record. The statements keep the existing mark that they come from
+  an upload, so they stay out of exports by default.
+- If the person chooses to share the file itself: the runner rebuilds it as plain text or as a new
+  PDF made from the page images, with no document properties, and re-encodes pictures without their
+  embedded data; it is renamed from its content, checksummed after rebuilding, and released with the
+  weekly batch. The page warns that the content of a document often shows whose it is.
+- A file shared with a name is an ordinary upload, as today.
+
+**Evidence for a shared statement.** Every claim stays tied to an evidence copy: the shared statement
+itself is the evidence copy, typed "statement from a member, unnamed", with the week and the node.
+Readers and agents are told it is one unnamed person's view, not a verified finding.
+
+**One sweep test guards all of this.** It contributes a statement and a file as a known person
+through a real runner, then searches every table, log file and event of the hub for that person's
+id, runner id, session id, address, the original wording, the file's original name and checksum, and
+any time finer than the week. Any hit fails. A table or log added later is covered automatically.
+
+## 8c. Improvements from the retro, without the reasons
+
+The user decided that improvements found in the retro still reach the shared store, without the
+reasoning people gave.
+
+- The retro has two parts. The hub's part works from shared material, as today. Each person's part
+  runs on their own machine and reads their private opinions; it is an offline run.
+- A person's part produces proposals: a lesson rule, a persona adjustment, a prompt correction. Each
+  has the rule text and, separately, why (the rationale and the feedback it rests on). Today these
+  sit in the same row (`lesson_proposals.rationale`, `evidence`, `persona_proposals.rationale`).
+- Only the rule text leaves the machine, through the same path as §8b: identifier check, guessing
+  test, the weekly release, no name. One check is added: the rule may not contain the name of any
+  person, division or company that the contributor's private opinions are about. The local store
+  knows those names, so this is checked in code. A rule must be general ("check revenue figures
+  against a second source"), not about a subject ("the figures from division X are unreliable").
+- The why stays local. The person who gave the feedback can see it on their own machine.
+- **Who releases, who accepts (my call).** The contributor sees their proposals with the reasons and
+  releases the ones they agree to. An owner then accepts or rejects each for the company, seeing the
+  rule and how many people's machines proposed the same thing (as "1", "2" or "3 or more"), never why.
+- **Cost.** Owners judge a rule without its reasons. A rule proposed from one person's machine alone
+  is marked as such.
 
 ## 9. Privacy
 
 - A runner receives prompts, and the person's CLI keeps its own transcripts. So a run may only be
   given to the machine of a person who is allowed to read everything in its prompt. The routing in §6
   follows from this.
-- The feedback log, run logs and stored prompts of a business are readable by its members. This is
-  acceptable for shared findings, with one exception that needs a rule: another member's "persona of
-  you" lines appear in accept events and in learning prompts. In hub mode those are served only to
-  that person and the owner **(my call)**.
+- The feedback log, run logs and stored prompts of a business are readable by its members. The
+  feedback log on the hub holds decisions only; opinions are local or shared without a name (§8a,
+  §8b). One exception needs a rule: another member's "persona of you" lines appear in accept events
+  and in learning prompts. In hub mode those are served only to that person and the owner
+  **(my call)**.
+- Hiding who said something does not hide whom it is about. Statements about a named coworker on a
+  company's hub are personal data about that coworker, and in many countries that person can ask to
+  see them. The user checks what applies; the tool marks such statements so they can be listed and
+  removed per person.
+- The rewrite and the guessing test send the text to the model provider behind the person's CLI, as
+  every run does. A person who wants it never to leave the machine can point those two runs at a
+  local model through OpenCode.
 - Usage and cost are recorded per runner and per person, so the pages can show whose subscription
   carried what.
 - Whether a subscription may be used for unattended or shared work is set by each provider's terms.
@@ -342,14 +457,16 @@ The user decided that a person can keep the data they provide about coworkers on
 
 ## 10. Storage and settings
 
-New tables: `people`, `sessions`, `roles`, `runners`, `run_jobs`, `private_statement_refs`. New
-columns: `company_id` on every table; `agent_runs` gets `initiator`, `runner_id`; requests and
-approvals get `addressed_to`. On the runner: a local store of private statements, private
-adjustments and private reads.
+New tables: `people`, `sessions`, `roles`, `runners`, `run_jobs`, `shared_statements` (random id,
+company, node, subject, text, week; no person, no runner, no time). New columns: `company_id` on
+every table; `agent_runs` gets `initiator`, `runner_id`; requests and approvals get `addressed_to`.
+On the runner: a local store of private opinions, private files, private adjustments, private reads,
+retro proposals with their reasons, and the outbox for the weekly release.
 
 Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`,
 `server.allowInsecure`; `runners.leaseSeconds` 60, `runners.heartbeatSeconds` 15,
-`runners.maxLostLeases` 3. Per-machine settings live in `runners`.
+`runners.maxLostLeases` 3; `sharing.minPeople` 4, `sharing.releaseEvery` one week. Per-machine
+settings live in `runners`.
 
 ## 11. API
 
@@ -365,7 +482,11 @@ Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`
 - A sign-in page; a "My machines" page (paired machines, connected or not, what each can run, the
   scheduled-work switch and limits, today's load).
 - On every node: a People page for its owners (who has which role here and below).
-- On the stakeholder question round: a "keep on this machine" switch per answer, on by default.
+- Wherever a person gives an opinion: the statements it was split into, a tick box per statement,
+  the exact text that would be shared, and what the guessing test found. Nothing is ticked by default.
+- A "Waiting to be shared" list on the person's machine, where a statement can be withdrawn until the
+  weekly release. After release it cannot be recalled.
+- For owners: proposed rules from the retro with a count, no reasons.
 - On runs and tasks: who started it, which machine ran it, or what it is waiting for.
 
 ## 13. Order of building
@@ -381,9 +502,15 @@ Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`
    evidence upload, the local browser, OCR jobs; the hub's agent endpoint closed to the network.
 5. **Routing.** Initiator, eligibility, waiting, scheduled work with limits, private runs, the brief
    rule, the pipeline lock rule, usage per person and machine.
-6. **Private notes on coworkers.** The runner's local store, the page sending private text to the
-   runner, the private layer on stakeholder personas, per-person question rounds.
-7. Later, separately: the hub-side API-key runner.
+6. **Private opinions.** The runner's local store, the page sending opinion text to the runner, the
+   split between decisions and opinions, the private layer on stakeholder personas, per-person
+   question rounds.
+7. **Sharing without a name.** Splitting into statements, the rewrite, the identifier check, the
+   guessing test, the outbox and weekly release, the receiving route, uploads, the sweep test.
+8. **The retro on runners.** Each person's part of the retro, proposals without reasons, the owner's
+   accept step.
+9. Later, separately: the hub-side API-key runner; anonymous credentials and a relay, if the hub
+   operator must also be unable to tell who sent what.
 
 Each step is its own plan and merge.
 
@@ -407,14 +534,17 @@ layer and not part of this design.
 
 Open questions for the user:
 
-1. Is a company the top node of one business tree, or can one company hold several separate trees?
-2. Is "private by default" right for what you say about coworkers, or should sharing be the default?
+1. Decisions that change shared findings (accept, reject, edit) stay recorded under the person, and
+   only opinions can be shared without a name (§8a). Is that the split you want?
+2. Is 4 the right smallest group for sharing without a name (§8b)?
 
 ## 15. Verification
 
 Unit tests per module; the existing suite unchanged after step 1; a protocol test with a fake runner
 (lease loss, cancel, restart, a token used through the wrong runner); access tests per route for
 owner, member, viewer and non-member at each level of a three-level tree; the company sweep test;
-a test that private text never reaches the hub (the hub's store and logs searched for it); a
+a test that private text never reaches the hub (the hub's store and logs searched for it); the sweep
+test for shared statements and files (§8b); a test that a retro proposal reaches the hub with no
+rationale and no subject's name (§8c); the group-size rule at 3 and 4 people; a
 two-process test on one machine (hub and runner over
 loopback with encryption); one real run through a runner with the Claude CLI on the cheapest model.
