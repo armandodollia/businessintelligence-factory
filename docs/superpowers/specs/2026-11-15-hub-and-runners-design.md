@@ -370,9 +370,37 @@ received, so the hub never receives the original.
 4. *Confirmation.* The person sees the final text and confirms.
 5. With no CLI on the machine that can run offline, sharing without a name is not offered.
 
-**Rule 2: enough people to hide among (my call: 4).** A statement about a node can be shared without
-a name only when at least 4 people could have written it (people with a member or owner role there).
-Below that the page says so and offers two choices: share it with your name, or keep it private.
+**Rule 2: the hub stores findings several people agree on, not what one person said (my call, after
+the user's remark that the findings matter and the specifics do not).**
+
+- The runner turns each ticked statement into a *claim* in a fixed shape: the subject (a person, a
+  division, a company), a topic from the company's topic list, a direction (strength, concern,
+  neutral fact), and one general sentence. Steps 1 to 4 above apply to that sentence.
+- In the weekly release the hub groups claims by subject, topic and direction, in memory. A group
+  with claims from at least 3 different people (my number) becomes one shared finding: a merge run
+  writes one sentence from the group, and the finding is stored with "raised by 3 or more people"
+  (or the count in bands: 3–5, 6–10, more). The single claims are then dropped and never stored.
+- A group below 3 is dropped from the hub's memory. The claims stay in their runners' outboxes and
+  are offered again each week, so a finding appears when enough people have said it, however far
+  apart in time.
+- What only one or two people say is never stored without a name. The page says "waiting for others
+  to say the same" and offers "share with your name" instead.
+- The merge run is offline and goes to an owner's machine. Its prompt holds the group's stripped
+  claims in shuffled order; that machine's CLI keeps its own record of them. This is the one place a
+  single stripped claim is seen outside its author's machine.
+- The topic list belongs to the company; owners edit it. It starts from a default list.
+
+**Considered and not used.**
+
+- *Storing the text in another language.* Anyone can translate it back, so it hides nothing, and it
+  makes the store harder to read and search. Translating to another language and back is a known way
+  to remove writing style; the rewrite in step 1 may do this, and the result is stored in the
+  original language.
+- *Storing only a numeric vector (an embedding).* Vectors are not one-way: published attacks rebuild
+  most of the original sentence from its vector (Morris et al., 2023, recovered 92% of short texts
+  exactly). The agents also cannot use a vector: the CLIs read text, a claim must stay tied to
+  evidence a person can read, and the contributor could no longer check what leaves their machine.
+  Vectors would only be useful later for matching claims that say the same thing in different words.
 
 **Rule 3: no trace of the moment or the sender.**
 
@@ -402,9 +430,10 @@ point at the person.
   weekly batch. The page warns that the content of a document often shows whose it is.
 - A file shared with a name is an ordinary upload, as today.
 
-**Evidence for a shared statement.** Every claim stays tied to an evidence copy: the shared statement
-itself is the evidence copy, typed "statement from a member, unnamed", with the week and the node.
-Readers and agents are told it is one unnamed person's view, not a verified finding.
+**Evidence for a shared finding.** Every claim stays tied to an evidence copy: the shared finding
+itself is the evidence copy, typed "view of several members, unnamed", with the week it was first
+reached, the node and the count band. Readers and agents are told it is what several people think,
+not a verified fact.
 
 **One sweep test guards all of this.** It contributes a statement and a file as a known person
 through a real runner, then searches every table, log file and event of the hub for that person's
@@ -457,15 +486,16 @@ reasoning people gave.
 
 ## 10. Storage and settings
 
-New tables: `people`, `sessions`, `roles`, `runners`, `run_jobs`, `shared_statements` (random id,
-company, node, subject, text, week; no person, no runner, no time). New columns: `company_id` on
+New tables: `people`, `sessions`, `roles`, `runners`, `run_jobs`, `shared_findings` (random id,
+company, node, subject, topic, direction, text, count band, week; no person, no runner, no time),
+`sharing_topics`. New columns: `company_id` on
 every table; `agent_runs` gets `initiator`, `runner_id`; requests and approvals get `addressed_to`.
 On the runner: a local store of private opinions, private files, private adjustments, private reads,
 retro proposals with their reasons, and the outbox for the weekly release.
 
 Settings: `server.mode`, `server.publicUrl`, `server.tls` or `server.trustProxy`,
 `server.allowInsecure`; `runners.leaseSeconds` 60, `runners.heartbeatSeconds` 15,
-`runners.maxLostLeases` 3; `sharing.minPeople` 4, `sharing.releaseEvery` one week. Per-machine
+`runners.maxLostLeases` 3; `sharing.minPeople` 3, `sharing.releaseEvery` one week. Per-machine
 settings live in `runners`.
 
 ## 11. API
@@ -484,8 +514,9 @@ settings live in `runners`.
 - On every node: a People page for its owners (who has which role here and below).
 - Wherever a person gives an opinion: the statements it was split into, a tick box per statement,
   the exact text that would be shared, and what the guessing test found. Nothing is ticked by default.
-- A "Waiting to be shared" list on the person's machine, where a statement can be withdrawn until the
-  weekly release. After release it cannot be recalled.
+- A "Waiting to be shared" list on the person's machine: each claim, whether it is waiting for
+  others to say the same, and a button to withdraw it. Once it has become part of a shared finding it
+  cannot be recalled.
 - For owners: proposed rules from the retro with a count, no reasons.
 - On runs and tasks: who started it, which machine ran it, or what it is waiting for.
 
@@ -505,8 +536,9 @@ settings live in `runners`.
 6. **Private opinions.** The runner's local store, the page sending opinion text to the runner, the
    split between decisions and opinions, the private layer on stakeholder personas, per-person
    question rounds.
-7. **Sharing without a name.** Splitting into statements, the rewrite, the identifier check, the
-   guessing test, the outbox and weekly release, the receiving route, uploads, the sweep test.
+7. **Sharing without a name.** Splitting into statements, claims in the fixed shape, the rewrite, the
+   identifier check, the guessing test, the outbox and weekly release, grouping and the merge run,
+   the topic list, uploads, the sweep test.
 8. **The retro on runners.** Each person's part of the retro, proposals without reasons, the owner's
    accept step.
 9. Later, separately: the hub-side API-key runner; anonymous credentials and a relay, if the hub
@@ -536,7 +568,8 @@ Open questions for the user:
 
 1. Decisions that change shared findings (accept, reject, edit) stay recorded under the person, and
    only opinions can be shared without a name (§8a). Is that the split you want?
-2. Is 4 the right smallest group for sharing without a name (§8b)?
+2. A view is stored without a name only once 3 different people have said the same (§8b). What one
+   or two people say waits, or is shared with their name. Is that right, and is 3 the right number?
 
 ## 15. Verification
 
@@ -545,6 +578,6 @@ Unit tests per module; the existing suite unchanged after step 1; a protocol tes
 owner, member, viewer and non-member at each level of a three-level tree; the company sweep test;
 a test that private text never reaches the hub (the hub's store and logs searched for it); the sweep
 test for shared statements and files (§8b); a test that a retro proposal reaches the hub with no
-rationale and no subject's name (§8c); the group-size rule at 3 and 4 people; a
+rationale and no subject's name (§8c); the agreement rule at 2 and 3 people, and that a group below 3 leaves nothing on the hub; a
 two-process test on one machine (hub and runner over
 loopback with encryption); one real run through a runner with the Claude CLI on the cheapest model.
