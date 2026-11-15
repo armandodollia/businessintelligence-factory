@@ -56,8 +56,9 @@ export type ResearchDeps = {
   /** Aborting stops every run started through these deps (no task state is changed afterwards). */
   signal?: AbortSignal;
   /**
-   * Agent-less phases: `persona_panel` → `runPersonaPanel` (Task 12), `scoring` →
-   * `scoreRecommendations` (Task 13). A phase without a runner fails its ResearchRun.
+   * Agent-less phases: `flow_ranking` → `runFlowRanking` (flows/round.ts), `persona_panel` →
+   * `runPersonaPanel` (Task 12), `scoring` → `scoreRecommendations` (Task 13). A phase without a
+   * runner fails its ResearchRun.
    */
   phaseRunners?: Partial<Record<Phase, PhaseRunner>>;
 };

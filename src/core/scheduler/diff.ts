@@ -1,6 +1,8 @@
 import type { Store } from '../store/db.js';
 import type { Artifact, Finding } from '../types.js';
 import { knowledgeRepos } from '../store/repos.js'; // KS-5
+import { flowRepos } from '../flows/repos.js'; // flow records
+import type { FlowRankSnapshot } from '../flows/types.js';
 
 /** `subject`: the competitor / company the flow belongs to (finding subject, or the screenshot's source host). */
 export type ChangedArtifact = { subject: string; flow: string; step: number; prev: string; next: string };
@@ -22,6 +24,25 @@ export type RunDiff = {
   retracted: string[];
   /** KS-5: applied confirmations of the next run. */
   confirmed: number;
+  /** Flow records (flow design §8.3): new flows, new versions, confirmations and ranking moves of the next run. */
+  flows: FlowChanges;
+};
+
+/**
+ * What the next run changed in the flow records (flow design §8.3):
+ * - `newFlows`: first versions it saved (current, not superseded);
+ * - `newVersions`: versions it saved that replaced a version and became current (a candidate that was
+ *   never promoted is not one): old → new;
+ * - `confirmed`: flows of earlier runs it confirmed unchanged (distinct flows, from its `save_flow` records);
+ * - `rankMoves`: per flow type, the flows whose position differs between the latest rank snapshot taken
+ *   for the previous run and the latest taken for the next run, matched by lineage (a new version keeps
+ *   its lineage's place); positions only, a score is optional. No snapshot for either run: none.
+ */
+export type FlowChanges = {
+  newFlows: string[];
+  newVersions: Array<{ from: string; to: string }>;
+  confirmed: number;
+  rankMoves: Array<{ flowTypeId: string; flowId: string; from: number; to: number }>;
 };
 
 /** Lowercase, punctuation removed, whitespace collapsed. */
@@ -106,7 +127,56 @@ export function diffRuns(prevRunId: string, nextRunId: string, deps: { store: St
     }
   }
   changedArtifacts.sort((a, b) => a.subject.localeCompare(b.subject) || a.flow.localeCompare(b.flow) || a.step - b.step);
-  return { newFindings, removedSubjects, changedArtifacts, replaced: nextLineage.replaced, retracted: nextLineage.retracted, confirmed: nextLineage.confirmed };
+  return {
+    newFindings, removedSubjects, changedArtifacts, replaced: nextLineage.replaced, retracted: nextLineage.retracted, confirmed: nextLineage.confirmed,
+    flows: flowChanges(store, prevRunId, nextRunId),
+  };
+}
+
+// --- flow records: "what changed" (flow design §8.3) ----------------------------------------------
+
+/** `FlowChanges` of the next run against the previous one (see the type). */
+export function flowChanges(store: Store, prevRunId: string, nextRunId: string): FlowChanges {
+  const r = flowRepos(store);
+  const saved = r.flows.list({ runId: nextRunId }).filter((f) => f.status !== 'superseded' && f.lifecycle !== 'candidate');
+  const newFlows = saved.filter((f) => !f.replacesId).map((f) => f.id);
+  const newVersions = saved.filter((f) => f.replacesId).map((f) => ({ from: f.replacesId!, to: f.id }));
+
+  // Confirmations: the next run's `save_flow` records that confirmed a flow saved before it.
+  const confirmedIds = new Set<string>();
+  for (const task of store.tasks.list({ runId: nextRunId })) {
+    for (const run of store.agentRuns.list({ taskId: task.id })) {
+      for (const d of store.decisions.list({ agentRunId: run.id, kind: 'decision' })) {
+        const p = d.payload as { tool?: unknown; flowId?: unknown; result?: { relation?: unknown } } | null;
+        if (p?.tool !== 'save_flow' || p.result?.relation !== 'confirmed' || typeof p.flowId !== 'string') continue;
+        const f = r.flows.get(p.flowId);
+        if (f && f.status !== 'superseded' && f.runId !== nextRunId) confirmedIds.add(f.id);
+      }
+    }
+  }
+
+  // Ranking moves: latest snapshot per flow type of each run, flows matched by lineage.
+  const latest = (runId: string): Map<string, FlowRankSnapshot> => {
+    const out = new Map<string, FlowRankSnapshot>();
+    for (const s of r.rankSnapshots.list({ researchRunId: runId })) {
+      const have = out.get(s.flowTypeId);
+      if (!have || s.createdAt >= have.createdAt) out.set(s.flowTypeId, s);
+    }
+    return out;
+  };
+  const lineageOf = (flowId: string) => r.flows.get(flowId)?.lineageId ?? flowId;
+  const before = latest(prevRunId);
+  const rankMoves: FlowChanges['rankMoves'] = [];
+  for (const [flowTypeId, next] of latest(nextRunId)) {
+    const prev = before.get(flowTypeId);
+    if (!prev) continue;
+    const was = new Map(prev.ranking.map((x) => [lineageOf(x.flowId), x.position]));
+    for (const x of next.ranking) {
+      const from = was.get(lineageOf(x.flowId));
+      if (from !== undefined && from !== x.position) rankMoves.push({ flowTypeId, flowId: x.flowId, from, to: x.position });
+    }
+  }
+  return { newFlows, newVersions, confirmed: confirmedIds.size, rankMoves };
 }
 
 // --- knowledge store KS-5: "what changed" from fact lineage (design §11) ---------------------------

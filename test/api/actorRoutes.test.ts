@@ -103,6 +103,17 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/audits': { test: 'test/api/experimentRoutes.test.ts' },
   'POST /api/workspaces/:id/audit-schedules': { test: 'test/api/experimentRoutes.test.ts' },
   'POST /api/workspaces/:id/experiments': { test: 'test/api/experimentRoutes.test.ts' },
+  // flow records and ranking
+  'POST /api/workspaces/:id/flows/verdicts/:verdictId/reaction': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/:flowId/reaction': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/overrides': { test: 'test/api/flowRoutes.test.ts' },
+  'DELETE /api/workspaces/:id/flows/overrides/:overrideId': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/overrides/:overrideId/confirm': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/:flowId/checks': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/types/:typeId/decision': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/checklists/:checklistId/decision': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/checklists/:checklistId/edit': { test: 'test/api/flowRoutes.test.ts' },
+  'POST /api/workspaces/:id/flows/mentions/:mentionId/attribution': { test: 'test/api/flowRoutes.test.ts' },
 };
 
 /**

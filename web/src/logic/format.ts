@@ -8,6 +8,21 @@ export function formatValue(v: unknown): string {
   return JSON.stringify(v);
 }
 
+/**
+ * The address when it is safe to put in an `href`: only `http:` and `https:` URLs. Anything else
+ * (`javascript:`, `data:`, unparseable) is undefined, so the view shows it as plain text. React 18
+ * does not block `javascript:` URLs, and served addresses can come from scraped third-party pages.
+ */
+export function safeHref(url: string | undefined | null): string | undefined {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function shortDate(iso: string | undefined): string {
   if (!iso) return '';
   const d = new Date(iso);

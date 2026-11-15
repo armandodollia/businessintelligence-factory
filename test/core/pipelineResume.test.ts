@@ -22,7 +22,7 @@ function setup(opts: SetupOptions) {
 }
 
 describe('pipeline persistence', () => {
-  it('a 6-phase scheduled pipeline interrupted in market research resumes through scoring, then records what changed', async () => {
+  it('a 7-phase scheduled pipeline interrupted in market research resumes through scoring, then records what changed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bif-pipeline-'));
     // --- process 1: the pipeline starts; the server dies during market research.
     const ac = new AbortController();
@@ -47,6 +47,7 @@ describe('pipeline persistence', () => {
     const ran: string[] = [];
     const s2 = setup({ dir, pick: (r) => (r.kind === 'orchestrate' ? async () => {} : undefined) });
     s2.deps.phaseRunners = {
+      flow_ranking: async () => void ran.push('flow_ranking'),
       persona_panel: async () => void ran.push('persona_panel'),
       scoring: async () => void ran.push('scoring'),
     };
@@ -57,14 +58,14 @@ describe('pipeline persistence', () => {
     expect(runs.map((r) => r.phase)).toEqual(ALL_PHASES);
     expect(runs.every((r) => r.status === 'done' && r.pipelineId === pipeline!.id && r.scheduleId === schedule.id)).toBe(true);
     expect(runs[0]!.id).toBe(interrupted[0]!.id); // the interrupted run was continued, not restarted
-    expect(ran).toEqual(['persona_panel', 'scoring']);
-    expect(s2.store.pipelines.get(pipeline!.id)).toMatchObject({ status: 'done', nextIndex: 6 });
+    expect(ran).toEqual(['flow_ranking', 'persona_panel', 'scoring']);
+    expect(s2.store.pipelines.get(pipeline!.id)).toMatchObject({ status: 'done', nextIndex: 7 });
     expect(isPipelineLocked(s2.store, 'ws_a')).toBe(false);
     const changes = s2.store.decisions
       .list({ workspaceId: 'ws_a', agentRunId: 'scheduler' })
       .filter((d) => (d.payload as { event?: string }).event === 'what_changed');
     expect(changes).toHaveLength(1);
-    expect(changes[0]!.payload).toMatchObject({ phase: 'scoring', prevRunId: prevScoring.id, nextRunId: runs[5]!.id, scheduleName: 'weekly' });
+    expect(changes[0]!.payload).toMatchObject({ phase: 'scoring', prevRunId: prevScoring.id, nextRunId: runs[6]!.id, scheduleName: 'weekly' });
   });
 
   it('a pipeline stops (failed) after a failed phase and is not resumed', async () => {

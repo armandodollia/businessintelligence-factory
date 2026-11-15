@@ -3,7 +3,8 @@
  * live here; views render what these return and call the returned actions.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, api, artifactUrl, exportUrl } from './api.js';
+import { ApiError, api, artifactUrl, exportUrl, flowsApi } from './api.js';
+import { plural } from './flows.js';
 import { exportSummaryView } from './exportSummary.js';
 import { subscribe } from './sse.js';
 import {
@@ -13,6 +14,7 @@ import {
   WEIGHT_KEYS,
   type AppliedPromptPatch,
   type ChangeEntry,
+  type FlowChanges,
   type OutputStatus,
   type PatchRole,
   type PromptPatch,
@@ -23,6 +25,11 @@ import {
 import type {
   Artifact,
   BifConfig,
+  CheckAnswer,
+  ChecklistDecisionInput,
+  ChecklistEditInput,
+  FlowReaction,
+  FlowTypeDecisionInput,
   BusEvent,
   CreateWorkspaceInput,
   Criteria,
@@ -942,6 +949,10 @@ export function toChangeEntry(d: Decision): ChangeEntry | null {
   const replaced = p.replaced ?? []; // KS-5
   const retracted = p.retracted ?? []; // KS-5
   const confirmed = p.confirmed ?? 0; // KS-5
+  const flows: FlowChanges = {
+    newFlows: p.flows?.newFlows ?? [], newVersions: p.flows?.newVersions ?? [], confirmed: p.flows?.confirmed ?? 0, rankMoves: p.flows?.rankMoves ?? [],
+  };
+  const flowsEmpty = flows.newFlows.length === 0 && flows.newVersions.length === 0 && flows.confirmed === 0 && flows.rankMoves.length === 0;
   return {
     id: d.id,
     createdAt: d.createdAt,
@@ -953,9 +964,10 @@ export function toChangeEntry(d: Decision): ChangeEntry | null {
     replaced,
     retracted,
     confirmed,
+    flows,
     empty:
       newFindings.length === 0 && removedSubjects.length === 0 && changedArtifacts.length === 0 &&
-      replaced.length === 0 && retracted.length === 0 && confirmed === 0,
+      replaced.length === 0 && retracted.length === 0 && confirmed === 0 && flowsEmpty,
   };
 }
 
@@ -1317,4 +1329,276 @@ export function useConfigEditor() {
     },
     revert: () => setText(null),
   };
+}
+
+// ---------------------------------------------------------------------------
+// flow records and flow ranking: the Flows page (design 2026-11-14 §10.5, §11, §12.2)
+
+const TYPE_TOOLS = new Set(['save_flow', 'propose_flow_type', 'propose_checklist']);
+const RANKING_TOOLS = new Set(['save_flow', 'submit_flow_verdicts']);
+const FLOW_TOOLS = new Set(['save_flow', 'submit_flow_verdicts', 'save_flow_checks', 'save_review_mentions']);
+
+/** Reloads on `task_status` and on decisions of the given tools. */
+function useFlowRefresh(wsId: string | null | undefined, tools: Set<string>, reload: () => Promise<void>): void {
+  useBusEvents(wsId, (e) => {
+    if (e.type === 'task_status') void reload();
+    else if (e.type === 'decision' && tools.has((e.decision.payload as { tool?: string } | null)?.tool ?? '')) void reload();
+  });
+}
+
+/** An action of the Flows page: `busy`, the server's error message as is, and a plain-words notice on success. */
+function useFlowAction() {
+  const action = useAction();
+  const [notice, setNotice] = useState<string | null>(null);
+  const run = useCallback(
+    async <R>(fn: () => Promise<R>, done: (r: R) => string): Promise<R | undefined> => {
+      setNotice(null);
+      const r = await action.run(fn);
+      if (r !== undefined) setNotice(done(r));
+      return r;
+    },
+    [action.run],
+  );
+  return { busy: action.busy, error: action.error, notice, run };
+}
+
+const TYPE_DONE: Record<FlowTypeDecisionInput['action'], string> = {
+  accept: 'Flow type accepted.',
+  reject: 'Flow type rejected.',
+  merge: 'Flow type merged.',
+  edit: 'Flow type changed.',
+};
+
+/** The node's flow types with their flow counts, and the proposals waiting on the user (accept / edit / reject / merge). */
+export function useFlowTypes(wsId: string | null | undefined) {
+  const res = useResource(`flowTypes:${wsId ?? ''}`, wsId ? () => flowsApi.types(wsId) : null);
+  useFlowRefresh(wsId, TYPE_TOOLS, res.reload);
+  const act = useFlowAction();
+  const decideType = useCallback(
+    async (typeId: string, decision: FlowTypeDecisionInput, reason?: string): Promise<boolean> => {
+      if (!wsId) return false;
+      const r = await act.run(() => flowsApi.decideFlowType(wsId, typeId, decision, reason), () => TYPE_DONE[decision.action]);
+      if (r !== undefined) await res.reload();
+      return r !== undefined;
+    },
+    [wsId, act.run, res.reload],
+  );
+  /** Accepting tells how many flows need a re-walk to answer the new checks. */
+  const decideChecklist = useCallback(
+    async (checklistId: string, decision: ChecklistDecisionInput, reason?: string): Promise<boolean> => {
+      if (!wsId) return false;
+      const r = await act.run(
+        () => flowsApi.decideChecklist(wsId, checklistId, decision, reason),
+        (out) => {
+          if (decision.action === 'reject') return 'Checklist rejected.';
+          const n = out.needRewalk.length;
+          return n === 0
+            ? 'Checklist accepted. No flow needs a re-walk.'
+            : `Checklist accepted. ${plural(n, 'flow')} need${n === 1 ? 's' : ''} a re-walk to answer its new checks.`;
+        },
+      );
+      if (r !== undefined) await res.reload();
+      return r !== undefined;
+    },
+    [wsId, act.run, res.reload],
+  );
+  const types = useMemo(() => res.data?.flowTypes ?? [], [res.data]);
+  return {
+    types,
+    proposals: res.data?.proposals ?? { flowTypes: [], checklists: [] },
+    decideType,
+    decideChecklist,
+    busy: act.busy,
+    actionError: act.error,
+    notice: act.notice,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
+}
+
+/**
+ * The node's ranking of one flow type (`personaId`: one persona's verdicts only; `allVariants`: the
+ * subjects' other variants too), with the user's reactions and rulings. Reloads when a task ends and
+ * when a flow is saved or persona verdicts are submitted.
+ */
+export function useFlowRanking(
+  wsId: string | null | undefined,
+  flowTypeId: string | null | undefined,
+  opts: { personaId?: string; allVariants?: boolean } = {},
+) {
+  const { personaId, allVariants } = opts;
+  const res = useResource(
+    `flowRanking:${wsId ?? ''}:${flowTypeId ?? ''}:${personaId ?? ''}:${allVariants ? 'all' : ''}`,
+    wsId && flowTypeId ? () => flowsApi.ranking(wsId, flowTypeId, { ...(personaId ? { personaId } : {}), allVariants: allVariants === true }) : null,
+  );
+  useFlowRefresh(wsId, RANKING_TOOLS, res.reload);
+  const act = useFlowAction();
+  const after = useCallback(
+    async <R>(fn: () => Promise<R>, done: string, reload = true): Promise<boolean> => {
+      const r = await act.run(fn, () => done);
+      if (r !== undefined && reload) await res.reload();
+      return r !== undefined;
+    },
+    [act.run, res.reload],
+  );
+  /** Agree or disagree with a position; the ranking itself does not change. */
+  const react = useCallback(
+    async (flowId: string, reaction: FlowReaction, reason?: string) =>
+      !!wsId &&
+      !!flowTypeId &&
+      after(
+        () => flowsApi.reactToPosition(wsId, flowId, flowTypeId, reaction, reason),
+        reaction === 'agree' ? 'Recorded: you agree with this position.' : 'Recorded: you disagree with this position.',
+        false,
+      ),
+    [wsId, flowTypeId, after],
+  );
+  /** "This one is better than that one": a hard rule on the ranking. A new ruling on the same pair replaces the earlier one. */
+  const override = useCallback(
+    async (winnerFlowId: string, loserFlowId: string, reason?: string) =>
+      !!wsId &&
+      !!flowTypeId &&
+      after(() => flowsApi.override(wsId, flowTypeId, winnerFlowId, loserFlowId, reason), 'Your ruling is saved; the ranking follows it.'),
+    [wsId, flowTypeId, after],
+  );
+  const revokeOverride = useCallback(
+    async (overrideId: string, reason?: string) => !!wsId && after(() => flowsApi.revokeOverride(wsId, overrideId, reason), 'Ruling removed.'),
+    [wsId, after],
+  );
+  const confirmOverride = useCallback(
+    async (overrideId: string, keep: boolean, reason?: string) =>
+      !!wsId &&
+      after(() => flowsApi.confirmOverride(wsId, overrideId, keep, reason), keep ? 'Ruling kept for the new version.' : 'Ruling dropped.'),
+    [wsId, after],
+  );
+  return {
+    ranking: res.data,
+    rows: res.data?.ranked ?? [],
+    react,
+    override,
+    revokeOverride,
+    confirmOverride,
+    busy: act.busy,
+    actionError: act.error,
+    notice: act.notice,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
+}
+
+/**
+ * One flow and everything behind its position: steps, checks, reviews, the persona verdicts
+ * (simulated; `counted` ones first, the others apart as not part of the score) and the rulings.
+ */
+export function useFlow(wsId: string | null | undefined, flowId: string | null | undefined) {
+  const res = useResource(`flow:${wsId ?? ''}:${flowId ?? ''}`, wsId && flowId ? () => flowsApi.flow(wsId, flowId) : null);
+  useFlowRefresh(wsId, FLOW_TOOLS, res.reload);
+  const act = useFlowAction();
+  const after = useCallback(
+    async <R>(fn: () => Promise<R>, done: string, reload = true): Promise<boolean> => {
+      const r = await act.run(fn, () => done);
+      if (r !== undefined && reload) await res.reload();
+      return r !== undefined;
+    },
+    [act.run, res.reload],
+  );
+  const reactToVerdict = useCallback(
+    async (verdictId: string, reaction: FlowReaction, reason?: string) =>
+      !!wsId &&
+      after(
+        () => flowsApi.reactToVerdict(wsId, verdictId, reaction, reason),
+        reaction === 'agree'
+          ? 'Recorded: you agree with this simulated verdict.'
+          : 'Recorded: you disagree with this simulated verdict. The persona looks at this pair again in the next ranking round.',
+        false,
+      ),
+    [wsId, after],
+  );
+  const correctCheck = useCallback(
+    async (input: { checklistId: string; itemKey: string; answer: CheckAnswer; note?: string }, reason?: string) =>
+      !!wsId && !!flowId && after(() => flowsApi.correctCheck(wsId, flowId, input, reason), 'Answer corrected; the checklist score is updated.'),
+    [wsId, flowId, after],
+  );
+  /** Correct what a review is about (not this flow, another check, another flow type); the detail reloads. */
+  const correctAttribution = useCallback(
+    async (mentionId: string, input: { flowTypeKey?: string; checkKey?: string }, reason?: string) =>
+      !!wsId && after(() => flowsApi.correctAttribution(wsId, mentionId, input, reason), 'Saved: the review is filed where you said.'),
+    [wsId, after],
+  );
+  const revokeOverride = useCallback(
+    async (overrideId: string, reason?: string) => !!wsId && after(() => flowsApi.revokeOverride(wsId, overrideId, reason), 'Ruling removed.'),
+    [wsId, after],
+  );
+  const confirmOverride = useCallback(
+    async (overrideId: string, keep: boolean, reason?: string) =>
+      !!wsId &&
+      after(() => flowsApi.confirmOverride(wsId, overrideId, keep, reason), keep ? 'Ruling kept for the new version.' : 'Ruling dropped.'),
+    [wsId, after],
+  );
+  const verdicts = useMemo(() => res.data?.verdicts ?? [], [res.data]);
+  return {
+    detail: res.data,
+    counted: useMemo(() => verdicts.filter((v) => v.counted), [verdicts]),
+    uncounted: useMemo(() => verdicts.filter((v) => !v.counted), [verdicts]),
+    reactToVerdict,
+    correctCheck,
+    correctAttribution,
+    revokeOverride,
+    confirmOverride,
+    busy: act.busy,
+    actionError: act.error,
+    notice: act.notice,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
+}
+
+/**
+ * The active checklists for a flow type (the general one and the type's own) and the user's edit of
+ * one of them (coverage, item weights and questions, removals), which saves a new version and tells
+ * how many flows need a re-walk. Reloads when a checklist is proposed or a task ends.
+ */
+export function useFlowChecklists(wsId: string | null | undefined, flowTypeId: string | null | undefined) {
+  const res = useResource(
+    `flowChecklists:${wsId ?? ''}:${flowTypeId ?? ''}`,
+    wsId && flowTypeId ? () => flowsApi.checklists(wsId, flowTypeId) : null,
+  );
+  useFlowRefresh(wsId, TYPE_TOOLS, res.reload);
+  const act = useFlowAction();
+  const edit = useCallback(
+    async (checklistId: string, input: ChecklistEditInput, reason?: string): Promise<boolean> => {
+      if (!wsId) return false;
+      const r = await act.run(
+        () => flowsApi.editChecklist(wsId, checklistId, input, reason),
+        (out) => {
+          const n = out.needRewalk.length;
+          return n === 0
+            ? 'Checklist saved. No flow needs a re-walk.'
+            : `Checklist saved. ${plural(n, 'flow')} need${n === 1 ? 's' : ''} a re-walk to answer all its checks.`;
+        },
+      );
+      if (r !== undefined) await res.reload();
+      return r !== undefined;
+    },
+    [wsId, act.run, res.reload],
+  );
+  return {
+    checklists: res.data,
+    edit,
+    busy: act.busy,
+    actionError: act.error,
+    notice: act.notice,
+    loading: res.loading,
+    error: res.error,
+    reload: res.reload,
+  };
+}
+
+/** Two flows of one type side by side, step by step. */
+export function useFlowCompare(wsId: string | null | undefined, a: string | null | undefined, b: string | null | undefined) {
+  const res = useResource(`flowCompare:${wsId ?? ''}:${a ?? ''}:${b ?? ''}`, wsId && a && b ? () => flowsApi.compare(wsId, a, b) : null);
+  return { compare: res.data, loading: res.loading, error: res.error };
 }

@@ -42,6 +42,10 @@ the agent CLIs call into, and a small React web app. Design spec:
      which stored facts are compared), `retention` (`pruneMinAgeDays`), `ocr` (`enabled` true, `model`
      "haiku", `images` "all" | "uploads" | "none", `minPageChars` 40, `maxPages` 30 per document,
      `pagesPerCall` 8, `maxFileBytes`, `timeoutSeconds` 180, `concurrency` 2, `rateLimitPauseMinutes` 15).
+   - optional `flows` (flow ranking; every field has a default): `tieMargin` (5 points), `minMentionsForCheck`
+     (3), `mentionWindowDays` (365), `minAttributionConfidence` (0.6), `maxFocusedComparisons` (20 per
+     round), `lowConfidence` (0.5), `maxFlowsPerSitting` (8, 2–20), `generalCoverage` (0.3) and
+     `model` (verdict runs; default `roles.persona`).
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -150,7 +154,7 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   model, customers, what is going well, what is going badly) and records symptoms with
   severity/trend/confidence. Uploads (CSV, PDFs, decks) are optional evidence.
 - **Phases.** `mapping` (optional) → `market_research` → `competitor_discovery` → `deep_dives` →
-  `synthesis` → `persona_panel` → `scoring`. Each research phase is a fresh orchestrator run that
+  `flow_ranking` → `synthesis` → `persona_panel` → `scoring`. Each research phase is a fresh orchestrator run that
   proposes tasks; the program validates them against the config limits and runs the workers. A task
   without a `model` uses the configured default for its type (`roles.workers.<type>`, else
   `roles.workers.default`; recommendation synthesis uses `roles.synthesizer`); explicit overrides are
@@ -303,6 +307,73 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   upload list) and removes only the file — the description and extracted text stay, and capturing
   the same bytes again restores it. Each prune is logged (a decision and an `artifact_prune` feedback
   event).
+- **Flows and flow ranking.** BIF records how each company in the picture, your own included, lets
+  people get a job done (sign up, sign in, recover an account, pay, cancel, invite a teammate, get
+  support) and ranks the ways of doing the same job against each other.
+  - *Flow records.* In `deep_dives` a worker lists the flows a subject offers, gives each one a type
+    from the business's catalog (sign-up, sign-in, account recovery, onboarding, pricing and plan
+    choice, checkout, cancel or downgrade, invite a teammate, get support; a new type is *proposed*
+    and takes part in rankings once you accept it or merge it into another), walks it one screen at a
+    time and saves it with `save_flow`: the goal, whether it was reached (or where and why the walk
+    stopped: payment, phone, identity check, captcha, …) and, per step, what was done, what was seen,
+    what was asked for, the page address and the screenshot. A subject can have several *variants*
+    of one type (sign-up by email, by single sign-on); the one it puts first is the *primary*, and
+    only primaries are ranked unless you ask for every variant. A flow is a living record, like a
+    fact: a re-walk with the same steps confirms it at once, changed steps are reported to the worker,
+    which saves a new version that becomes current when its task is verified. A flow that stopped
+    before its goal is kept, ranked on the steps walked and marked *partial*.
+  - *Checklists.* A general checklist applies to every flow (dead ends, errors that say how to fix
+    them, asking only for what the next step needs, deceptive patterns, keyboard and phone-width use,
+    …). Sign-up, sign-in, account recovery and checkout have their own, built from published guidance
+    (NIST SP 800-63B, WCAG 2.2, web.dev, GOV.UK, Baymard, NN/g) and active from the first run. Workers
+    answer the checks with `save_flow_checks`. An *objective* check counts in the checklist score
+    (the weighted share of applicable checks passed); an *audience-dependent* one is only recorded and
+    shown to the personas. An agent may propose a checklist for a new type; it waits for you.
+  - *Reviews.* A `flow_reviews` task collects public feedback (app stores, review sites, forums,
+    support boards) with `save_review_mentions`: each quote checked against its stored page, stored
+    once, dated, with a polarity and, when clear, the flow type and check it speaks to. Reviews answer
+    what a walkthrough cannot see ("does the code arrive?"): at least `minMentionsForCheck` recent,
+    confidently attributed complaints make the check *reported problem* (or *disputed* when they
+    contradict a walkthrough's pass); fewer leave it at *no signal*, which neither helps nor hurts the
+    score. Thin review coverage is normal and reads as "no signal", never as "no problems".
+  - *The ranking rule.* The `flow_ranking` phase (a runner phase after `deep_dives`) ranks each node's
+    flows per flow type. Existing schedules were updated to include the ranking step: once, on
+    upgrade, `flow_ranking` was added right after `deep_dives` in every schedule that has
+    `deep_dives` and did not have it. Your overrides come first: "this one is better than that one" is a hard rule
+    the order always keeps. Below them, `rank score = coverage × checklist score + (1 − coverage) ×
+    persona score`. Coverage (0–1, per checklist: sign-in 0.7, sign-up, checkout and account recovery
+    0.6, the general checklist alone 0.3) says how much of the job the checklist can settle, so the
+    more a flow type is a matter of taste, the more the personas count. Scores within `tieMargin` are
+    ordered by the personas' direct head-to-head; a flow alone in its type shows "no comparison".
+    Opening a position shows both scores, the coverage, each check with its evidence, the verdicts, the
+    review counts and your rulings.
+  - *Persona head-to-heads, simulated.* The node's audience personas judge in two stages. First each
+    persona reads all flows of a type in one sitting (overlapping groups when there are many) and gives
+    a verdict on every pair: winner or tie, strength, confidence and a short reason. Then single pairs
+    get a focused second look when the persona was unsure, the personas split, the verdicts form a
+    loop, the two flows are close or decide a top-three place, a verdict strongly contradicts the
+    checklist, or you disagreed with it (at most `maxFocusedComparisons` per round). Personas see the
+    steps, the audience-dependent answers, the notable note and a review digest, all fenced as
+    untrusted text, never the checklist score. Verdicts are labelled simulated and kept until either
+    flow or the persona has a new version, so a recurring round only judges new or stale pairs.
+  - *Your reactions, with reasons.* The **Flows** page shows flow types down the side and the chosen
+    type's ranking (rank, checklist, personas, reviews); open a flow for its screenshot strip, checks,
+    reviews and verdicts, or compare two side by side. You can agree or disagree with a position or a
+    verdict, override a pair, correct a check, accept, edit, merge or reject a proposed flow type,
+    accept (with your coverage) or reject a proposed checklist, edit a checklist (the built-in ones
+    too: its coverage, a check's weight or question, or remove a check; saving makes a new version
+    and says how many flows need a re-walk; adding checks is not offered yet), and correct a review's
+    attribution, each with an optional reason. Each is a feedback
+    event naming exactly what it reacts to (for a verdict also the persona, its version, the stage and
+    both flow versions); agreement is kept like disagreement. A ruling follows its two flows to new
+    versions and then asks whether it still holds. "What changed" lists new flows, new versions,
+    confirmations and rank moves. Flows stay inside their business tree; upload-derived flows follow
+    the export rules below, and persona verdicts are never exported as training data. API under
+    `/api/workspaces/:id/flows` (`types`, `rankings/:flowTypeId`, `checklists`, `compare`, `:flowId`,
+    and the reaction, override, decision and `checklists/:checklistId/edit` routes).
+  - *Not built yet.* Nothing learns from these reactions yet: personas never change here (persona
+    learning in the retro is a later project), there are no stakeholder personas, and only web flows
+    are walked, not mobile apps.
 - **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
   payment. Payment details, demo requests and contacting real people need your approval (the
   "Waiting on you" banner). Purchases are never made.
@@ -480,7 +551,11 @@ of that business tree — another company's prompts never see them. Nothing is w
 
 - a real worker run (`log_decision`, then `submit_result`, through the real MCP server);
 - a shared-browser run;
-- the **knowledge-store flow**.
+- the **knowledge-store flow**;
+- the **flow records smoke** (`flows`): a worker records a fictional sign-up from three seeded screen
+  notes (no browser) with `read_flow_catalog`, `save_flow` and `save_flow_checks`, then the real
+  ranking round runs with that provider as the persona over two seeded flows. Both are judged from
+  the store.
 
 It then does an interview round-trip over HTTP with the claude CLI as interviewer.
 
@@ -501,7 +576,7 @@ Each step is judged from the store and the run's tool calls. The check covers:
 - a replay of the paged reads, which checks that every passage was served whole;
 - tokens and cost from `agent_usage`.
 
-Run one part with `worker`, `browser`, `knowledge` or `interview`, optionally followed by providers
+Run one part with `worker`, `browser`, `knowledge`, `flows` or `interview`, optionally followed by providers
 (`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
 and `BIF_SMOKE_OPENCODE_MODEL`, the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
 smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).

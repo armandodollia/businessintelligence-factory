@@ -1276,4 +1276,189 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX ocr_runs_art ON ocr_runs (artifact_id);
   CREATE INDEX ocr_runs_ws ON ocr_runs (workspace_id, created_at);
   `,
+  // 22: flow records and flow ranking (design 2026-11-14-flow-records-and-ranking-design.md). One
+  // catalog of flow types and checklists per business tree (`root_workspace_id`; a checklist with no
+  // `flow_type_id` is the general one). A flow is one subject's variant of a flow type, versioned like
+  // findings (`lineage_id`, `lifecycle`), with its steps and check answers. Review mentions are stored
+  // once per tree, subject and quote. Verdicts (persona head-to-heads, pair stored with
+  // flow_a_id < flow_b_id), the user's pair overrides and rank snapshots belong to a node
+  // (`workspace_id`). JSON columns: checklists.items, flow_steps.asked, flow_checks.value / step_refs /
+  // mention_refs, flow_rank_snapshots.ranking. Repositories: `flows/repos.ts`.
+  `
+  CREATE TABLE flow_types (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    definition TEXT NOT NULL,
+    status TEXT NOT NULL,
+    merged_into_id TEXT,
+    proposed_by_run TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX flow_types_key ON flow_types (root_workspace_id, key);
+
+  CREATE TABLE checklists (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    flow_type_id TEXT,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    coverage REAL NOT NULL,
+    items TEXT NOT NULL DEFAULT '[]',
+    origin TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    accepted_at TEXT
+  );
+  CREATE UNIQUE INDEX checklists_version ON checklists (root_workspace_id, COALESCE(flow_type_id, ''), version);
+
+  CREATE TABLE flows (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    subject_entity_id TEXT NOT NULL,
+    flow_type_id TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    variant_key TEXT NOT NULL,
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    entry_url TEXT,
+    reached_goal INTEGER NOT NULL DEFAULT 0,
+    stop_reason TEXT,
+    notable TEXT,
+    steps_hash TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    replaces_id TEXT,
+    lifecycle TEXT NOT NULL,
+    status TEXT NOT NULL,
+    task_id TEXT,
+    task_round INTEGER,
+    include_override INTEGER,
+    run_id TEXT,
+    entity_id TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_confirmed_at TEXT,
+    confirm_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX flows_subject ON flows (subject_entity_id, flow_type_id, variant_key, lifecycle);
+  CREATE INDEX flows_task ON flows (task_id);
+
+  CREATE TABLE flow_steps (
+    flow_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    observation TEXT NOT NULL,
+    asked TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    artifact_id TEXT,
+    page_url TEXT,
+    PRIMARY KEY (flow_id, seq)
+  );
+
+  CREATE TABLE flow_checks (
+    flow_id TEXT NOT NULL,
+    checklist_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    value TEXT,
+    step_refs TEXT NOT NULL DEFAULT '[]',
+    mention_refs TEXT NOT NULL DEFAULT '[]',
+    note TEXT,
+    origin TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (flow_id, checklist_id, item_key)
+  );
+
+  CREATE TABLE review_mentions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    root_workspace_id TEXT NOT NULL,
+    subject_entity_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_url TEXT,
+    artifact_id TEXT NOT NULL,
+    chunk_id TEXT,
+    quote TEXT NOT NULL,
+    quote_hash TEXT NOT NULL,
+    published_at TEXT,
+    rating REAL,
+    polarity TEXT NOT NULL,
+    flow_type_id TEXT,
+    check_key TEXT,
+    attribution_confidence REAL NOT NULL,
+    task_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX review_mentions_quote ON review_mentions (root_workspace_id, subject_entity_id, quote_hash);
+
+  CREATE TABLE flow_verdicts (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    flow_type_id TEXT NOT NULL,
+    flow_a_id TEXT NOT NULL,
+    flow_b_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    persona_version INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    winner TEXT NOT NULL,
+    strength INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    reason TEXT NOT NULL,
+    agent_run_id TEXT,
+    superseded_by_id TEXT,
+    created_at TEXT NOT NULL,
+    CHECK (flow_a_id < flow_b_id)
+  );
+  CREATE INDEX flow_verdicts_type ON flow_verdicts (workspace_id, flow_type_id);
+  CREATE INDEX flow_verdicts_a ON flow_verdicts (flow_a_id);
+  CREATE INDEX flow_verdicts_b ON flow_verdicts (flow_b_id);
+
+  CREATE TABLE flow_overrides (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    flow_type_id TEXT NOT NULL,
+    winner_flow_id TEXT NOT NULL,
+    loser_flow_id TEXT NOT NULL,
+    reason TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    needs_confirm INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+  );
+
+  CREATE TABLE flow_rank_snapshots (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    flow_type_id TEXT NOT NULL,
+    research_run_id TEXT,
+    ranking TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+  );
+  `,
+  // 23: flow ranking for existing schedules (design 2026-11-14-flow-records-and-ranking-design.md §10:
+  // a snapshot at the end of each ranking round). Schedules store explicit phase lists; those written
+  // before migration 22 never contain `flow_ranking`, so their recurring runs re-walked flows without
+  // refreshing verdicts or taking snapshots. Once: `flow_ranking` goes directly after the first
+  // `deep_dives` of every schedule whose list is a JSON array of names with `deep_dives` and without
+  // `flow_ranking`. Any other shape is left as it is (the CASE keeps json_each off text that is not a
+  // JSON array). Pipelines are not touched: a pipeline row is only
+  // ever running or finished (there is no not-yet-run pipeline to update).
+  `
+  UPDATE schedules SET phases = (
+    SELECT json_group_array(p.value ORDER BY p.ord) FROM (
+      SELECT value, key * 2 AS ord FROM json_each(schedules.phases)
+      UNION ALL
+      SELECT 'flow_ranking', MIN(key) * 2 + 1 FROM json_each(schedules.phases) WHERE value = 'deep_dives'
+    ) p
+  )
+  WHERE CASE WHEN json_valid(phases) AND json_type(phases) = 'array' THEN
+    NOT EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE type <> 'text')
+    AND EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE value = 'deep_dives')
+    AND NOT EXISTS (SELECT 1 FROM json_each(schedules.phases) WHERE value = 'flow_ranking')
+  ELSE 0 END;
+  `,
 ];

@@ -6,6 +6,7 @@
  *   npx tsx scripts/smoke.ts interview             # interview smoke only (claude)
  *   npx tsx scripts/smoke.ts browser [providers]   # browser smoke (default: claude)
  *   npx tsx scripts/smoke.ts knowledge [providers] # knowledge-store flow (KS-8), per provider
+ *   npx tsx scripts/smoke.ts flows [providers]     # flow records and ranking, per provider
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
  *            spawns one real worker run through the Supervisor. The agent must call
@@ -26,6 +27,13 @@
  *            a paged read_artifact with a cursor, and a quote that fails verification. Each step
  *            is judged from the store (decisions, observations, finding_evidence, retrieval_events)
  *            and from the run's tool calls; tokens and cost come from agent_usage.
+ * flows:     flow records and ranking (flow design 2026-11-14 §16). Per provider, (1) a real worker run (real
+ *            flow_walkthrough system prompt, a real task) records a fictional product's sign-up from three seeded
+ *            screen notes, without a browser: read_flow_catalog, read_artifact, save_flow with one step per screen
+ *            citing its note, save_flow_checks, submit_result; (2) the real ranking round (`runFlowRanking`, one
+ *            broad sitting, no focused follow-up) with that provider as the persona, over two seeded verified
+ *            sign-up flows. Judged from the store: the flow, its steps and walkthrough answers; the persona's
+ *            verdict row and the resulting ranking.
  * codex isolation (with the codex worker smoke): `codex mcp list --json` under the exact env and
  *            `-c` overrides the adapter gives a run must list only `bif`.
  *
@@ -53,6 +61,14 @@ import { knowledgeRead, type KnowledgeReadInput } from '../src/core/knowledge/to
 import { stripFences } from '../src/core/knowledge/trust.js';
 import { knowledgeRepos, newId } from '../src/core/store/repos.js';
 import { usageRepos } from '../src/core/store/usageRepos.js';
+import { flowTypeByKey } from '../src/core/flows/catalog.js';
+import { flowChecks } from '../src/core/flows/checks.js';
+import { saveFlow, type FlowStepInput } from '../src/core/flows/flows.js';
+import { nodeRanking } from '../src/core/flows/rankings.js';
+import { flowRepos } from '../src/core/flows/repos.js';
+import { runFlowRanking } from '../src/core/flows/round.js';
+import { linkCompetitor } from '../src/core/knowledge/entityLinks.js';
+import { PERSONA_FIELDS } from '../src/core/scoring/criteria.js';
 
 const MODELS: Record<ProviderId, string> = {
   claude: process.env.BIF_SMOKE_CLAUDE_MODEL ?? 'haiku',
@@ -627,9 +643,226 @@ function printKnowledge(r: KsResult): void {
   for (const c of r.confusion) console.log(`[smoke]   confusion: ${c}`);
 }
 
+// ---------------------------------------------------------------------------
+// flow records and ranking smoke (flow design 2026-11-14 §16)
+
+/** A fictional product's sign-up, as three screens captured earlier (text notes; generic names only). */
+const FL_SUBJECT = 'Pinecrest Tasks';
+const FL_SCREENS = [
+  `${FL_SUBJECT} sign-up, screen 1 of 3. Address: https://pinecrest-tasks.example/signup. ` +
+    'The page shows a form with two fields: work email and password. The password rule (at least 12 characters) is shown ' +
+    'under the field while typing, and an eye icon shows the password. Paste works in both fields. Button: "Create account".',
+  `${FL_SUBJECT} sign-up, screen 2 of 3. Address: https://pinecrest-tasks.example/verify. ` +
+    'After pressing "Create account", the page asks for the 6-digit code sent to the work email. The code field accepts paste ' +
+    'and the browser offers to autofill it. A "Resend code" link is under the field. The code arrived within a minute.',
+  `${FL_SUBJECT} sign-up, screen 3 of 3. Address: https://pinecrest-tasks.example/board. ` +
+    'The code is accepted and an empty task board opens with a short checklist of three first steps. The account exists; ' +
+    'no card, phone number or sales call was asked for.',
+];
+
+function flowsWorkerPrompt(artifactIds: string[]): string {
+  return [
+    '## Brief',
+    `Smoke test of the flow records. The sign-up of the fictional product "${FL_SUBJECT}" (a competitor) was walked earlier and`,
+    `each screen was saved as a text note: ${artifactIds.map((id, i) => `screen ${i + 1} = ${id}`).join(', ')}.`,
+    'Do not browse, do not take screenshots and do not save new artifacts: record the flow from these notes. Use only the bif tools.',
+    '1. Call `read_flow_catalog` (no input) and pick the flow type of a sign-up.',
+    '2. Read each note with `read_artifact` (mode "text").',
+    `3. Save the flow with \`save_flow\`: subject {"kind": "competitor", "name": "${FL_SUBJECT}"}, the sign-up flow type, variant "Email",`,
+    '   primary true, one step per screen in order (action, observation, asked, page_url, artifact_id = that screen\'s note).',
+    '4. Answer the checks with `save_flow_checks` for the flow id `save_flow` returned: at least `goal_reached_without_help`,',
+    '   `password_can_be_shown` and `code_entry_paste_autofill_resend`, plus any others the notes clearly show. Skip the rest.',
+    '5. Call `submit_result` with {"flow_id": "...", "checks_answered": <number>}.',
+    '',
+    '## Acceptance criteria',
+    '- Every step cites its screen note.',
+    '- Every check answer rests on what the notes say.',
+  ].join('\n');
+}
+
+type FlStep = KsStep;
+type FlResult = Result & { steps: FlStep[]; usage: string; toolCalls: number; confusion: string[] };
+
+/** Usage summed over runs (agent_usage). */
+function usageOf(booted: Booted, runIds: string[]): string {
+  const rows = runIds.flatMap((runId) => usageRepos(booted.runtime.store).agentUsage.list({ runId }));
+  const sum = (f: (u: (typeof rows)[number]) => number | undefined) => rows.reduce((a, u) => a + (f(u) ?? 0), 0);
+  return `in=${sum((u) => u.inputTokens)} out=${sum((u) => u.outputTokens)} cost=$${sum((u) => u.costUsd ?? u.cliReportedCostUsd).toFixed(4)} (rows ${rows.length})`;
+}
+
+/** Worker part: a workspace with a competitor, a research run, a walkthrough task and the three screen notes captured by it. */
+function seedFlowsWorker(booted: Booted, provider: ProviderId) {
+  const { store, dataDir } = booted.runtime;
+  const now = new Date().toISOString();
+  const wsId = `ws_smoke_flows_${provider}`;
+  store.workspaces.insert({ id: wsId, name: `flows smoke ${provider}`, sector: 'test', createdAt: now });
+  linkCompetitor(store, store.competitors.insert({
+    id: newId('cmp'), workspaceId: wsId, name: FL_SUBJECT, threat: 3, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 },
+    evidence: [], createdAt: now, updatedAt: now, status: 'verified',
+  }));
+  const rr = store.researchRuns.insert({ id: newId('rrun'), workspaceId: wsId, phase: 'deep_dives', status: 'running', startedAt: now });
+  const task = store.tasks.insert({
+    id: newId('tsk'), workspaceId: wsId, runId: rr.id, phase: 'deep_dives', type: 'flow_walkthrough', round: 1, createdAt: now,
+    model: { provider, model: MODELS[provider] }, needsBrowser: false, acceptanceCriteria: ['every step cites its screen'],
+    brief: `walk the ${FL_SUBJECT} sign-up`, subject: FL_SUBJECT, status: 'running',
+  });
+  const files = new ArtifactStore(store, dataDir);
+  const notes = FL_SCREENS.map((text, i) => {
+    const a = files.save({ workspaceId: wsId, kind: 'text', mime: 'text/plain', bytes: text, title: `${FL_SUBJECT} sign-up screen ${i + 1}` });
+    knowledgeRepos(store).artifactCaptures.insert({ id: newId('cap'), artifactId: a.id, workspaceId: wsId, taskId: task.id, capturedAt: now });
+    return a.id;
+  });
+  return { wsId, task, notes };
+}
+
+/** Persona part: a workspace with its own company and one competitor, a verified sign-up flow of each, and one verified persona. */
+function seedFlowsPersona(booted: Booted, provider: ProviderId) {
+  const { store, dataDir } = booted.runtime;
+  const now = new Date().toISOString();
+  const wsId = `ws_smoke_flows_persona_${provider}`;
+  store.workspaces.insert({ id: wsId, name: 'Larkspur Notes', sector: 'test', createdAt: now });
+  linkCompetitor(store, store.competitors.insert({
+    id: newId('cmp'), workspaceId: wsId, name: FL_SUBJECT, threat: 3, directness: 3, comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 },
+    evidence: [], createdAt: now, updatedAt: now, status: 'verified',
+  }));
+  const flow = (subject: { kind: 'company' | 'competitor'; name: string }, steps: FlowStepInput[]) => {
+    const r = saveFlow(store, { workspaceId: wsId }, {
+      subject, flowTypeKey: 'sign_up', variant: 'Email', primary: true, name: `${subject.name} sign-up`, goal: 'Create an account', reachedGoal: true, steps,
+    });
+    if (!r.saved) throw new Error('seed flow not saved');
+    return flowRepos(store).flows.update(r.flow.id, { status: 'verified' });
+  };
+  const own = flow({ kind: 'company', name: 'Larkspur Notes' }, [
+    { action: 'Open the sign-up page', observation: 'A form asks for name, work email, phone number, company size and a password', asked: ['name', 'email', 'phone', 'company size', 'password'] },
+    { action: 'Submit the form', observation: 'A page says a sales representative will call to activate the account' },
+  ]);
+  const rival = flow({ kind: 'competitor', name: FL_SUBJECT }, [
+    { action: 'Open the sign-up page', observation: 'A form asks for work email and password; the password can be shown', asked: ['email', 'password'] },
+    { action: 'Enter the emailed code', observation: 'The code arrives within a minute; paste works' },
+    { action: 'Submit the code', observation: 'An empty task board opens' },
+  ]);
+  const profile = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, { value: `${f.replace(/_/g, ' ')}: an office manager at a 20-person design studio who sets up tools for the team`, confidence: 0.7, evidence: [] }]));
+  const persona = store.personas.insert({
+    id: newId('per'), workspaceId: wsId, slug: 'office-manager', segment: 'office managers at small studios', profile, version: 1, status: 'verified',
+    agentMdPath: join(dataDir, 'personas', `office-manager-${provider}.md`),
+  });
+  return { wsId, own, rival, persona };
+}
+
+async function flowsSmoke(provider: ProviderId, booted: Booted): Promise<FlResult> {
+  const { supervisor, store, config, events, research } = booted.runtime;
+  const name = `flows/${provider} (${MODELS[provider]})`;
+  const started = Date.now();
+  const model = { provider, model: MODELS[provider] };
+  const short = (s: string, n = 140) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const runIds: string[] = [];
+  let toolCalls = 0;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
+  try {
+    // --- worker: save a flow with steps and answer its checks through the real MCP tools ---------------
+    const w = seedFlowsWorker(booted, provider);
+    const bus: ToolCallLog[] = [];
+    const off = events.on((e) => {
+      if (e.type === 'tool_call' && e.workspaceId === w.wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+    });
+    const system = workerSystemPrompt(config, 'worker', false, 'flow_walkthrough');
+    let out: Awaited<ReturnType<typeof supervisor.run>>;
+    try {
+      out = await supervisor.run({
+        ctx: { workspaceId: w.wsId, taskId: w.task.id, role: 'worker', model, promptVersion: promptVersion(system) },
+        prompt: flowsWorkerPrompt(w.notes),
+        systemPrompt: system,
+        needsBrowser: false,
+        signal: abort.signal,
+        meta: { round: 1, taskType: w.task.type, researchRunId: w.task.runId },
+      });
+    } finally {
+      off();
+    }
+    runIds.push(out.agentRunId);
+    const calls = toolLog(out, bus);
+    toolCalls += calls.length;
+    const of = (tool: string) => calls.filter((c) => c.tool === tool);
+    steps.push({ step: 'W1 read_flow_catalog', calls: of('read_flow_catalog').length, pass: of('read_flow_catalog').some((c) => c.ok), did: `ok=${of('read_flow_catalog').filter((c) => c.ok).length}` });
+    const saved = flowRepos(store).flows.list({ rootWorkspaceId: w.wsId });
+    const flow = saved.find((f) => f.taskId === w.task.id);
+    const flowSteps = flow ? flowRepos(store).flowSteps.list({ flowId: flow.id }) : [];
+    const signUp = flowTypeByKey(store, w.wsId, 'sign_up');
+    const subject = flow ? knowledgeRepos(store).entities.get(flow.subjectEntityId)?.name : undefined;
+    const cited = flowSteps.filter((s) => s.artifactId && w.notes.includes(s.artifactId)).length;
+    steps.push({
+      step: 'W2 save_flow (steps)', calls: of('save_flow').length,
+      pass: !!flow && flow.flowTypeId === signUp?.id && subject === FL_SUBJECT && flowSteps.length >= 3 && cited === flowSteps.length && flow.reachedGoal,
+      did: flow
+        ? `${flow.id} type=${flow.flowTypeId === signUp?.id ? 'sign_up' : flow.flowTypeId} subject=${subject} variant=${flow.variant} primary=${flow.isPrimary} reached=${flow.reachedGoal} steps=${flowSteps.length} citing notes=${cited} asked=${JSON.stringify(flowSteps.map((s) => s.asked))}`
+        : `no flow saved; errors=${of('save_flow').filter((c) => !c.ok).map((c) => short(c.error ?? '')).join(' | ')}`,
+    });
+    const answers = flow ? flowChecks(store, flow.id).filter((c) => c.origin === 'walkthrough') : [];
+    const answerOf = (key: string) => answers.find((c) => c.itemKey === key)?.answer ?? 'none';
+    const expected = { goal_reached_without_help: 'pass', password_can_be_shown: 'pass', code_entry_paste_autofill_resend: 'pass' };
+    steps.push({
+      step: 'W3 save_flow_checks', calls: of('save_flow_checks').length,
+      pass: Object.entries(expected).every(([k, v]) => answerOf(k) === v) && answers.every((c) => c.stepRefs.every((n) => n >= 1 && n <= flowSteps.length)),
+      did: `walkthrough answers=${answers.length}; ${Object.keys(expected).map((k) => `${k}=${answerOf(k)}`).join(' ')}; refused calls=${of('save_flow_checks').filter((c) => !c.ok).length}`,
+    });
+    const result = getRunOutputs(store, out.agentRunId).result as { flow_id?: string } | undefined;
+    steps.push({ step: 'W4 submit_result', calls: of('submit_result').length, pass: out.status === 'done' && result?.flow_id === flow?.id, did: `status=${out.status} result=${short(JSON.stringify(result ?? null), 100)}` });
+    for (const c of calls.filter((x) => !x.ok)) confusion.push(`worker: ${c.tool} failed: ${short(c.error ?? '', 160)}`);
+    if (of('save_artifact').length) confusion.push(`worker saved ${of('save_artifact').length} artifacts although told not to`);
+
+    // --- persona: verdicts for two seeded flows through the real round ---------------------------------
+    const p = seedFlowsPersona(booted, provider);
+    const pbus: ToolCallLog[] = [];
+    const poff = events.on((e) => {
+      if (e.type === 'tool_call' && e.workspaceId === p.wsId) pbus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+    });
+    let report: Awaited<ReturnType<typeof runFlowRanking>>;
+    try {
+      // The persona runs on the provider under test; one broad sitting, no focused follow-up.
+      const cfg: BifConfig = { ...config, flows: { ...(config.flows ?? {}), model, maxFocusedComparisons: 0 } };
+      report = await runFlowRanking(p.wsId, { ...research, config: cfg, signal: abort.signal });
+    } finally {
+      poff();
+    }
+    const personaRuns = store.agentRuns.list({ workspaceId: p.wsId }).filter((r) => r.role === 'persona');
+    runIds.push(...personaRuns.map((r) => r.id));
+    toolCalls += pbus.length;
+    const verdicts = flowRepos(store).flowVerdicts.list({ workspaceId: p.wsId });
+    const pair = [p.own.id, p.rival.id].sort();
+    const v = verdicts[0];
+    steps.push({
+      step: 'P1 submit_flow_verdicts', calls: pbus.filter((c) => c.tool === 'submit_flow_verdicts').length,
+      pass: personaRuns.length === 1 && personaRuns[0]!.status === 'done' && verdicts.length === 1 && v!.flowAId === pair[0] && v!.flowBId === pair[1] &&
+        v!.personaId === p.persona.id && v!.stage === 'broad' && v!.reason.trim().length > 0 && report.notJudged.length === 0,
+      did: v
+        ? `runs=${personaRuns.length} (${personaRuns.map((r) => r.status).join(',')}); verdict winner=${v.winner === 'tie' ? 'tie' : (v.winner === 'a' ? v.flowAId : v.flowBId) === p.own.id ? 'own company' : FL_SUBJECT} strength=${v.strength} confidence=${v.confidence} reason="${short(v.reason, 120)}"`
+        : `runs=${personaRuns.length} (${personaRuns.map((r) => `${r.status}${r.failureReason ? ` ${short(r.failureReason, 80)}` : ''}`).join(',')}); no verdict; notJudged=${JSON.stringify(report.notJudged)}`,
+    });
+    const ranking = nodeRanking(store, config, p.wsId, flowTypeByKey(store, p.wsId, 'sign_up')!.id);
+    steps.push({
+      step: 'P2 ranking', calls: 0,
+      pass: ranking.ranked.length === 2 && ranking.ranked.every((f) => f.comparisons === 1),
+      did: ranking.ranked.map((f) => `${f.position}. ${f.flowId === p.own.id ? 'own company' : FL_SUBJECT} persona=${f.persona} decidedBy=${f.decidedBy}`).join('; '),
+    });
+    for (const c of pbus.filter((x) => !x.ok)) confusion.push(`persona: ${c.tool} failed: ${short(c.error ?? '', 160)}`);
+    const pass = steps.every((s) => s.pass);
+    return {
+      name, pass, seconds: (Date.now() - started) / 1000, steps, usage: usageOf(booted, runIds), toolCalls, confusion,
+      detail: `worker status=${out.status} exit=${out.exitCode}${out.reason ? ` reason=${short(out.reason, 120)}` : ''}; persona runs=${personaRuns.length}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - started) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls, confusion };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
-  const mode = ['worker', 'interview', 'browser', 'knowledge'].includes(args[0] ?? '') ? args.shift()! : 'all';
+  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows'].includes(args[0] ?? '') ? args.shift()! : 'all';
   const only = args.filter((a): a is ProviderId => (PROVIDERS as string[]).includes(a));
   const providers = only.length ? only : PROVIDERS;
   const results: Result[] = [];
@@ -667,6 +900,21 @@ async function main() {
       for (const p of providers) {
         console.log(`[smoke] knowledge ${p} (${MODELS[p]}) …`);
         const r = await knowledgeSmoke(p, booted, dir);
+        printKnowledge(r);
+        results.push(r);
+      }
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'all' || mode === 'flows') {
+    const { booted, dir } = await startServer('flows');
+    try {
+      for (const p of providers) {
+        console.log(`[smoke] flows ${p} (${MODELS[p]}) …`);
+        const r = await flowsSmoke(p, booted);
         printKnowledge(r);
         results.push(r);
       }

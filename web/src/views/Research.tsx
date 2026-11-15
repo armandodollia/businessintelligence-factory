@@ -137,6 +137,11 @@ function WhatChanged({ wsId }: { wsId: string }) {
             {c.replaced.length > 0 && <div className="small">{c.replaced.length} finding(s) changed (new version)</div>}
             {c.retracted.length > 0 && <div className="small">{c.retracted.length} finding(s) retracted</div>}
             {c.confirmed > 0 && <div className="small">{c.confirmed} finding(s) confirmed unchanged</div>}
+            {/* Flow records */}
+            {c.flows.newFlows.length > 0 && <div className="small">{c.flows.newFlows.length} new flow(s)</div>}
+            {c.flows.newVersions.length > 0 && <div className="small">{c.flows.newVersions.length} flow(s) changed (new version)</div>}
+            {c.flows.confirmed > 0 && <div className="small">{c.flows.confirmed} flow(s) confirmed unchanged</div>}
+            {c.flows.rankMoves.length > 0 && <div className="small">{c.flows.rankMoves.length} flow(s) moved in a ranking</div>}
             {c.removedSubjects.length > 0 && (
               <div className="small">No longer found: {c.removedSubjects.join(', ')}</div>
             )}

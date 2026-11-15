@@ -307,3 +307,62 @@ export const metricsApi = {
   getMetrics: (wsId: string, query: string) => get<import('./metrics.js').MetricsReport>(`${ws(wsId)}/metrics${query ? `?${query}` : ''}`),
 };
 // --- end WP-G ------------------------------------------------------------------------------------
+// --- flow records and flow ranking: the Flows page (`src/api/flowRoutes.ts`) ----------------------
+const fl = (wsId: string, rest: string) => `${ws(wsId)}/flows${rest}`;
+/** The optional reason of a reaction, sent only when given (the server caps it at 2,000 characters). */
+const withReason = (reason?: string) => (reason ? { reason } : {});
+type FT = import('./types.js').FlowTypeDecisionInput;
+type CD = import('./types.js').ChecklistDecisionInput;
+type Reaction = import('./types.js').FlowReaction;
+type Override = import('./types.js').FlowOverride;
+type FeedbackRow = import('./types.js').FeedbackEvent;
+
+export const flowsApi = {
+  types: (wsId: string) => get<import('./types.js').FlowTypesView>(fl(wsId, '/types')),
+  /** `personaId`: rank on that persona's verdicts only; `allVariants`: add the subjects' other variants. */
+  ranking: (wsId: string, flowTypeId: string, opts: { personaId?: string; allVariants?: boolean } = {}) => {
+    const q = [opts.personaId ? `persona=${enc(opts.personaId)}` : '', opts.allVariants ? 'variants=all' : ''].filter(Boolean).join('&');
+    return get<import('./types.js').FlowRankingView>(fl(wsId, `/rankings/${enc(flowTypeId)}${q ? `?${q}` : ''}`));
+  },
+  flow: (wsId: string, flowId: string) => get<import('./types.js').FlowDetailView>(fl(wsId, `/${enc(flowId)}`)),
+  compare: (wsId: string, a: string, b: string) => get<import('./types.js').FlowCompareView>(fl(wsId, `/compare?a=${enc(a)}&b=${enc(b)}`)),
+  /** Agree or disagree with a flow's position: both are sent the same way. */
+  reactToPosition: (wsId: string, flowId: string, flowTypeId: string, reaction: Reaction, reason?: string) =>
+    post<FeedbackRow>(fl(wsId, `/${enc(flowId)}/reaction`), { flowTypeId, reaction, ...withReason(reason) }),
+  reactToVerdict: (wsId: string, verdictId: string, reaction: Reaction, reason?: string) =>
+    post<FeedbackRow>(fl(wsId, `/verdicts/${enc(verdictId)}/reaction`), { reaction, ...withReason(reason) }),
+  override: (wsId: string, flowTypeId: string, winnerFlowId: string, loserFlowId: string, reason?: string) =>
+    post<Override>(fl(wsId, '/overrides'), { flowTypeId, winnerFlowId, loserFlowId, ...withReason(reason) }),
+  /** Always sends a JSON body: the server requires `content-type: application/json` on DELETE. */
+  revokeOverride: (wsId: string, overrideId: string, reason?: string) =>
+    request<Override>('DELETE', fl(wsId, `/overrides/${enc(overrideId)}`), withReason(reason)),
+  confirmOverride: (wsId: string, overrideId: string, keep: boolean, reason?: string) =>
+    post<Override>(fl(wsId, `/overrides/${enc(overrideId)}/confirm`), { keep, ...withReason(reason) }),
+  correctCheck: (
+    wsId: string,
+    flowId: string,
+    input: { checklistId: string; itemKey: string; answer: import('./types.js').CheckAnswer; note?: string },
+    reason?: string,
+  ) => post<{ check: import('./types.js').FlowCheck }>(fl(wsId, `/${enc(flowId)}/checks`), { ...input, ...withReason(reason) }),
+  decideFlowType: (wsId: string, typeId: string, decision: FT, reason?: string) =>
+    post<import('./types.js').FlowType>(fl(wsId, `/types/${enc(typeId)}/decision`), { ...decision, ...withReason(reason) }),
+  /** What a review is about: no `flowTypeKey` = not about any flow (its subject only); `checkKey` needs `flowTypeKey`. */
+  correctAttribution: (wsId: string, mentionId: string, input: { flowTypeKey?: string; checkKey?: string }, reason?: string) =>
+    post<import('./types.js').ReviewMention>(fl(wsId, `/mentions/${enc(mentionId)}/attribution`), { ...input, ...withReason(reason) }),
+  /** The active checklists for a flow type: the general one and, when the type has one, its own. */
+  checklists: (wsId: string, flowTypeId: string) =>
+    get<import('./types.js').FlowChecklistsView>(fl(wsId, `/checklists?flowTypeId=${enc(flowTypeId)}`)),
+  /** Saves the user's edit as a new active version; returns it and the flows needing a re-walk. */
+  editChecklist: (wsId: string, checklistId: string, input: import('./types.js').ChecklistEditInput, reason?: string) =>
+    post<{ checklist: import('./types.js').Checklist; needRewalk: string[] }>(fl(wsId, `/checklists/${enc(checklistId)}/edit`), {
+      ...input,
+      ...withReason(reason),
+    }),
+  /** Returns the flows that need a re-walk for the accepted checklist's new checks. */
+  decideChecklist: (wsId: string, checklistId: string, decision: CD, reason?: string) =>
+    post<{ checklist: import('./types.js').Checklist; needRewalk: string[] }>(fl(wsId, `/checklists/${enc(checklistId)}/decision`), {
+      ...decision,
+      ...withReason(reason),
+    }),
+};
+// --- end flows -----------------------------------------------------------------------------------

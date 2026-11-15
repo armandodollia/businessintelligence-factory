@@ -1,11 +1,15 @@
 import type { Store } from '../store/db.js';
 import { applyObservations } from '../knowledge/facts.js'; // KS-2
+// Flow records: `flows.ts` imports `isOutputUsable` from here; both sides use the other only at call time.
+import { applyFlowStatus } from '../flows/flows.js';
+import { flowRepos } from '../flows/repos.js';
+import type { Flow } from '../flows/types.js';
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 import type { Competitor, Finding, OutputStatus, Persona, Recommendation, SymptomHypothesis, Task } from '../types.js';
 
 /**
  * Review status of task outputs (findings, recommendations, personas — migration 11; competitors and
- * symptom hypotheses — migration 13; spec §7.2).
+ * symptom hypotheses — migration 13; spec §7.2; flows — migration 22, `flows/flows.ts`).
  *
  * Every output carries the task that (last) saved it and the review round it was (re-)saved in
  * (`taskRound`). When the task's review loop ends, its *current* outputs take the task's final
@@ -43,6 +47,7 @@ export type TaskOutputs = {
   personas: Persona[];
   competitors: Competitor[];
   hypotheses: SymptomHypothesis[];
+  flows: Flow[];
 };
 
 /** Outputs (last) saved by a task, in its own workspace. */
@@ -54,14 +59,16 @@ export function taskOutputs(store: Store, task: Pick<Task, 'id' | 'workspaceId'>
     personas: own(store.personas.list({ taskId: task.id })),
     competitors: own(store.competitors.list({ taskId: task.id })),
     hypotheses: own(store.symptomHypotheses.list({ taskId: task.id })),
+    flows: own(flowRepos(store).flows.list({ taskId: task.id })),
   };
 }
 
-const allOutputs = (o: TaskOutputs) => [...o.findings, ...o.recommendations, ...o.personas, ...o.competitors, ...o.hypotheses];
+/** Every output of `o`, of every kind (one list, so callers cannot miss a kind). */
+export const allOutputs = (o: TaskOutputs) => [...o.findings, ...o.recommendations, ...o.personas, ...o.competitors, ...o.hypotheses, ...o.flows];
 
-const OUTPUT_ID = /\b(?:fnd|rec|per|cmp|hyp)_[0-9A-Z]{26}\b/g;
+const OUTPUT_ID = /\b(?:fnd|rec|per|cmp|hyp|flw)_[0-9A-Z]{26}\b/g;
 
-/** Output ids (`fnd_` / `rec_` / `per_` / `cmp_` / `hyp_`) cited anywhere in a deliverable. */
+/** Output ids (`fnd_` / `rec_` / `per_` / `cmp_` / `hyp_` / `flw_`) cited anywhere in a deliverable. */
 export function citedOutputIds(result: unknown): Set<string> {
   const ids = new Set<string>();
   if (result !== undefined) for (const m of JSON.stringify(result).matchAll(OUTPUT_ID)) ids.add(m[0]);
@@ -100,6 +107,9 @@ export function applyTaskStatus(store: Store, task: Task, status: TaskOutcome): 
   for (const p of outputs.personas) store.personas.update(p.id, { status: next(p.id) });
   for (const c of outputs.competitors) store.competitors.update(c.id, { status: next(c.id) });
   for (const h of outputs.hypotheses) store.symptomHypotheses.update(h.id, { status: next(h.id) });
+  for (const f of outputs.flows) flowRepos(store).flows.update(f.id, { status: next(f.id) });
+  // Flow records: a verified task's candidate flow versions become current (same transaction).
+  applyFlowStatus(store, task, status);
   // Knowledge store KS-2: the task's fact observations (create / confirm / replace / retract) are
   // applied, rejected or superseded with the same outcome, in the same transaction (design §7.2).
   applyObservations(store, task, status, { cited: citedOutputIds(task.result) });
@@ -119,6 +129,7 @@ export function retireExperimentOutputs(store: Store, task: Task): void {
   for (const p of outputs.personas) store.personas.update(p.id, { status: 'superseded' });
   for (const c of outputs.competitors) store.competitors.update(c.id, { status: 'superseded' });
   for (const h of outputs.hypotheses) store.symptomHypotheses.update(h.id, { status: 'superseded' });
+  for (const f of outputs.flows) flowRepos(store).flows.update(f.id, { status: 'superseded' });
   applyObservations(store, task, 'failed', { cited: new Set() });
 }
 // --- end WP-F ------------------------------------------------------------------------------------
@@ -154,14 +165,15 @@ export function associatedOutputs(store: Store, task: Pick<Task, 'id' | 'workspa
     personas: add(owned.personas, (id) => store.personas.get(id), 'per_'),
     competitors: add(owned.competitors, (id) => store.competitors.get(id), 'cmp_'),
     hypotheses: add(owned.hypotheses, (id) => store.symptomHypotheses.get(id), 'hyp_'),
+    flows: add(owned.flows, (id) => flowRepos(store).flows.get(id), 'flw_'),
   };
 }
 
 /**
  * Every artifact a task's associated outputs (`associatedOutputs`) rest on, transitively: findings'
  * evidence, recommendations → cited findings' evidence, persona field evidence, competitor evidence,
- * hypotheses → cited findings' evidence (or cited artifacts). All outputs count, whatever their
- * status (privacy: export filtering).
+ * hypotheses → cited findings' evidence (or cited artifacts), flows → their steps' screenshots. All
+ * outputs count, whatever their status (privacy: export filtering).
  */
 export function taskOutputEvidence(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, result?: unknown): string[] {
   const o = associatedOutputs(store, task, result);
@@ -176,6 +188,7 @@ export function taskOutputEvidence(store: Store, task: Pick<Task, 'id' | 'worksp
   for (const p of o.personas) for (const field of Object.values(p.profile ?? {})) for (const a of field.evidence ?? []) ids.add(a);
   for (const c of o.competitors) for (const a of c.evidence) ids.add(a);
   for (const h of o.hypotheses) for (const e of h.evidence) for (const a of findingEvidence(e) ?? [e]) ids.add(a);
+  for (const f of o.flows) for (const s of flowRepos(store).flowSteps.list({ flowId: f.id })) if (s.artifactId) ids.add(s.artifactId);
   return [...ids];
 }
 

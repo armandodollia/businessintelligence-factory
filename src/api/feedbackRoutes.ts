@@ -16,6 +16,7 @@ const TARGET_TYPES = [
   'lesson', // learning loop WP-E
   'lessons', 'audit_schedule', // KS-8 final gate (Opus 5)
   'workspace', 'schedule', 'config', // re-gate (Opus 4): user_action targets
+  'flow', 'flow_verdict', 'flow_check', 'flow_type', 'checklist', 'review_mention', // flow records and ranking
 ] as const satisfies readonly FeedbackTargetType[];
 
 const schemas = {

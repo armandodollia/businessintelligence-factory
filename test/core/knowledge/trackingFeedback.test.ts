@@ -53,6 +53,13 @@ const EXCLUDED: Record<string, string> = {
   weights_change: 'WP-A scoring-weights action; covered in test/api/feedbackRoutes.test.ts',
   prompt_patch_apply: 'WP-A/WP-B calibration patch; covered in test/core/feedback.test.ts and test/core/usageCore.test.ts',
   prompt_patch_revert: 'WP-B calibration revert; covered in test/api/feedbackRoutes.test.ts',
+  flow_rank_reaction: 'flow ranking reaction; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
+  flow_verdict_reaction: 'flow verdict reaction; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
+  flow_check_correction: 'flow check correction; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
+  flow_override: 'flow pair override; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
+  flow_type_decision: 'flow type decision; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
+  checklist_decision: 'checklist decision; covered in test/core/flows/feedback.test.ts and test/api/flowRoutes.test.ts',
+  review_attribution_correction: 'review mention attribution; covered in test/api/flowRoutes.test.ts',
 };
 
 describe('human knowledge actions write feedback events with the configured actor (KS-6)', () => {

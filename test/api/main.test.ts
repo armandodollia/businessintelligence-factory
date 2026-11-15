@@ -17,7 +17,7 @@ describe('boot', () => {
       expect(await res.json()).toEqual([]);
       const mcp = await fetch(`http://127.0.0.1:${port}/mcp/tok_bogus`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
       expect(mcp.status).toBe(401);
-      expect(Object.keys(b.runtime.research.phaseRunners ?? {}).sort()).toEqual(['persona_panel', 'scoring']);
+      expect(Object.keys(b.runtime.research.phaseRunners ?? {}).sort()).toEqual(['flow_ranking', 'persona_panel', 'scoring']);
       expect(b.runtime.dataDir).toBe(join(dir, 'data'));
       // Learning loop: the feedback → outcome listener is registered at boot.
       expect(feedbackOutcomesRegistered()).toBe(true);
@@ -33,6 +33,14 @@ describe('boot', () => {
         { questions: [] },
       );
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/needs a task/) });
+      // Flow ranking: the persona verdict tool is wired (it answers for itself, not "not available").
+      const fv = await b.runtime.handle(
+        { agentRunId: 'arun_y', workspaceId: 'ws_boot', role: 'persona', model: { provider: 'claude', model: 'opus' }, promptVersion: 'v' },
+        'submit_flow_verdicts',
+        { flow_type: 'teleport', verdicts: [] },
+      );
+      expect(fv.ok).toBe(false);
+      expect(fv.ok ? '' : fv.error).not.toMatch(/not available/);
     } finally {
       await b.close();
     }

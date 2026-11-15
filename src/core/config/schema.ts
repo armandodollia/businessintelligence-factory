@@ -23,6 +23,8 @@ export const TASK_TYPES = [
   'persona_profile',
   'discover_competitors',
   'flow_walkthrough',
+  // Flow records: public feedback per subject (review mentions)
+  'flow_reviews',
   'news_scan',
   'public_filings',
   'customer_pain_points',
@@ -63,6 +65,7 @@ function perTaskType<T extends z.ZodType>(item: T) {
     persona_profile: opt,
     discover_competitors: opt,
     flow_walkthrough: opt,
+    flow_reviews: opt,
     news_scan: opt,
     public_filings: opt,
     customer_pain_points: opt,
@@ -357,6 +360,45 @@ export const auditConfigSchema = z.strictObject({
 });
 // --- end WP-F config ---------------------------------------------------------------------------
 
+// --- flow records and flow ranking (design 2026-11-14 §15) -----------------------------------------
+/** `config.flows` (optional; every field defaulted). Read it through `flowsSettings` (flows/config.ts). */
+export const flowsConfigSchema = z.strictObject({
+  /** Rank scores closer than this (points, 0–100) are ordered by their direct head-to-head (default 5). */
+  tieMargin: z.number().min(0).max(100).optional(),
+  /** Distinct negative mentions that make a review-answered check `reported_problem` (default 3). */
+  minMentionsForCheck: z.number().int().min(1).optional(),
+  /** Mentions older than this many days are shown but not counted (default 365). */
+  mentionWindowDays: z.number().int().min(1).optional(),
+  /** Mentions attributed with less confidence are shown but not counted (default 0.6). */
+  minAttributionConfidence: z.number().min(0).max(1).optional(),
+  /** Focused (stage 2) head-to-heads per ranking round (default 20). */
+  maxFocusedComparisons: z.number().int().min(0).optional(),
+  /** A broad verdict below this confidence gets a focused head-to-head (default 0.5). */
+  lowConfidence: z.number().min(0).max(1).optional(),
+  /**
+   * Flows one broad (stage 1) persona run reads at once (default 8). At most 20: 20 flows make 190
+   * pairs, within the 200 verdicts one `submit_flow_verdicts` call takes.
+   */
+  maxFlowsPerSitting: z.number().int().min(2).max(20).optional(),
+  /** Model of verdict runs (default `roles.persona`). */
+  model: modelRefSchema.optional(),
+  /** Coverage of a flow type judged on the general checklist alone (default 0.3). */
+  generalCoverage: z.number().min(0).max(1).optional(),
+});
+
+/** Defaults of `config.flows` (`model` has none here: it falls back to `roles.persona` at use). */
+export const FLOWS_DEFAULTS = {
+  tieMargin: 5,
+  minMentionsForCheck: 3,
+  mentionWindowDays: 365,
+  minAttributionConfidence: 0.6,
+  maxFocusedComparisons: 20,
+  lowConfidence: 0.5,
+  maxFlowsPerSitting: 8,
+  generalCoverage: 0.3,
+} as const;
+// --- end flows config ----------------------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -435,6 +477,8 @@ export const bifConfigSchema = z
     audit: auditConfigSchema.optional(),
     /** Ruling R4: experiments on browser tasks (off by default). */
     experiments: experimentsConfigSchema.optional(),
+    /** Flow records and flow ranking: thresholds, caps and the verdict model (all defaulted). */
+    flows: flowsConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -460,6 +504,7 @@ export const bifConfigSchema = z
     check(cfg.escalation?.model, ['escalation', 'model']); // WP-D
     check(cfg.lessons?.retro?.model, ['lessons', 'retro', 'model']); // learning loop WP-E
     check(cfg.audit?.model, ['audit', 'model']); // WP-F
+    check(cfg.flows?.model, ['flows', 'model']); // flow ranking
     // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).
     const ex = cfg.knowledge?.extraction;
     if (ex && (ex.chunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.chunkTokens) > (ex.maxChunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.maxChunkTokens)) {

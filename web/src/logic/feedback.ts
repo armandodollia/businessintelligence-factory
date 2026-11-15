@@ -39,6 +39,14 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   lessons_evaluate: 'lessons engine run',
   audit_schedule_change: 'audit schedule changed',
   user_action: 'user action',
+  // flow records and ranking
+  flow_rank_reaction: 'flow position reaction',
+  flow_verdict_reaction: 'persona verdict reaction',
+  flow_check_correction: 'check answer corrected',
+  flow_override: 'flow pair ruling',
+  flow_type_decision: 'flow type decision',
+  checklist_decision: 'checklist decision',
+  review_attribution_correction: 'review attribution corrected',
 };
 
 const short = (v: unknown, max = 80): string => {

@@ -1,5 +1,6 @@
 import { artifactIdsIn } from '../harness/tools/handlers.js';
-import { associatedOutputs, taskOutputEvidence } from '../research/outputs.js';
+import { allOutputs, associatedOutputs, taskOutputEvidence } from '../research/outputs.js';
+import { flowRepos } from '../flows/repos.js';
 import type { Store } from '../store/db.js';
 import type { Decision, InterviewTurn, Rating, UserRequest } from '../types.js';
 // Learning loop WP-A: human feedback lines (request answers, interview turns, feedback events).
@@ -11,7 +12,7 @@ import { knowledgeRepos } from '../store/repos.js'; // KS-6
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 
 /** Payload keys naming a decision's primary subject, in precedence order. */
-const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
+const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId', 'flowId'] as const;
 
 /** The primary subject id a (non-persona_feedback) decision judges, if its payload names one. */
 function primarySubject(d: Decision): string | undefined {
@@ -23,10 +24,27 @@ function primarySubject(d: Decision): string | undefined {
 /** Whether `id` is a task output superseded in a later review round. */
 function isSuperseded(store: Store, id: string | undefined): boolean {
   if (!id) return false;
-  const item =
+  return outputOf(store, id)?.status === 'superseded';
+}
+
+/** The task output (finding, recommendation, persona, competitor, hypothesis, flow version) named by `id`. */
+function outputOf(store: Store, id: string): { status?: string | undefined } | undefined {
+  return (
     store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id) ?? store.competitors.get(id) ??
-    store.symptomHypotheses.get(id);
-  return item?.status === 'superseded';
+    store.symptomHypotheses.get(id) ?? flowRepos(store).flows.get(id)
+  );
+}
+
+/**
+ * Flow ranking records (flow design §10.2, §14; plan decision: flows are not in the training export in
+ * this project): a persona's verdicts (`flow_verdicts`, simulated judgments of a persona, not of an agent)
+ * and the ranking round's own harness records (`flow_ranking_round`, `flow_verdicts_failed`). Neither a
+ * line nor a judgment of the subject their payload names.
+ */
+function isFlowRankingRecord(d: Decision): boolean {
+  if (d.kind === 'flow_verdicts') return true;
+  const p = (d.payload ?? null) as { tool?: unknown; event?: unknown } | null;
+  return p?.tool === 'harness' && (p.event === 'flow_ranking_round' || p.event === 'flow_verdicts_failed');
 }
 
 /**
@@ -86,7 +104,7 @@ function taskEvidence(store: Store, id: string): string[] {
   return [...out];
 }
 
-const ITEM_ID = /\b(?:art|fnd|sym|rec|per|tsk|cmp|hyp)_[0-9A-Z]{26}\b/g;
+const ITEM_ID = /\b(?:art|fnd|sym|rec|per|tsk|cmp|hyp|flw|rvm)_[0-9A-Z]{26}\b/g;
 
 /**
  * A decision's provenance: its refs and every item id in its payload (artifact / finding /
@@ -144,7 +162,8 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  *   of the subject (`judgmentFor`);
  * - any other decision joins ratings of its refs.
  * Decisions referencing an internal upload — directly or via the evidence of a referenced item
- * (`expandedRefs`) — are excluded unless `includeUploads`. Decisions whose primary subject was
+ * (`expandedRefs`) — are excluded unless `includeUploads`. Flow ranking records (`isFlowRankingRecord`:
+ * persona verdicts and the round's own records) are never exported. Decisions whose primary subject was
  * superseded (replaced in a later review round) are excluded. Reuse records (`isReuseRecord`) are
  * neither judgments nor lines: they only feed provenance filtering (via the task's decisions).
  */
@@ -171,7 +190,7 @@ export function exportTrainingDataWithSummary(
 
   const judgments = new Map<string, Decision[]>();
   for (const d of decisions) {
-    if (d.kind === 'persona_feedback' || isReuseRecord(d)) continue;
+    if (d.kind === 'persona_feedback' || isReuseRecord(d) || isFlowRankingRecord(d)) continue;
     const s = primarySubject(d);
     if (s) judgments.set(s, [...(judgments.get(s) ?? []), d]);
   }
@@ -189,7 +208,7 @@ export function exportTrainingDataWithSummary(
 
   const lines: string[] = [];
   for (const decision of decisions) {
-    if (isReuseRecord(decision)) continue;
+    if (isReuseRecord(decision) || isFlowRankingRecord(decision)) continue;
     // Upload provenance (WP-A, KS-2) and upload exposure (KS-6), with the cause counted (§12 ruling).
     const cause = uploads ? judgmentCause(store, decision, uploads, taskEvidenceOf) : undefined;
     if (cause) {
@@ -271,9 +290,7 @@ function finalReviewStatus(store: Store, d: Decision): string | undefined {
 
 function outputStatus(store: Store, id: string | undefined): string | undefined {
   if (!id) return undefined;
-  const item =
-    store.findings.get(id) ?? store.recommendations.get(id) ?? store.personas.get(id) ?? store.competitors.get(id) ??
-    store.symptomHypotheses.get(id);
+  const item = outputOf(store, id);
   return item?.status && TERMINAL.has(item.status) ? item.status : undefined;
 }
 
@@ -593,8 +610,7 @@ class ExportExclusion extends UploadExclusionSet {
     let c: ExclusionCause | undefined;
     const task = this.exportStore.tasks.get(taskId);
     if (task && !this.load().tasks.has(taskId)) {
-      const o = associatedOutputs(this.exportStore, task);
-      const ids = [...o.findings, ...o.recommendations, ...o.personas, ...o.competitors, ...o.hypotheses].map((x) => x.id);
+      const ids = allOutputs(associatedOutputs(this.exportStore, task)).map((x) => x.id);
       c = ids.some((x) => this.exposedCause(x) !== undefined) ? 'exposed_output' : undefined;
     }
     this.causeMemo.set(key, c);
@@ -641,6 +657,8 @@ export function uploadExposure(store: Store): { runs: Set<string>; tasks: Set<st
       ...store.personas.list({ taskId: t }),
       ...store.competitors.list({ taskId: t }),
       ...store.symptomHypotheses.list({ taskId: t }),
+      ...flowRepos(store).flows.list({ taskId: t }),
+      ...flowRepos(store).reviewMentions.list({ taskId: t }),
     ]) outputs.add(x.id);
     // A confirm / retract / replace observation is its task's output too (design-thread ruling): what
     // references it is excluded; the fact it targets keeps its own status.

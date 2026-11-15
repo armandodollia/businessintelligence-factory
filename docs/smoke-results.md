@@ -35,6 +35,35 @@ Status per area:
 - Measurements (prompt tokens, `search` latency at 10,000 chunks, store size):
   `docs/superpowers/verify-log.md`.
 
+## Flow records and ranking smoke (`feat/flows`, 2026-11-14)
+
+Run on 2026-11-14 with `BIF_SMOKE_TIMEOUT_MS=300000 npm run smoke -- flows claude` and
+`BIF_SMOKE_TIMEOUT_MS=400000 npm run smoke -- flows codex` (macOS, Node 25; claude 2.1.322, codex-cli
+0.167.2). One run per provider.
+
+Per provider the script boots the real server and runs two parts:
+
+- **Worker.** It seeds a workspace, a competitor ("Pinecrest Tasks", fictional), a research run, a
+  `flow_walkthrough` task and three text notes captured by that task, one per screen of the sign-up.
+  One real worker runs with the real `flow_walkthrough` system prompt and no browser. It must call
+  `read_flow_catalog`, read the notes with `read_artifact`, save the flow with `save_flow` (one step
+  per screen, each citing its note), answer at least three checks with `save_flow_checks` and
+  `submit_result` the flow id.
+- **Persona.** It seeds a second workspace with its own company and the same competitor, a verified
+  sign-up flow of each and one verified persona, then runs the real ranking round (`runFlowRanking`)
+  with that provider as the persona (`flows.model`), one broad sitting and no focused follow-up.
+
+Both parts are judged from the store: the flow, its steps and walkthrough answers; the persona's
+verdict row (pair, persona, stage, reason) and the ranking it produces.
+
+| Check | Result | Detail |
+|---|---|---|
+| flows/claude (haiku) | **PASS**, 6 of 6 steps | 22.2 s, 11 bif tool calls, $0.0153, `promptStoreGaps` `[]`; flow saved as `sign_up`, primary, 3 steps each citing its note; 7 walkthrough answers (the three required ones `pass`), no refused call; the persona preferred the competitor (strength 3, confidence 0.9) with a reason about the own company's five fields and sales call |
+| flows/codex (gpt-6.1-sol) | **PASS**, 6 of 6 steps | 49.9 s, 12 bif tool calls, $0.1197, `promptStoreGaps` `[]`; same flow shape (`read_flow_catalog` called twice); 10 walkthrough answers, no refused call; the persona preferred the competitor (strength 3, confidence 0.97) |
+| flows/opencode | not run | not attempted in this run: OpenCode's free tier answered 429 at its last probe (2026-11-13, below) and no paid plan is used |
+
+No agent confusion was flagged: no failed tool call, no new artifact saved, no repeated call.
+
 ## Results (2026-11-12)
 
 | Check | Result | Time | Detail |
@@ -250,5 +279,5 @@ So the OpenCode success path is still verified only against the handcrafted fixt
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without
   breaking OAuth); the smoke passed regardless.
 - Re-run everything with `npx tsx scripts/smoke.ts`; `worker [providers...]`, `browser [providers...]`,
-  `knowledge [providers...]` or `interview` runs a subset.
+  `knowledge [providers...]`, `flows [providers...]` or `interview` runs a subset.
   The script exits non-zero when any check fails.

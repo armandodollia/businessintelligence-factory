@@ -173,6 +173,7 @@ export const ALL_PHASES: ResearchPhase[] = [
   'market_research',
   'competitor_discovery',
   'deep_dives',
+  'flow_ranking',
   'synthesis',
   'persona_panel',
   'scoring',
@@ -244,6 +245,16 @@ export interface WhatChangedPayload {
   retracted?: string[];
   confirmed?: number;
   // --- end KS-5 ---
+  /** Flow records: new flows, new versions, confirmations and ranking moves (absent on older diffs). */
+  flows?: FlowChanges;
+}
+
+/** "What changed" in the flow records of a node (`scheduler/diff.ts` `FlowChanges`). */
+export interface FlowChanges {
+  newFlows: string[];
+  newVersions: Array<{ from: string; to: string }>;
+  confirmed: number;
+  rankMoves: Array<{ flowTypeId: string; flowId: string; from: number; to: number }>;
 }
 
 /** One "what changed" entry as shown on the Research page. */
@@ -259,6 +270,8 @@ export interface ChangeEntry {
   replaced: Array<{ from: string; to: string }>;
   retracted: string[];
   confirmed: number;
+  /** Flow records (empty on older diffs). */
+  flows: FlowChanges;
   /** True when the diff found nothing. */
   empty: boolean;
 }
@@ -366,3 +379,153 @@ export type AuditsView = {
 export type ExperimentArmInput = { model?: import('../../../src/core/config/schema.js').ModelRef; promptVersion?: string; promptText?: string };
 export type NewExperiment = { taskId: string; name?: string; repeats?: number; arms: [ExperimentArmInput, ExperimentArmInput]; confirmBrowser?: boolean };
 // --- end WP-F ---------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Flow records and flow ranking: the Flows page (`src/api/flowRoutes.ts` response shapes)
+
+export type {
+  CheckAnswer,
+  Checklist,
+  ChecklistItem,
+  Flow,
+  FlowCheck,
+  FlowOverride,
+  FlowStep,
+  FlowType,
+  FlowVerdict,
+  ReviewMention,
+  StopReason,
+} from '../../../src/core/flows/types.js';
+type CoreFlow = import('../../../src/core/flows/types.js').Flow;
+type CoreFlowType = import('../../../src/core/flows/types.js').FlowType;
+type CoreVerdict = import('../../../src/core/flows/types.js').FlowVerdict;
+/** A ruling as the flow routes serve it: with the names ("subject — variant") of its two flows. */
+export type ServedOverride = import('../../../src/core/flows/types.js').FlowOverride & { winnerName: string; loserName: string };
+type CoreOverride = ServedOverride;
+type CoreChecklist = import('../../../src/core/flows/types.js').Checklist;
+type CoreStep = import('../../../src/core/flows/types.js').FlowStep;
+
+/** A persona as the flow routes name it (`slug` etc. absent when the persona row is gone). */
+export interface FlowPersonaRef {
+  id: string;
+  slug?: string;
+  segment?: string;
+  version?: number;
+}
+export interface FlowSubjectRef {
+  id: string;
+  name: string;
+}
+
+/** `GET .../flows/types`. */
+export type FlowTypeRow = CoreFlowType & { flowCount: number; variantCount: number };
+export interface FlowTypesView {
+  flowTypes: FlowTypeRow[];
+  proposals: { flowTypes: CoreFlowType[]; checklists: CoreChecklist[] };
+}
+
+export type IgnoredOverride = { id: string; reason: 'conflict' | 'not_ranked' };
+
+/** One position of `GET .../flows/rankings/:flowTypeId` (core `NodeRanking` row plus the subject). */
+export interface RankedFlowRow {
+  flowId: string;
+  /** 1-based; flows sharing a position have the same one. */
+  position: number;
+  rankScore?: number;
+  checklist?: number;
+  persona?: number;
+  decidedBy: 'blend' | 'checklist_only' | 'persona_only' | 'none';
+  tieBrokenWith?: string[];
+  sharedPosition?: boolean;
+  /** Ids of the user's rulings that moved this flow or the flow it was ruled against. */
+  overriddenBy?: string[];
+  flow: CoreFlow;
+  subject: FlowSubjectRef;
+  /** The subject's main way through (served by the rankings' rule; not the stored flag). */
+  primary: boolean;
+  partial: boolean;
+  reviews: { total: number; negative: number };
+  wins: number;
+  comparisons: number;
+}
+export interface FlowRankingView {
+  flowType: CoreFlowType;
+  /** False for a proposed flow type: its flows are listed (position 0) but not ranked until the user accepts it. */
+  isRanked: boolean;
+  coverage: number;
+  ranked: RankedFlowRow[];
+  /** Rulings the order does not follow: `conflict` (contradicts a newer one) or `not_ranked` (a flow of it is not in this list). */
+  ignoredOverrides: IgnoredOverride[];
+  noPersonas: boolean;
+  pendingProposals: { flowTypes: number; checklists: number };
+  overrides: CoreOverride[];
+  personas: FlowPersonaRef[];
+}
+
+/** A persona verdict as served: always `simulated`. */
+export type ServedVerdict = CoreVerdict & { simulated: true; persona: FlowPersonaRef };
+
+/** `GET .../flows/:flowId`: one flow and everything behind its position (spec §10.5). */
+export interface FlowDetailView {
+  flow: CoreFlow;
+  subject: FlowSubjectRef;
+  /** The subject's main way through (served by the rankings' rule; not the stored flag). */
+  primary: boolean;
+  partial: boolean;
+  /** The flow rests on material the user uploaded. */
+  upload: boolean;
+  /** This is the current version of the flow. */
+  current: boolean;
+  steps: CoreStep[];
+  checks: Array<import('../../../src/core/flows/types.js').FlowCheck & { question: string; scored: boolean }>;
+  verdicts: Array<
+    ServedVerdict & {
+      opponentId: string;
+      opponent: { id: string; name?: string; variant?: string; subject?: FlowSubjectRef };
+      /** The opponent is in the ranking the persona score comes from. */
+      counted: boolean;
+    }
+  >;
+  mentions: Array<import('../../../src/core/flows/types.js').ReviewMention & { counted: boolean }>;
+  overrides: CoreOverride[];
+  checklist?: number;
+  persona?: number;
+  coverage: number;
+}
+
+/** `GET .../flows/compare?a=&b=`. */
+export interface FlowCompareSide {
+  flow: CoreFlow;
+  subject: FlowSubjectRef;
+  /** The subject's main way through (served by the rankings' rule; not the stored flag). */
+  primary: boolean;
+  partial: boolean;
+  steps: CoreStep[];
+}
+export interface FlowCompareView {
+  flowType: CoreFlowType;
+  a: FlowCompareSide;
+  b: FlowCompareSide;
+  verdicts: ServedVerdict[];
+  overrides: CoreOverride[];
+}
+
+/** `POST .../flows/types/:typeId/decision`. */
+export type FlowTypeDecisionInput =
+  | { action: 'accept' }
+  | { action: 'reject' }
+  | { action: 'merge'; intoId: string }
+  | { action: 'edit'; name?: string; definition?: string };
+/** `GET .../flows/checklists?flowTypeId=`: the active checklists (the specific one when the type has one). */
+export interface FlowChecklistsView {
+  general: CoreChecklist;
+  specific?: CoreChecklist;
+}
+/** One item's change in `POST .../flows/checklists/:checklistId/edit` (only what changed is sent). */
+export type ChecklistItemEdit = { key: string; question?: string; weight?: number; remove?: boolean };
+/** `POST .../flows/checklists/:checklistId/edit`: coverage (0–1) and item changes; no new items, no kind or pass rule changes. */
+export type ChecklistEditInput = { coverage?: number; items: ChecklistItemEdit[] };
+
+/** `POST .../flows/checklists/:checklistId/decision`. */
+export type ChecklistDecisionInput = { action: 'accept'; coverage?: number } | { action: 'reject' };
+export type FlowReaction = 'agree' | 'disagree';

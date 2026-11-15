@@ -283,7 +283,7 @@ export function addObservation(store: Store, o: NewObservation): FactObservation
 
 export type TaskOutcomeStatus = 'verified' | 'unverified' | 'failed';
 
-const OUTPUT_ID = /\b(?:fnd|rec|per|cmp|hyp)_[0-9A-Z]{26}\b/g;
+const OUTPUT_ID = /\b(?:fnd|rec|per|cmp|hyp|flw)_[0-9A-Z]{26}\b/g;
 
 /**
  * Applies the task's pending observations at task end (design §7.2), inside `applyTaskStatus`'s

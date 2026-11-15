@@ -11,7 +11,9 @@
  *   cut at the extraction cap.
  * - chunk: its text (redacted across chunk boundaries, fenced), `around` neighbours on each side.
  * - entity: its card with the `expand` budget (more facts than `get_card`); node: its node card.
- * - record (competitor, persona, symptom, hypothesis, recommendation): one item per field.
+ * - record (competitor, persona, symptom, hypothesis, recommendation): one item per field; a flow: its
+ *   fields, steps, check answers, other versions and review counts; a review mention: its quote, source
+ *   and attribution (step text, notes and quotes fenced).
  *
  * `read_artifact` modes: `outline` (documents' default), `text` (the extracted text, chunk by chunk),
  * `image` (screenshots' and images' default), `raw` (the stored bytes of a text format, redacted whole
@@ -27,6 +29,8 @@
  * review slice; nested items outside it are left out.
  */
 import type { ArtifactStore } from '../evidence/artifacts.js';
+import { flowRepos } from '../flows/repos.js';
+import { FLOW_TEXT_MAX, type Checklist, type FlowCheck } from '../flows/types.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Artifact, Finding, RetrievalResultRef, TextChunk } from '../types.js';
 import { encodeCursor } from './budget.js';
@@ -74,8 +78,8 @@ function push(b: Built, item: Item, refs: RetrievalResultRef[] = [], upload = fa
  * A name for the header, bounded (`boundedText`); when the bound cuts it, the whole value is served as a
  * `field` item too (paging rework: the header never needs cutting, and nothing is lost).
  */
-function named(b: Built, field: string, full: string, refs: RetrievalResultRef[] = [], upload = false): string {
-  const shown = boundedText(full, HEADER_NAME_JSON);
+function named(b: Built, field: string, full: string, refs: RetrievalResultRef[] = [], upload = false, maxJson = HEADER_NAME_JSON): string {
+  const shown = boundedText(full, maxJson);
   if (shown !== full) push(b, { type: 'field', field, value: full }, refs, upload);
   return shown;
 }
@@ -465,16 +469,23 @@ function expandNode(env: ReadEnv, id: string): Built {
   return b;
 }
 
-const RECORD_PREFIX: Record<string, string> = { cmp_: 'competitor', per_: 'persona', sym_: 'symptom', hyp_: 'hypothesis', rec_: 'recommendation' };
+const RECORD_PREFIX: Record<string, string> = {
+  cmp_: 'competitor', per_: 'persona', sym_: 'symptom', hyp_: 'hypothesis', rec_: 'recommendation', flw_: 'flow', rvm_: 'review_mention',
+};
+
+/** A reviewed output usable downstream (`isOutputUsable`, research/outputs.ts). */
+const usable = (r: { status?: string; includeOverride?: boolean | undefined }) => r.status !== 'superseded' && (r.includeOverride ?? r.status === 'verified');
 
 /**
  * A typed record: header (kind, record type, id, name, status, source) and one `field` item per other
- * field (paging rework: a persona's 13 profile fields are 13 items, paged by the cursor).
+ * field (paging rework: a persona's 13 profile fields are 13 items, paged by the cursor). Flows and
+ * review mentions have their own shape (`expandFlow`, `expandMention`).
  */
 function expandRecord(env: ReadEnv, id: string, type: string): Built {
+  if (type === 'flow') return expandFlow(env, id);
+  if (type === 'review_mention') return expandMention(env, id);
   const { store } = env;
   const ws = env.scope.workspaceId;
-  const usable = (r: { status?: string; includeOverride?: boolean }) => r.status !== 'superseded' && (r.includeOverride ?? r.status === 'verified');
   const red = <T>(v: T): T => redactServed(store, ws, v);
   let name: string | undefined;
   let recordType = type;
@@ -544,6 +555,174 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
     const item: Item = field.startsWith('profile.') ? { type: 'field', field, ...(v as object) } : { type: 'field', field, value: v };
     push(b, item, refs, upload);
   }
+  return b;
+}
+
+// ---------------------------------------------------------------------------
+// flow records (flow design §8.2–§8.4, §9.2): third-party text (step text, the notable note, check
+// notes and recorded values, review quotes) is served fenced; names and goals are labels, as a claim.
+
+/** JSON characters of a flow type key and of a variant in a flow's header (the full value is an item when cut). */
+const FLOW_TYPE_JSON = 80;
+const VARIANT_JSON = 120;
+/** Review mention ids listed in a flow's review counts (negative first). */
+const MAX_MENTION_IDS = 10;
+
+/** The subject entity of a flow record for its header: `{ id, name }`, upload status; none for a reviewer (outside the slice). */
+function subjectOf(env: ReadEnv, b: Built, entityId: string): { id: string; name: string } | undefined {
+  if (env.slice) return undefined;
+  try {
+    const e = getEntity(env.store, env.scope, entityId);
+    const ref: RetrievalResultRef[] = [{ id: e.id, kind: 'entity' }];
+    const upload = itemIsUploadDerived(env.store, e.id);
+    b.headerRefs.push(...ref);
+    b.upload ||= upload;
+    return { id: e.id, name: named(b, 'subject', servedLine(env.store, env.scope.workspaceId, e.name, 200), ref, upload) };
+  } catch {
+    return undefined; // an entity of another tree cannot happen; leave it out
+  }
+}
+
+/**
+ * A flow version: header (kind, type `flow`, id, subject, flow type, variant, version, lifecycle, status,
+ * primary, partial, source, upload); items: its fields (name, goal, entry point, stop reason, notable,
+ * entity, state), one item per step (seq, action, observation, asked, error, screenshot, page), one per
+ * check answer (question, answer, value, steps, mentions, note, origin), its other versions, and the
+ * review counts of its subject and flow type. Synthesizer and interviewer read the current, usable
+ * version only. The checklist score is not computed here.
+ */
+function expandFlow(env: ReadEnv, id: string): Built {
+  const { store } = env;
+  const ws = env.scope.workspaceId;
+  const r = flowRepos(store);
+  const f = r.flows.get(id);
+  if (!f || !recordReadable(env, f.workspaceId)) throw expandNotFound(id);
+  if (usableOnly(env.role) && !(f.lifecycle === 'current' && usable(f))) throw expandNotFound(id);
+  const upload = itemIsUploadDerived(store, f.id);
+  const refs: RetrievalResultRef[] = [{ id: f.id, kind: 'record' }];
+  const b = built({}, [...refs], upload);
+  const fence = (text: string, max: number) => fenceEvidence(f.id, servedLine(store, ws, text, max));
+  const subject = subjectOf(env, b, f.subjectEntityId);
+  const type = r.flowTypes.get(f.flowTypeId);
+  b.header = {
+    kind: 'record', type: 'flow', id: f.id,
+    ...(subject ? { subject } : {}),
+    flow_type: named(b, 'flow_type', type?.key ?? f.flowTypeId, refs, false, FLOW_TYPE_JSON),
+    variant: named(b, 'variant', servedLine(store, ws, f.variant, 400), refs, upload, VARIANT_JSON),
+    version: f.version, lifecycle: f.lifecycle, status: f.status,
+    ...(f.isPrimary ? { primary: true } : {}),
+    ...(f.reachedGoal ? {} : { partial: true }),
+    ...(f.workspaceId !== ws ? { source: f.workspaceId } : {}),
+    ...(b.upload ? { upload: true } : {}),
+  };
+  const field = (name: string, value: unknown) => push(b, { type: 'field', field: name, value }, refs, upload);
+  field('name', servedLine(store, ws, f.name, 400));
+  field('goal', servedLine(store, ws, f.goal, FLOW_TEXT_MAX));
+  if (f.entryUrl) field('entry_url', servedLine(store, ws, f.entryUrl, 400));
+  if (f.stopReason) field('stop_reason', f.stopReason);
+  if (f.notable) field('notable', fence(f.notable, FLOW_TEXT_MAX));
+  if (f.entityId) field('entity_id', f.entityId);
+  field('state', {
+    lineage_id: f.lineageId, first_seen_at: f.firstSeenAt, confirm_count: f.confirmCount,
+    ...(f.lastConfirmedAt ? { last_confirmed_at: f.lastConfirmedAt } : {}),
+  });
+
+  for (const s of r.flowSteps.list({ flowId: f.id }).sort((x, y) => x.seq - y.seq)) {
+    const item: Item = { type: 'step', seq: s.seq, action: fence(s.action, FLOW_TEXT_MAX) };
+    if (s.observation) item.observation = fence(s.observation, FLOW_TEXT_MAX);
+    // Uncut (at most 50 labels of 200 characters): only the pager cuts, with its pointer.
+    if (s.asked.length) item.asked = fenceEvidence(f.id, redactServed(store, ws, s.asked.join('\n')));
+    if (s.error) item.error = fence(s.error, FLOW_TEXT_MAX);
+    if (s.artifactId) item.artifact_id = s.artifactId;
+    if (s.pageUrl) item.page_url = servedLine(store, ws, s.pageUrl, 400);
+    push(b, item, [...refs, ...(s.artifactId ? [{ id: s.artifactId, kind: 'artifact' }] : [])], upload);
+  }
+
+  // Check answers, general checklist first, each list in its item order.
+  const lists = new Map<string, Checklist | undefined>();
+  const listOf = (cid: string) => {
+    if (!lists.has(cid)) lists.set(cid, r.checklists.get(cid));
+    return lists.get(cid);
+  };
+  const order = (c: FlowCheck) => {
+    const list = listOf(c.checklistId);
+    return [list?.flowTypeId ? 1 : 0, list?.items.findIndex((i) => i.key === c.itemKey) ?? -1] as const;
+  };
+  const checks = r.flowChecks.list({ flowId: f.id }).sort((x, y) => {
+    const [a, b2] = [order(x), order(y)];
+    return a[0] - b2[0] || x.checklistId.localeCompare(y.checklistId) || a[1] - b2[1];
+  });
+  for (const c of checks) {
+    const list = listOf(c.checklistId);
+    const def = list?.items.find((i) => i.key === c.itemKey);
+    const item: Item = { type: 'check', checklist: list?.flowTypeId ? 'specific' : 'general', checklist_id: c.checklistId, key: c.itemKey };
+    if (def) item.question = servedLine(store, ws, def.question, 400);
+    item.answer = c.answer;
+    if (c.value !== undefined && c.value !== null) item.value = typeof c.value === 'string' ? fence(c.value, FLOW_TEXT_MAX) : c.value;
+    if (c.stepRefs.length) item.steps = c.stepRefs;
+    if (c.mentionRefs.length) item.mention_ids = c.mentionRefs;
+    if (c.note) item.note = fence(c.note, FLOW_TEXT_MAX);
+    item.origin = c.origin;
+    // An answer resting on review mentions is upload-derived when any of them is (flow design §8.4).
+    const cited: RetrievalResultRef[] = c.mentionRefs.map((m) => ({ id: m, kind: 'record' }));
+    push(b, item, [...refs, ...cited], upload || c.mentionRefs.some((m) => itemIsUploadDerived(store, m)));
+  }
+
+  if (!usableOnly(env.role)) {
+    for (const v of r.flows.list({ rootWorkspaceId: f.rootWorkspaceId, lineageId: f.lineageId }).filter((v) => v.id !== f.id && inTree(env, v.workspaceId))) {
+      push(b, { type: 'version', id: v.id, version: v.version, lifecycle: v.lifecycle, status: v.status, created_at: v.createdAt, ...sourceLabel(env, v.workspaceId) }, refs, upload);
+    }
+  }
+
+  const mentions = r.reviewMentions.list({ rootWorkspaceId: f.rootWorkspaceId, subjectEntityId: f.subjectEntityId, flowTypeId: f.flowTypeId });
+  const by = (p: string) => mentions.filter((m) => m.polarity === p);
+  push(b, {
+    type: 'reviews', total: mentions.length, negative: by('negative').length, neutral: by('neutral').length, positive: by('positive').length,
+    ...(mentions.length ? { mention_ids: [...by('negative'), ...by('neutral'), ...by('positive')].slice(0, MAX_MENTION_IDS).map((m) => m.id) } : {}),
+  }, [...refs, ...mentions.map((m) => ({ id: m.id, kind: 'record' }))], upload || mentions.some((m) => itemIsUploadDerived(store, m.id)));
+  return b;
+}
+
+/**
+ * A review mention: header (kind, type `review_mention`, id, subject, source type, polarity, source,
+ * upload); items: the quote (fenced under its stored copy, with the passage around it), its source
+ * (stored copy, address, date, rating) and its attribution (flow type, check, confidence).
+ */
+function expandMention(env: ReadEnv, id: string): Built {
+  const { store } = env;
+  const ws = env.scope.workspaceId;
+  const r = flowRepos(store);
+  const m = r.reviewMentions.get(id);
+  if (!m || !recordReadable(env, m.workspaceId)) throw expandNotFound(id);
+  const upload = itemIsUploadDerived(store, m.id);
+  const refs: RetrievalResultRef[] = [{ id: m.id, kind: 'record' }];
+  const b = built({}, [...refs], upload);
+  const subject = subjectOf(env, b, m.subjectEntityId);
+  b.header = {
+    kind: 'record', type: 'review_mention', id: m.id, ...(subject ? { subject } : {}), source_type: m.sourceType, polarity: m.polarity,
+    ...(m.workspaceId !== ws ? { source: m.workspaceId } : {}),
+    ...(b.upload ? { upload: true } : {}),
+  };
+  const art: RetrievalResultRef[] = [{ id: m.artifactId, kind: 'artifact' }, ...(m.chunkId ? [{ id: m.chunkId, kind: 'chunk' }] : [])];
+  const passage = m.chunkId ? quotePassage(env, m.chunkId, m.quote) : undefined;
+  push(b, {
+    type: 'quote', artifact_id: m.artifactId, ...(m.chunkId ? { chunk_id: m.chunkId } : {}),
+    text: fenceEvidence(m.artifactId, servedLine(store, ws, m.quote, CLAIM_MAX)), ...(passage ? { passage } : {}),
+  }, [...refs, ...art], upload);
+  push(b, {
+    type: 'source', artifact_id: m.artifactId,
+    ...(m.sourceUrl ? { source_url: servedLine(store, ws, m.sourceUrl, 400) } : {}),
+    ...(m.publishedAt ? { published_at: m.publishedAt } : {}),
+    ...(m.rating !== undefined ? { rating: m.rating } : {}),
+    created_at: m.createdAt,
+  }, refs, upload);
+  const type = m.flowTypeId ? r.flowTypes.get(m.flowTypeId) : undefined;
+  push(b, {
+    type: 'attribution',
+    ...(m.flowTypeId ? { flow_type: type?.key ?? m.flowTypeId } : {}),
+    ...(m.checkKey ? { check_key: m.checkKey } : {}),
+    confidence: m.attributionConfidence,
+  }, refs, upload);
   return b;
 }
 

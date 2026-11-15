@@ -20,8 +20,17 @@ import type { ReviewSlice } from '../knowledge/readCommon.js'; // KS-4
 import { briefingBudget, fitBriefing, promptReadsOf, synthesisBriefing, taskRecheckFactIds, workerBriefing, type BriefLine, type Briefing } from '../knowledge/briefing.js'; // KS-5
 import type { PromptRead } from '../knowledge/promptReads.js'; // KS-5
 import { servedLine } from '../knowledge/texts.js'; // KS-5
+import { itemIsUploadDerived } from '../knowledge/provenance.js'; // flow records
 import { experimentWorkerPrompt, isExperimentTask } from '../learning/runTags.js'; // learning loop WP-F
 import { retireExperimentOutputs } from './outputs.js'; // learning loop WP-F
+// Flow records: the reviewer sees a task's flows (steps, check answers) and review mentions.
+import { activeChecklists, FlowCatalogError } from '../flows/catalog.js';
+import { flowChecks } from '../flows/checks.js';
+import { flowSteps } from '../flows/flows.js';
+import { flowRepos } from '../flows/repos.js';
+import type { Flow, FlowCheck, FlowStep, ReviewMention } from '../flows/types.js';
+import type { Store } from '../store/db.js';
+import { knowledgeRepos } from '../store/repos.js';
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -61,10 +70,11 @@ export type ReviewContext = {
 
 /**
  * What the reviewer gets besides brief, criteria and deliverable (spec §7.2, task-scoped only): the
- * content of the task's current findings, recommendations and personas (outputs of earlier rounds
- * that were re-submitted or cited by id in the deliverable included), the findings cited by those
- * recommendations, and the evidence artifact ids reachable from all of these. Nothing else of the
- * workspace is included.
+ * content of the task's current findings, recommendations, personas, competitors, hypotheses and
+ * flows (with their steps and check answers; outputs of earlier rounds that were re-submitted or cited
+ * by id in the deliverable included), the review mentions it saved, the findings cited by those
+ * recommendations, and the evidence artifact ids reachable from all of these (step screenshots and
+ * the mentions' stored copies included). Nothing else of the workspace is included.
  */
 export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task, role: Role = 'reviewer'): ReviewContext {
   const { store } = deps;
@@ -75,6 +85,8 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
   const personas = outputs.personas.filter((p) => current.has(p.id));
   const competitors = outputs.competitors.filter((c) => current.has(c.id));
   const hypotheses = outputs.hypotheses.filter((h) => current.has(h.id));
+  const flows = outputs.flows.filter((f) => current.has(f.id));
+  const mentions = taskMentions(store, task);
   const ids = new Set<string>();
   for (const f of findings) for (const a of f.evidence) ids.add(a);
   const own = new Set(findings.map((f) => f.id));
@@ -98,6 +110,10 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
   for (const f of cited) for (const a of f.evidence) ids.add(a);
   for (const p of personas) for (const field of Object.values(p.profile)) for (const a of field.evidence) ids.add(a);
   for (const c of competitors) for (const a of c.evidence) ids.add(a);
+  // Flow records: each flow's step screenshots; each review mention's stored copy.
+  const stepsOf = new Map(flows.map((f) => [f.id, flowSteps(store, f.id)]));
+  for (const steps of stepsOf.values()) for (const s of steps) if (s.artifactId) ids.add(s.artifactId);
+  for (const m of mentions) ids.add(m.artifactId);
   if (task.result !== undefined) for (const m of JSON.stringify(task.result).matchAll(ARTIFACT_ID)) ids.add(m[0]);
 
   // --- KS-5: the outputs are a briefing: every text redacted, then cut, then fenced; fitted to the role's
@@ -140,6 +156,23 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
       refs: [...record(h.id), ...(symptom ? record(symptom.id) : [])], upload: false,
     };
   }));
+  // Flow records (design 2026-11-14 §8.2, §12.1): each flow with its steps and its check answers.
+  // A flow's line also lists the review mentions its check answers rest on (any task's): an answer drawn
+  // from an upload-derived mention makes the review run upload-exposed (flow design §8.4).
+  add('Flows saved by this task', flows.map((f) => {
+    const cited = [...new Set(flowChecks(store, f.id).flatMap((c) => c.mentionRefs))];
+    const refs = [
+      { id: f.id, kind: 'flow' },
+      ...(stepsOf.get(f.id) ?? []).flatMap((s) => (s.artifactId ? [{ id: s.artifactId, kind: 'artifact' }] : [])),
+      ...cited.map((id) => ({ id, kind: 'review_mention' })),
+    ];
+    return { text: flowReviewText(store, ws, f, stepsOf.get(f.id) ?? []), refs, upload: refs.some((r) => itemIsUploadDerived(store, r.id)) };
+  }));
+  add('Review mentions saved by this task', mentions.map((m) => ({
+    text: mentionReviewText(store, ws, m),
+    refs: [{ id: m.id, kind: 'review_mention' }, { id: m.artifactId, kind: 'artifact' }],
+    upload: itemIsUploadDerived(store, m.id),
+  })));
   const sections: string[] = [];
   let outputsRead: PromptRead | undefined;
   if (lines.length) {
@@ -166,6 +199,87 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
     ...(knowledge.results.length ? { knowledge } : {}),
     ...(outputsRead ? { outputsRead } : {}),
   };
+}
+
+/** Longest step field (action, observation, error) shown to a reviewer (chars, after redaction). */
+const STEP_TEXT = 600;
+
+/** Review mentions saved by the task, in its own workspace (not outputs with a round: all of them). */
+function taskMentions(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): ReviewMention[] {
+  return flowRepos(store).reviewMentions.list({ taskId: task.id }).filter((m) => m.workspaceId === task.workspaceId);
+}
+
+/** A check answer as shown to a reviewer: answer (value), its origin when not the walkthrough, steps, note. */
+function checkText(c: FlowCheck, line: (s: string, n: number) => string): string {
+  const value = c.value === undefined || c.value === null ? '' : ` (${line(typeof c.value === 'string' ? c.value : JSON.stringify(c.value), 300)})`;
+  const parts = [`${c.answer}${value}`];
+  if (c.origin !== 'walkthrough') parts.push(`from ${c.origin}`);
+  if (c.stepRefs.length) parts.push(`steps ${c.stepRefs.join(', ')}`);
+  if (c.mentionRefs.length) parts.push(`mentions ${c.mentionRefs.join(', ')}`);
+  if (c.note) parts.push(`note: ${line(c.note, 300)}`);
+  return parts.join('; ');
+}
+
+/**
+ * One flow for the reviewer: header, steps in order, notable, the answers of its active checklists
+ * and what is unanswered ("checklists unavailable" when the catalog cannot give them).
+ */
+function flowReviewText(store: Store, ws: string, f: Flow, steps: FlowStep[]): string {
+  const line = (text: string, n: number) => servedLine(store, ws, text, n);
+  const subject = knowledgeRepos(store).entities.get(f.subjectEntityId);
+  const type = flowRepos(store).flowTypes.get(f.flowTypeId);
+  const out = [
+    `- [${f.id}] ${line(subject?.name ?? f.subjectEntityId, 200)}: ${line(type?.name ?? f.flowTypeId, 200)}, variant "${line(f.variant, 200)}"` +
+      `${f.isPrimary ? ' (primary)' : ''}, version ${f.version} (${f.lifecycle}): ${line(f.name, 200)}`,
+    `  goal: ${line(f.goal, 400)}; ${f.reachedGoal ? 'reached' : `not reached (stopped: ${f.stopReason ?? 'unknown'})`}` +
+      `${f.entryUrl ? `; entry: ${line(f.entryUrl, 300)}` : ''}`,
+  ];
+  for (const s of steps) {
+    const parts = [`did: ${line(s.action, STEP_TEXT)}`];
+    if (s.observation) parts.push(`saw: ${line(s.observation, STEP_TEXT)}`);
+    if (s.asked.length) parts.push(`asked: ${s.asked.map((a) => line(a, 100)).join(', ')}`);
+    if (s.error) parts.push(`error: ${line(s.error, STEP_TEXT)}`);
+    if (s.pageUrl) parts.push(`page: ${line(s.pageUrl, 300)}`);
+    parts.push(s.artifactId ? `screenshot: ${s.artifactId}` : 'no screenshot');
+    out.push(`  step ${s.seq}: ${parts.join('; ')}`);
+  }
+  if (f.notable) out.push(`  anything else notable: ${line(f.notable, OUTPUT_TEXT)}`);
+  let lists: ReturnType<typeof activeChecklists>;
+  try {
+    lists = activeChecklists(store, ws, f.flowTypeId);
+  } catch (e) {
+    // A broken catalog must not break the whole review step: the flow is still shown.
+    if (!(e instanceof FlowCatalogError)) throw e;
+    out.push('  check answers: checklists unavailable');
+    return out.join('\n');
+  }
+  const { general, specific } = lists;
+  const rows = flowChecks(store, f.id);
+  const answered: string[] = [];
+  const missing: string[] = [];
+  for (const [name, list] of specific ? ([['general', general], ['specific', specific]] as const) : ([['general', general]] as const)) {
+    for (const item of list.items) {
+      const row = rows.find((c) => c.checklistId === list.id && c.itemKey === item.key);
+      if (row) answered.push(`  - ${name}.${item.key} (${item.question}): ${checkText(row, line)}`);
+      else if (item.answeredBy !== 'reviews') missing.push(`${name}.${item.key}`);
+    }
+  }
+  out.push(answered.length ? '  check answers:' : '  check answers: none', ...answered);
+  if (missing.length) out.push(`  not answered by the walkthrough: ${missing.join(', ')}`);
+  return out.join('\n');
+}
+
+/** One review mention for the reviewer: polarity, quote, source and attribution. */
+function mentionReviewText(store: Store, ws: string, m: ReviewMention): string {
+  const line = (text: string, n: number) => servedLine(store, ws, text, n);
+  const subject = knowledgeRepos(store).entities.get(m.subjectEntityId);
+  const type = m.flowTypeId ? flowRepos(store).flowTypes.get(m.flowTypeId) : undefined;
+  const attribution = type ? `flow type ${type.key}${m.checkKey ? `, check ${m.checkKey}` : ''}, confidence ${m.attributionConfidence}` : 'subject only';
+  return (
+    `- [${m.id}] ${line(subject?.name ?? m.subjectEntityId, 200)}: [${m.polarity}] "${line(m.quote, OUTPUT_TEXT)}" ` +
+    `(${m.sourceType}${m.publishedAt ? `, ${m.publishedAt.slice(0, 10)}` : ', undated'}${m.rating !== undefined ? `, rating ${m.rating}` : ''}; ` +
+    `${attribution}; stored copy ${m.artifactId}${m.sourceUrl ? `, ${line(m.sourceUrl, 300)}` : ''})`
+  );
 }
 
 /** Evidence artifact ids of a task (see `reviewContext`). */
@@ -312,6 +426,8 @@ function currentOutputsBriefing(deps: Pick<ResearchDeps, 'store'> & Partial<Pick
     ...outputs.personas.filter((p) => current.has(p.id)).map((p) => ({ text: `- persona ${p.id}: ${line(p.slug)}`, refs: record(p.id), upload: false })),
     ...outputs.competitors.filter((c) => current.has(c.id)).map((c) => ({ text: `- competitor ${c.id}: ${line(c.name)}`, refs: record(c.id), upload: false })),
     ...outputs.hypotheses.filter((h) => current.has(h.id)).map((h) => ({ text: `- hypothesis ${h.id}: ${line(h.hypothesis)}`, refs: record(h.id), upload: false })),
+    // Flow records: a flow neither re-saved (save_flow) nor cited is superseded like any output.
+    ...outputs.flows.filter((f) => current.has(f.id)).map((f) => ({ text: `- flow ${f.id}: ${line(`${f.name} (variant: ${f.variant})`)}`, refs: [{ id: f.id, kind: 'flow' }], upload: false })),
     // KS-2: confirmations / retractions follow the same rule (re-call the tool, or cite the fact id). Ids only.
     ...liveObservations(store, task).map((o) => ({ text: `- ${o.kind === 'confirm' ? 'confirmation' : 'retraction'} of finding ${o.findingId}`, refs: [], upload: false })),
   ];
@@ -575,8 +691,9 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
 /**
  * What a reviewer (or escalation) run of `task` may read through `expand` / `read_artifact`: the
  * task's current outputs, the findings its recommendations / hypotheses cite, the facts its outputs
- * replace, confirm or retract (`ReviewFactContext.factIds`), and the evidence artifacts of all of these
- * (`reviewContext().evidence`) with their chunks. Everything else answers "not found" and is a
+ * replace, confirm or retract (`ReviewFactContext.factIds`), the task's flows (current outputs) and
+ * review mentions, and the evidence artifacts of all of these (`reviewContext().evidence`: also step
+ * screenshots and the mentions' stored copies) with their chunks. Everything else answers "not found" and is a
  * blocked attempt (`policy_blocked`). The dispatcher enforces it (harness/tools/handlers.ts).
  */
 export function reviewSlice(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task): ReviewSlice {
@@ -587,6 +704,7 @@ export function reviewSlice(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<Res
   const ids = new Set<string>([...current, ...(context.knowledge?.factIds ?? []), ...context.evidence]);
   for (const r of outputs.recommendations) if (current.has(r.id)) for (const f of r.findingIds) ids.add(f);
   for (const h of outputs.hypotheses) if (current.has(h.id)) for (const e of h.evidence) ids.add(e);
+  for (const m of taskMentions(store, task)) ids.add(m.id); // flow records
   return { ids, artifactIds: new Set(context.evidence) };
 }
 // --- end KS-4 -------------------------------------------------------------------------------------

@@ -16,6 +16,8 @@ acceptance criteria. Do the research yourself and report through the harness too
 - If a site needs something you cannot do (phone, payment, KYC, captcha, a blocked disposable email),
   call `request_user_action` and wait; then continue in the same browser session.
 - Before any approval-required action, call `request_approval` and follow the answer.
+- For flow walkthroughs and review collection, save flows with `save_flow` (then `save_flow_checks`) and
+  public feedback with `save_review_mentions`; `read_flow_catalog` lists the flow types and their checks.
 - For `map_business_units` tasks, propose each child unit with `propose_business_unit` (name,
   description, level, audiences, evidence, reasoning); the user accepts or rejects them.
 - Other parts of the same business tree are one `search` with `scope: "tree"` away (or `get_card` /

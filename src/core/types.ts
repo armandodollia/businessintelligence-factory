@@ -14,6 +14,8 @@ export type Phase =
   | 'market_research'
   | 'competitor_discovery'
   | 'deep_dives'
+  /** Runner phase: persona head-to-heads on flows (flows/round.ts). */
+  | 'flow_ranking'
   | 'synthesis'
   | 'persona_panel'
   | 'scoring';
@@ -270,7 +272,7 @@ export interface Decision {
   agentRunId: string;
   role: Role;
   model: ModelRef;
-  kind: 'decision' | 'review' | 'pushback' | 'task_proposal' | 'persona_feedback' | 'score';
+  kind: 'decision' | 'review' | 'pushback' | 'task_proposal' | 'persona_feedback' | 'score' | 'flow_verdicts';
   payload: unknown;
   refs: string[];
   promptVersion: string;
@@ -777,7 +779,7 @@ export interface Entity {
 /** Closed list of relation types (design §7.4). */
 export type RelationType = 'competes_with' | 'offers' | 'has_flow' | 'targets' | 'experiences' | 'causes' | 'addresses' | 'part_of';
 /** Kind of record that asserts an edge; the edge is live only while that record is usable. */
-export type RelationSourceKind = 'fact' | 'competitor' | 'persona' | 'symptom' | 'hypothesis' | 'artifact';
+export type RelationSourceKind = 'fact' | 'competitor' | 'persona' | 'symptom' | 'hypothesis' | 'artifact' | 'flow';
 
 export interface Relation {
   id: string;

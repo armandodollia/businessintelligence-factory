@@ -35,7 +35,7 @@ import {
 import { recordRetrieval } from './retrievalLog.js';
 import { inTree, notFound, setItemScopes, type KnowledgeScope } from './scope.js';
 import { capText, servedLine } from './texts.js';
-import { redactServed } from './trust.js';
+import { redactServed, stripFences } from './trust.js';
 
 export type FactToolEnv = {
   store: Store;
@@ -149,7 +149,8 @@ export type VerifiedRef = Omit<FindingEvidence, 'findingId' | 'seq'>;
 /**
  * Checks `evidence_refs`: each artifact is in the caller's tree, a `chunk_id` belongs to it (or to
  * its canonical text), and a `quote` occurs in its extracted text (whitespace-normalized
- * substring). The quote's chunk is re-resolved by search (the given `chunk_id` is only a hint).
+ * substring, fence sequences removed from both sides; the quote is kept without them). The quote's
+ * chunk is re-resolved by search (the given `chunk_id` is only a hint).
  */
 export async function verifyEvidenceRefs(
   env: FactToolEnv,
@@ -170,13 +171,16 @@ export async function verifyEvidenceRefs(
       }
       row.chunkId = chunk.id;
     }
-    const quote = ref.quote?.trim();
-    if (quote && quote.length > QUOTE_MAX_CHARS) return { ok: false, error: `evidence_refs: ${QUOTE_TOO_LONG} (${quote.length} given)` };
-    if (quote) {
+    const given = ref.quote?.trim();
+    if (given && given.length > QUOTE_MAX_CHARS) return { ok: false, error: `evidence_refs: ${QUOTE_TOO_LONG} (${given.length} given)` };
+    if (given) {
+      // Stored text has its fence sequences removed (ingest), so a quote copied from the page is matched,
+      // and kept, without them too: third-party text that contains `>>>` stays quotable.
+      const quote = stripFences(given).trim();
       const text = await artifactText(env, id);
       if (!text) return { ok: false, error: `evidence_refs: artifact '${id}': ${NO_TEXT_ERROR}` };
       const q = squash(quote);
-      if (!q || !squash(text.text).includes(q)) {
+      if (!q || !squash(stripFences(text.text)).includes(q)) {
         const shown = capText(redactServed(env.store, workspaceId, quote), 80); // KS-4 gate: redact, then cut
         return { ok: false, error: `evidence_refs: quote not found in the extracted text of artifact '${id}' (whitespace-insensitive match): "${shown}"` };
       }

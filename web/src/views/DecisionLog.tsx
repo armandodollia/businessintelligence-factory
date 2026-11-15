@@ -5,7 +5,7 @@ import { CriteriaRatings } from './CriterionRating.js';
 import { FeedbackLog } from './FeedbackLog.js';
 import { OutcomesTable } from './Outcomes.js';
 
-const KINDS: Decision['kind'][] = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'];
+const KINDS: Decision['kind'][] = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score', 'flow_verdicts'];
 
 export function DecisionLog({ wsId }: { wsId: string }) {
   const form = useForm({ kind: '' as Decision['kind'] | '' });
@@ -86,7 +86,7 @@ export function DecisionLog({ wsId }: { wsId: string }) {
                 </div>
               </td>
               <td>
-                <span className={`tag ${d.kind === 'persona_feedback' ? 'simulated' : ''}`}>{d.kind}</span>
+                <span className={`tag ${d.kind === 'persona_feedback' || d.kind === 'flow_verdicts' ? 'simulated' : ''}`}>{d.kind}</span>
               </td>
               <td>
                 <details>

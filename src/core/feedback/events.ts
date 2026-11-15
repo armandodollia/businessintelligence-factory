@@ -83,6 +83,22 @@ export const FEEDBACK_KINDS = [
    */
   'user_action',
   // --- end KS-8 final gate ---
+  // --- flow records and ranking (flow design §10.4, §11): the user's reactions (`src/core/flows/feedback.ts`) ---
+  /** Agree / disagree with a flow's ranking position (target type `flow`). */
+  'flow_rank_reaction',
+  /** Agree / disagree with a persona's head-to-head verdict (target type `flow_verdict`). */
+  'flow_verdict_reaction',
+  /** The user corrected a check's answer (target type `flow_check`, id `<flowId>:<checklistId>:<itemKey>`). */
+  'flow_check_correction',
+  /** The user ruled on a pair, kept or dropped a ruling after a new version, or revoked it (target type `flow`: the winner). */
+  'flow_override',
+  /** Accept, edit, reject or merge of a flow type (target type `flow_type`). */
+  'flow_type_decision',
+  /** Accept or reject of a checklist proposal (target type `checklist`). */
+  'checklist_decision',
+  /** The user changed a review mention's flow type / check (target type `review_mention`). */
+  'review_attribution_correction',
+  // --- end flow records and ranking ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -110,7 +126,14 @@ export type FeedbackTargetType =
   // re-gate (Opus 4): `user_action` targets
   | 'workspace'
   | 'schedule'
-  | 'config';
+  | 'config'
+  // flow records and ranking: a flow version, a persona's verdict, a check answer, a flow type, a checklist, a review mention
+  | 'flow'
+  | 'flow_verdict'
+  | 'flow_check'
+  | 'flow_type'
+  | 'checklist'
+  | 'review_mention';
 
 export interface FeedbackEvent {
   id: string;
@@ -180,6 +203,7 @@ export function actorOf(config: Pick<BifConfig, 'user'> | undefined): string {
 /** Target types whose provenance is an agent judgment (resolved when the caller does not give one). */
 const AGENT_TARGETS: ReadonlySet<FeedbackTargetType> = new Set([
   'finding', 'recommendation', 'persona', 'competitor', 'hypothesis', 'unit_proposal', 'user_request',
+  'flow', 'flow_verdict', 'flow_check', 'flow_type', 'review_mention',
 ]);
 
 /** Appends one feedback event (never updated or deleted afterwards). */

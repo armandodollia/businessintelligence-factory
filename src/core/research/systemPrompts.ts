@@ -10,13 +10,16 @@ const PERSONA_TASK_TYPES: ReadonlySet<TaskType> = new Set(['persona_profile', 'a
 const COMPETITOR_TASK_TYPES: ReadonlySet<TaskType> = new Set(['discover_competitors', 'flow_walkthrough']);
 /** Task types whose workers also get `hypotheses.md` (they save symptom hypotheses, spec §8). */
 const HYPOTHESIS_TASK_TYPES: ReadonlySet<TaskType> = new Set(['symptom_hypotheses']);
+/** Flow records (design 2026-11-14 §8, §9): the prompt of each flow task type. */
+const FLOW_TASK_PROMPTS: Partial<Record<TaskType, string>> = { flow_walkthrough: 'flow_walkthrough', flow_reviews: 'flow_reviews' };
 
 /**
  * System prompt of worker / synthesizer runs: `worker.md` + `synthesizer.md` (synthesizer role:
  * recommendation criteria and accepted cost formats) + `persona_profile.md` (persona task
  * types only) + `competitors.md` (competitor discovery / flow walkthroughs) + `hypotheses.md`
- * (symptom hypotheses) + the action policy rendered from config (always) + the browser note
- * (browser-using tasks only) + the business tree's approved calibration appendix for the role
+ * (symptom hypotheses) + `flow_walkthrough.md` / `flow_reviews.md` (those task types) + the action
+ * policy rendered from config (always) + the browser note (browser-using tasks only) + the business
+ * tree's approved calibration appendix for the role
  * (`<dataDir>/<root>/calibration/<role>.md`, when `scope` is given), so applying a calibration
  * patch changes the prompt version of that business's worker and synthesizer runs alike.
  */
@@ -32,6 +35,8 @@ export function workerSystemPrompt(
   if (taskType && PERSONA_TASK_TYPES.has(taskType)) parts.push(promptTemplate('persona_profile').trimEnd());
   if (taskType && COMPETITOR_TASK_TYPES.has(taskType)) parts.push(promptTemplate('competitors').trimEnd());
   if (taskType && HYPOTHESIS_TASK_TYPES.has(taskType)) parts.push(promptTemplate('hypotheses').trimEnd());
+  const flowPrompt = taskType && FLOW_TASK_PROMPTS[taskType];
+  if (flowPrompt) parts.push(promptTemplate(flowPrompt).trimEnd());
   parts.push(policyPrompt(config));
   if (needsBrowser) parts.push(browserPromptNote(config));
   return withCalibration(parts.join('\n\n'), role, scope);

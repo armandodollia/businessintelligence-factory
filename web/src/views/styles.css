@@ -176,3 +176,22 @@ textarea.code { width: 100%; font-family: ui-monospace, monospace; font-size: 12
 .chart-hit:hover { fill: var(--chart-grid); fill-opacity: 0.5; }
 .chart-axis-labels { display: flex; justify-content: space-between; color: var(--chart-muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-top: 0.2em; }
 /* --- end WP-G --- */
+/* flow records and flow ranking: the Flows page */
+.flows-layout { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 1.5em; }
+.flows-layout aside h3 { margin-top: 0; }
+.flows-layout aside li { margin: 0.2em 0; }
+.flow-proposals .pending { margin-bottom: 0.6em; }
+.badges .tag { margin-bottom: 0.2em; }
+.reason-box { display: grid; gap: 0.2em; margin: 0.3em 0; max-width: 520px; }
+.reason-box textarea { width: 100%; box-sizing: border-box; }
+.flow-steps { display: flex; gap: 0.6em; overflow-x: auto; list-style: none; padding: 0; margin: 0.4em 0; }
+.flow-step { min-width: 200px; max-width: 260px; border: 1px solid var(--line); border-radius: 4px; padding: 0.4em 0.5em; font-size: 13px; }
+.flow-step dl { margin: 0.3em 0 0; }
+.flow-step dt { color: var(--muted); font-size: 11px; }
+.flow-step dd { margin: 0 0 0.3em; white-space: pre-wrap; }
+.flow-compare td .flow-step { max-width: none; }
+.flow-checklists .card { margin-bottom: 0.8em; }
+.flow-checklists table.checklist { width: 100%; border-collapse: collapse; margin: 0.4em 0; }
+.flow-checklists table.checklist td, .flow-checklists table.checklist th { text-align: left; padding: 0.2em 0.4em; border-bottom: 1px solid var(--line); }
+.flow-checklists table.checklist input:not([type]) { width: 100%; box-sizing: border-box; }
+@media (max-width: 760px) { .flows-layout { grid-template-columns: 1fr; } }

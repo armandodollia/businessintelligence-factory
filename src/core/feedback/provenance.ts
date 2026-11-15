@@ -3,8 +3,10 @@
  * prompt version) a rating or feedback event is about, and whether an agent revised a rated item
  * after it was rated (review queue re-queue).
  */
+import { flowRepos } from '../flows/repos.js';
 import type { Store } from '../store/db.js';
 import type { Decision, Rating } from '../types.js';
+import { rootOf } from '../workspace/tree.js';
 
 /** Payload keys naming a decision's primary subject, in precedence order (as in export.ts). */
 const PRIMARY_KEYS = ['findingId', 'symptomId', 'recommendationId', 'personaId', 'competitorId'] as const;
@@ -84,6 +86,13 @@ function outputTask(store: Store, targetType: string, id: string): string | unde
       return store.competitors.get(id)?.taskId;
     case 'hypothesis':
       return store.symptomHypotheses.get(id)?.taskId;
+    // flow records: the task that saved the flow version (a check answer: its flow's), or the mention
+    case 'flow':
+      return flowRepos(store).flows.get(id)?.taskId;
+    case 'flow_check':
+      return flowRepos(store).flows.get(id.split(':')[0]!)?.taskId;
+    case 'review_mention':
+      return flowRepos(store).reviewMentions.get(id)?.taskId;
     default:
       return undefined;
   }
@@ -93,6 +102,9 @@ function outputTask(store: Store, targetType: string, id: string): string | unde
  * Agent judgment behind a rating / feedback target, as of `at` (default: now):
  * - `decision`: that Decision; `unit_proposal`: the Decision that (last) proposed it;
  * - `user_request`: the requesting run;
+ * - `flow_verdict`: the persona run that gave the verdict; `flow_type`: the run that proposed it;
+ * - `flow`, `flow_check` (`<flowId>:<checklistId>:<itemKey>`), `review_mention`: the latest
+ *   non-reviewer run of the task that saved the flow version / mention (none when no task did);
  * - outputs (`finding`, `recommendation`, `persona`, `competitor`, `symptom`, `hypothesis`) and
  *   `persona_feedback` (`<recId>:<personaId>`): the latest judgment of the item at `at`; failing
  *   that, the latest non-reviewer run of the output's task.
@@ -123,6 +135,15 @@ export function targetProvenance(
     case 'user_request': {
       const r = store.userRequests.get(targetId);
       return r && r.workspaceId === workspaceId ? fromRun(store, r.agentRunId) : {};
+    }
+    // flow records: a verdict's persona run (its prompt version is the persona's), a flow type's proposing run
+    case 'flow_verdict': {
+      const v = flowRepos(store).flowVerdicts.get(targetId);
+      return v && v.workspaceId === workspaceId ? fromRun(store, v.agentRunId) : {};
+    }
+    case 'flow_type': {
+      const t = flowRepos(store).flowTypes.get(targetId);
+      return t && t.rootWorkspaceId === rootOf(store, workspaceId) ? fromRun(store, t.proposedByRun) : {};
     }
     default: {
       const list = (index ?? judgmentIndex(store, workspaceId)).get(targetId);

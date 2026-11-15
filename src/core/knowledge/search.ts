@@ -12,8 +12,9 @@
  * artifact holding the chunk — the canonical, else a visible duplicate), `artifact` (artifacts_fts;
  * hits with the same bytes or the same text collapse), `entity` (entities_fts, trigram; a hit through
  * a merged row reports the survivor and is flagged with `entityIsUploadOnly` of the row that matched),
- * `record` (competitors, personas, symptoms, hypotheses, recommendations: v1 uses LIKE on their short
- * text fields — an accepted v1 simplification, the records are few and short).
+ * `record` (competitors, personas, symptoms, hypotheses, recommendations, flows, review mentions: v1 uses
+ * LIKE on their short text fields — an accepted v1 simplification, the records are few and short; a
+ * review mention's quote is served as a fenced snippet).
  *
  * Every hit is a line: id, title or snippet (≤ 200 chars; evidence snippets fenced), entity, source
  * node (when not the caller's), flags (`unverified`, `stale`, `upload`, `history`), age in days.
@@ -55,7 +56,7 @@ export type SearchInput = {
 export type SearchHit = {
   kind: SearchKind;
   id: string;
-  /** Record type for `record` hits (competitor, persona, symptom, strength, hypothesis, recommendation). */
+  /** Record type for `record` hits (competitor, persona, symptom, strength, hypothesis, recommendation, flow, review_mention). */
   type?: string;
   title?: string;
   /** Evidence text, fenced (`<<<EVIDENCE art_… … >>>`). */
@@ -385,27 +386,39 @@ function searchEntities(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
   return [...bySurvivor.values()];
 }
 
-/** Record kinds searched with LIKE (v1): table, type label, text columns, usable predicate. */
+/**
+ * Record kinds searched with LIKE (v1): table, type label, text columns, usable predicate, title column,
+ * the columns naming an entity (`entity_id` browse; none: not browsable), and `always`: a predicate every
+ * hit meets whatever the flags (a flow is a hit only as the current version of its variant: replaced
+ * versions and candidates never are). Flows and review mentions (flow records) are scoped by their
+ * `workspace_id` like the other typed records; a review mention needs no review, so it is always usable.
+ */
 const RECORD_TABLES = [
-  { table: 'competitors', type: 'competitor', cols: ['name', 'site'], usable: outputUsableSql('r'), title: 'name' },
-  { table: 'personas', type: 'persona', cols: ['segment', 'slug'], usable: outputUsableSql('r'), title: 'segment' },
-  { table: 'symptoms', type: 'symptom', cols: ['title', 'detail'], usable: '1', title: 'title' },
-  { table: 'symptom_hypotheses', type: 'hypothesis', cols: ['hypothesis'], usable: outputUsableSql('r'), title: 'hypothesis' },
-  { table: 'recommendations', type: 'recommendation', cols: ['title', 'summary'], usable: outputUsableSql('r'), title: 'title' },
-] as const;
+  { table: 'competitors', type: 'competitor', cols: ['name', 'site'], usable: outputUsableSql('r'), title: 'name', entityCols: ['entity_id'] },
+  { table: 'personas', type: 'persona', cols: ['segment', 'slug'], usable: outputUsableSql('r'), title: 'segment', entityCols: ['entity_id'] },
+  { table: 'symptoms', type: 'symptom', cols: ['title', 'detail'], usable: '1', title: 'title', entityCols: ['entity_id'] },
+  { table: 'symptom_hypotheses', type: 'hypothesis', cols: ['hypothesis'], usable: outputUsableSql('r'), title: 'hypothesis', entityCols: ['entity_id'] },
+  { table: 'recommendations', type: 'recommendation', cols: ['title', 'summary'], usable: outputUsableSql('r'), title: 'title', entityCols: [] },
+  {
+    table: 'flows', type: 'flow', cols: ['name', 'goal', 'notable'], usable: outputUsableSql('r'), title: 'name',
+    entityCols: ['subject_entity_id', 'entity_id'], always: `r.lifecycle = 'current'`,
+  },
+  { table: 'review_mentions', type: 'review_mention', cols: ['quote'], usable: '1', title: 'quote', entityCols: ['subject_entity_id'] },
+] as const satisfies ReadonlyArray<{ table: string; type: string; cols: readonly string[]; usable: string; title: string; entityCols: readonly string[]; always?: string }>;
 
 function searchRecords(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
   const { store } = c.env;
   // Records carry no comparable date: `since` does not filter them.
   const out: Ranked[] = [];
   for (const t of RECORD_TABLES) {
-    if (c.group && t.table === 'recommendations') continue; // recommendations have no entity
+    if (c.group && !t.entityCols.length) continue; // recommendations have no entity
     const where = [recordVisibleSql('r')];
     const params: Record<string, string | number> = { ids: visParams(c.view, c.mode).ids, lim: c.limit * POOL_FACTOR };
+    if ('always' in t) where.push(t.always);
     if (!(c.input.includeUnverified && !c.usableOnly)) where.push(t.usable);
     else if (t.usable !== '1') where.push(`COALESCE(r.status, 'pending') <> 'superseded'`);
     if (c.group) {
-      where.push('r.entity_id IN (SELECT value FROM json_each(:grp))');
+      where.push(`(${t.entityCols.map((col) => `r.${col} IN (SELECT value FROM json_each(:grp))`).join(' OR ')})`);
       params.grp = JSON.stringify(c.group);
     }
     if (terms.length) {
@@ -415,19 +428,28 @@ function searchRecords(c: Ctx, terms: string[], op: 'AND' | 'OR'): Ranked[] {
       });
       where.push(`(${likes.join(` ${op} `)})`);
     }
-    const kindCol = t.table === 'symptoms' ? ', r.kind AS skind' : '';
+    const extraCols =
+      t.table === 'symptoms' ? ', r.kind AS skind' : t.table === 'review_mentions' ? ', r.artifact_id AS art, r.polarity AS pol, r.source_type AS st' : '';
     const rows = store.db
-      .prepare(`SELECT r.id AS id, r.workspace_id AS ws, r.${t.title} AS title${kindCol} FROM ${t.table} r WHERE ${where.join(' AND ')} ORDER BY r.rowid DESC LIMIT :lim`)
-      .all(params) as Array<{ id: string; ws: string; title: string; skind?: string }>;
+      .prepare(`SELECT r.id AS id, r.workspace_id AS ws, r.${t.title} AS title${extraCols} FROM ${t.table} r WHERE ${where.join(' AND ')} ORDER BY r.rowid DESC LIMIT :lim`)
+      .all(params) as Array<{ id: string; ws: string; title: string; skind?: string; art?: string; pol?: string; st?: string }>;
+    const ws = c.env.scope.workspaceId;
     for (const r of rows) {
       const upload = itemIsUploadDerived(store, r.id);
-      const hit: SearchHit = { kind: 'record', id: r.id, type: r.skind === 'strength' ? 'strength' : t.type, title: servedLine(store, c.env.scope.workspaceId, r.title ?? '', TITLE_MAX) };
+      const refs: RetrievalResultRef[] = [{ id: r.id, kind: 'record' }];
+      const hit: SearchHit = { kind: 'record', id: r.id, type: r.skind === 'strength' ? 'strength' : t.type };
+      if (r.art !== undefined) {
+        // A review mention: its quote is third-party text, served fenced under its stored copy.
+        hit.title = `review mention (${r.pol}, ${r.st})`;
+        hit.snippet = fenceEvidence(r.art, servedLine(store, ws, r.title ?? '', SNIPPET_MAX_CHARS));
+        refs.push({ id: r.art, kind: 'artifact' });
+      } else hit.title = servedLine(store, ws, r.title ?? '', TITLE_MAX);
       const src = sourceOf(c, r.ws);
       if (src) hit.source = src;
       if (upload) hit.flags = ['upload'];
       // More matched terms first (OR retry), then scope order.
       const matchedTerms = terms.filter((term) => (r.title ?? '').toLowerCase().includes(term.toLowerCase())).length;
-      out.push({ hit, refs: [{ id: r.id, kind: 'record' }], upload, score: -matchedTerms, rank: scopeRank(c.view, r.ws), tie: [] });
+      out.push({ hit, refs, upload, score: -matchedTerms, rank: scopeRank(c.view, r.ws), tie: [] });
     }
   }
   return out;

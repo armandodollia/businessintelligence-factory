@@ -5,6 +5,7 @@ import { BusinessMap } from './BusinessMap.js';
 import { Competitors } from './Competitors.js';
 import { DecisionLog } from './DecisionLog.js';
 import { Findings } from './Findings.js';
+import { Flows } from './Flows.js'; // flow records and flow ranking
 import { Interview } from './Interview.js';
 import { Knowledge } from './Knowledge.js'; // knowledge store KS-7
 import { Lessons } from './Lessons.js'; // learning loop WP-E
@@ -86,6 +87,8 @@ function Page({ wsId, page }: { wsId: string; page: WorkspacePage }) {
       return <Findings wsId={wsId} />;
     case 'competitors':
       return <Competitors wsId={wsId} />;
+    case 'flows': // flow records and flow ranking
+      return <Flows wsId={wsId} />;
     case 'strategy':
       return <Strategy wsId={wsId} />;
     case 'review':

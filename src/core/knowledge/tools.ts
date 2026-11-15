@@ -88,10 +88,10 @@ export type KnowledgeReadResult =
   | { ok: true; data: Record<string, unknown>; images?: Array<{ data: string; mimeType: string }>; retrievalEventId: string }
   | { ok: false; error: string };
 
-const ITEM_PREFIXES = ['fnd_', 'art_', 'chk_', 'ent_', 'cmp_', 'per_', 'sym_', 'hyp_', 'rec_', 'ws_', 'rrun_'];
+const ITEM_PREFIXES = ['fnd_', 'art_', 'chk_', 'ent_', 'cmp_', 'per_', 'sym_', 'hyp_', 'rec_', 'flw_', 'rvm_', 'ws_', 'rrun_'];
 const ITEM_TABLES: Record<string, string> = {
   fnd_: 'findings', art_: 'artifacts', chk_: 'chunks', ent_: 'entities', cmp_: 'competitors', per_: 'personas',
-  sym_: 'symptoms', hyp_: 'symptom_hypotheses', rec_: 'recommendations', rrun_: 'research_runs',
+  sym_: 'symptoms', hyp_: 'symptom_hypotheses', rec_: 'recommendations', flw_: 'flows', rvm_: 'review_mentions', rrun_: 'research_runs',
 };
 
 /**

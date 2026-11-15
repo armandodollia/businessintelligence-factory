@@ -13,6 +13,8 @@ import { Supervisor, type SupervisorDeps } from '../core/harness/supervisor.js';
 import { TokenRegistry } from '../core/harness/tokens.js';
 import { createToolHandlers, type HandleTool } from '../core/harness/tools/handlers.js';
 import { interviewToolHandlers } from '../core/interview/interview.js';
+import { flowRankingRunner, flowRoundToolHandlers } from '../core/flows/round.js';
+import { flowToolHandlers } from '../core/flows/tools.js';
 import { personaPanelRunner } from '../core/market/panel.js';
 import { marketToolHandlers } from '../core/market/personas.js';
 import type { PhaseRunner, ResearchDeps } from '../core/research/deps.js';
@@ -122,6 +124,8 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...marketToolHandlers({ dataDir }),
       ...escalationToolHandlers(), // WP-D
       ...retroToolHandlers(), // learning loop WP-E
+      ...flowRoundToolHandlers(), // flow ranking: persona verdicts
+      ...flowToolHandlers(), // flow records: worker tools
     },
   });
   const supervisorDeps: SupervisorDeps = {
@@ -140,7 +144,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
     supervisor,
     events,
     tokens,
-    phaseRunners: { persona_panel: personaPanelRunner, scoring: scoringRunner },
+    phaseRunners: { flow_ranking: flowRankingRunner, persona_panel: personaPanelRunner, scoring: scoringRunner },
   };
   const app = createApp({
     store,

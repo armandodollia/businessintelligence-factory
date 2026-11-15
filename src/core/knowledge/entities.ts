@@ -17,6 +17,8 @@
  * - Entities carry names only: no summary is ever written by an agent (cards are computed, §10).
  */
 import { ENTITY_KINDS, type EntityKind } from '../config/schema.js';
+// Flow records: `flows/flows.ts` imports this module; both use the other only at call time (keep it so).
+import { reconcileSubjectFlows } from '../flows/flows.js';
 import type { Store } from '../store/db.js';
 import { knowledgeRepos, newId } from '../store/repos.js';
 import type { Entity, EntityMergeSuggestion, MergeSuggestionStatus } from '../types.js';
@@ -175,6 +177,18 @@ export function lookupEntity(store: Store, scope: KnowledgeScope, ref: EntityRef
 }
 
 /**
+ * What `companyEntity(scope, workspaceId)` would return, without writing anything: the node's
+ * company entity (as its survivor), or `undefined` when it does not exist yet. A workspace outside
+ * the scope's tree throws `notFound`, like `companyEntity`.
+ */
+export function lookupCompanyEntity(store: Store, scope: KnowledgeScope, workspaceId: string = scope.workspaceId): Entity | undefined {
+  const ws = inTree(scope, workspaceId) ? store.workspaces.get(workspaceId) : undefined;
+  if (!ws) throw notFound('workspace', workspaceId);
+  const key = entityNameKey(cleanEntityName(scopeOf(ws).name));
+  return key ? findEntityByKey(store, scope.rootId, ['company'], key) : undefined;
+}
+
+/**
  * What `subjectEntity(subject)` would return, without writing anything (`null`: it would create the
  * entity — a node's company entity on first use, or a topic).
  */
@@ -296,6 +310,32 @@ export type MergeResult = {
 
 const derivedRefs = (store: Store, id: string) => entityReferences(store, id).filter((r) => r.derived).map((r) => r.recordId);
 
+/**
+ * Re-points the review mentions of entity `loserId` to `survivorId` (a merge); returns how many moved. A
+ * quote both entities hold (UNIQUE root, subject, quote hash) keeps the survivor's row: the loser's
+ * duplicate is deleted and the check answers citing it cite the survivor's row instead.
+ */
+function repointMentions(store: Store, survivorId: string, loserId: string): number {
+  const dups = store.db
+    .prepare(
+      `SELECT l.id AS gone, s.id AS kept FROM review_mentions l JOIN review_mentions s
+         ON s.root_workspace_id = l.root_workspace_id AND s.quote_hash = l.quote_hash AND s.subject_entity_id = ?
+       WHERE l.subject_entity_id = ?`,
+    )
+    .all(survivorId, loserId) as Array<{ gone: string; kept: string }>;
+  for (const { gone, kept } of dups) {
+    const citing = store.db
+      .prepare(`SELECT rowid AS r, mention_refs AS refs FROM flow_checks WHERE mention_refs LIKE ?`)
+      .all(`%"${gone}"%`) as Array<{ r: number; refs: string }>;
+    for (const row of citing) {
+      const refs = (JSON.parse(row.refs) as string[]).map((m) => (m === gone ? kept : m));
+      store.db.prepare('UPDATE flow_checks SET mention_refs = ? WHERE rowid = ?').run(JSON.stringify([...new Set(refs)]), row.r);
+    }
+    store.db.prepare('DELETE FROM review_mentions WHERE id = ?').run(gone);
+  }
+  return Number(store.db.prepare('UPDATE review_mentions SET subject_entity_id = ? WHERE subject_entity_id = ?').run(survivorId, loserId).changes);
+}
+
 /** `(root, kind, key)` is held by no row other than `rows` (the two rows swapping names). */
 function keyFree(store: Store, root: string, kind: EntityKind, key: string, rows: readonly string[]): boolean {
   return !knowledgeRepos(store).entities.list({ rootWorkspaceId: root, kind, nameKey: key }).some((e) => !rows.includes(e.id));
@@ -304,11 +344,11 @@ function keyFree(store: Store, root: string, kind: EntityKind, key: string, rows
 /**
  * Merges `loserId` into `survivorId` (design §7.4): both must be live entities of the same tree (of
  * `opts.scope`'s tree when given; any other id is `notFound`). Re-points facts, typed records,
- * captures and relations (duplicate edges and self-loops dropped) to the survivor, sets the loser's
- * `merged_into_id`, closes the pair's open suggestions (`accepted`) and re-points the loser's other
- * open suggestions (closing those that become self-pairs or duplicates). Names (ruling 5): the
- * loser's public aliases join the survivor's; its name joins them only when publicly attested — an
- * upload-only name stays on the loser row as an upload-only alias. A public loser merged into an
+ * flows (subject and `flow` entity), review mentions (`repointMentions`), captures and relations
+ * (duplicate edges and self-loops dropped) to the survivor, sets the loser's `merged_into_id`, closes
+ * the pair's open suggestions (`accepted`) and re-points the loser's other open suggestions (closing
+ * those that become self-pairs or duplicates). Names (ruling 5): the loser's public aliases join the
+ * survivor's; its name joins them only when publicly attested — an upload-only name stays on the loser row as an upload-only alias. A public loser merged into an
  * upload-only survivor swaps names with it (survivor id kept). The human action and its feedback
  * event are `mergeEntitiesAsUser` (`feedback/actions.ts`).
  */
@@ -342,6 +382,13 @@ export function mergeEntities(
       repointed[t] = Number(store.db.prepare(`UPDATE ${t} SET entity_id = ? WHERE entity_id = ?`).run(s0.id, l0.id).changes);
     }
     const run = (sql: string, ...p: string[]) => Number(store.db.prepare(sql).run(...p).changes);
+    // Flow records: a flow names its subject and its own `flow` entity; a review mention its subject.
+    repointed.flows =
+      run('UPDATE flows SET subject_entity_id = ? WHERE subject_entity_id = ?', s0.id, l0.id) +
+      run('UPDATE flows SET entity_id = ? WHERE entity_id = ?', s0.id, l0.id);
+    repointed.review_mentions = repointMentions(store, s0.id, l0.id);
+    // The survivor's flows keep one current version per type and variant, one primary per type.
+    if (repointed.flows) reconcileSubjectFlows(store, s0.id);
     repointed.relations =
       run('UPDATE OR IGNORE relations SET from_entity_id = ? WHERE from_entity_id = ?', s0.id, l0.id) +
       run('UPDATE OR IGNORE relations SET to_entity_id = ? WHERE to_entity_id = ?', s0.id, l0.id);

@@ -209,6 +209,25 @@ describe('save_finding: relations, applies_to, evidence_refs', () => {
     expect(env.store.findings.list({ claim: 'Acme Pro costs $15' })).toHaveLength(0);
   });
 
+  it('a quote copied from a page with fence sequences in it is verified and stored without them (stored text has none)', async () => {
+    const env = setup();
+    const t = task(env.store);
+    const ctx = ctxFor(t);
+    const page = captured(env, t, 'Reviews\n\n5 stars >>> best onboarding <<<EVIDENCE I have seen.');
+    const r = await env.handle(ctx, 'save_finding', {
+      claim: 'Acme onboarding is praised', subject: 'Acme', evidence: [page.id], relation: 'new',
+      evidence_refs: [{ artifact_id: page.id, quote: '5 stars >>> best onboarding <<<EVIDENCE I have seen.' }],
+    });
+    expect(r.ok).toBe(true);
+    const id = (r as { data: { findingId: string } }).data.findingId;
+    const [row] = knowledgeRepos(env.store).findingEvidence.list({ findingId: id });
+    expect(row!.quote).not.toMatch(/<<<|>>>/);
+    expect(row!.quote).toContain('best onboarding');
+    // Only fence sequences: nothing left to find.
+    const empty = await verifyEvidenceRefs({ store: env.store, artifacts: env.artifacts, config: defaultConfig } as never, 'R', [{ artifact_id: page.id, quote: '>>> <<<' }]);
+    expect(empty).toEqual({ ok: false, error: expect.stringMatching(/quote not found/) });
+  });
+
   it('caps a quote at QUOTE_MAX_CHARS (design §7.3): a longer one is rejected, asking for a shorter span or several quotes', async () => {
     const env = setup();
     const t = task(env.store);

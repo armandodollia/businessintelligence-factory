@@ -5,6 +5,7 @@
  * - fact (finding): lifecycle `current` and `isSynthesisEligible` (not superseded; the user's
  *   include override, else verified);
  * - competitor, persona, hypothesis: `isOutputUsable` (not superseded; include override, else verified);
+ * - flow (a flow version, `flows/flows.ts`): lifecycle `current` and `isOutputUsable`;
  * - symptom (interview record, no review) and artifact (evidence, no review): usable while the row exists.
  *
  * Each predicate takes a table alias and must stay in step with `isOutputUsable`
@@ -22,6 +23,9 @@ export const outputUsableSql = (a: string): string =>
   `(COALESCE(${a}.status, 'pending') <> 'superseded'
     AND COALESCE(${a}.include_override, COALESCE(${a}.status, 'pending') = 'verified') = 1)`;
 
+/** Flow version usable: the current version of its variant and a usable reviewed output. */
+export const flowUsableSql = (a: string): string => `(${a}.lifecycle = 'current' AND ${outputUsableSql(a)})`;
+
 /** Table of each kind of record that can assert an edge or reference an entity. */
 export const SOURCE_TABLES: Record<RelationSourceKind, string> = {
   fact: 'findings',
@@ -30,6 +34,7 @@ export const SOURCE_TABLES: Record<RelationSourceKind, string> = {
   symptom: 'symptoms',
   hypothesis: 'symptom_hypotheses',
   artifact: 'artifacts',
+  flow: 'flows',
 };
 
 /** Usable predicate of a record of `kind` aliased `a`. */
@@ -41,6 +46,8 @@ export function recordUsableSql(kind: RelationSourceKind, a: string): string {
     case 'persona':
     case 'hypothesis':
       return outputUsableSql(a);
+    case 'flow':
+      return flowUsableSql(a);
     case 'symptom':
     case 'artifact':
       return '1';
@@ -66,7 +73,7 @@ export function sourceUsableSql(kindCol: string, idCol: string): string {
 export function sourceVisibleSql(kindCol: string, idCol: string): string {
   const scoped = (k: 'fact' | 'artifact') =>
     `WHEN '${k}' THEN EXISTS (SELECT 1 FROM item_scopes s WHERE s.item_kind = '${k}' AND s.item_id = ${idCol} AND s.workspace_id IN (SELECT ws FROM vis))`;
-  const typed = (['competitor', 'persona', 'symptom', 'hypothesis'] as const).map(
+  const typed = (['competitor', 'persona', 'symptom', 'hypothesis', 'flow'] as const).map(
     (k) => `WHEN '${k}' THEN EXISTS (SELECT 1 FROM ${SOURCE_TABLES[k]} v WHERE v.id = ${idCol} AND v.workspace_id IN (SELECT ws FROM vis))`,
   );
   return `(CASE ${kindCol} ${scoped('fact')} ${scoped('artifact')} ${typed.join(' ')} ELSE 0 END)`;

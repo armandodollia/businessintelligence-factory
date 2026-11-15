@@ -7,20 +7,22 @@ export const ALL_PHASES: Phase[] = [
   'market_research',
   'competitor_discovery',
   'deep_dives',
+  'flow_ranking',
   'synthesis',
   'persona_panel',
   'scoring',
 ];
 
 /** Phases that run without an orchestrator agent (delegated to `ResearchDeps.phaseRunners`). */
-export const RUNNER_PHASES: ReadonlySet<Phase> = new Set(['persona_panel', 'scoring']);
+export const RUNNER_PHASES: ReadonlySet<Phase> = new Set(['flow_ranking', 'persona_panel', 'scoring']);
 
 /** Task types the orchestrator may propose in each phase. */
 export const PHASE_TASK_TYPES: Record<Phase, TaskType[]> = {
   mapping: ['map_business_units'],
   market_research: ['audience_segments', 'persona_profile', 'customer_pain_points', 'news_scan'],
   competitor_discovery: ['discover_competitors', 'news_scan'],
-  deep_dives: ['flow_walkthrough', 'news_scan', 'public_filings', 'customer_pain_points', 'own_company_audit'],
+  deep_dives: ['flow_walkthrough', 'flow_reviews', 'news_scan', 'public_filings', 'customer_pain_points', 'own_company_audit'],
+  flow_ranking: [],
   synthesis: ['symptom_hypotheses', 'synthesize_recommendations'],
   persona_panel: ['persona_panel'],
   scoring: [],
@@ -44,12 +46,17 @@ export const PHASE_GOALS: Record<Phase, string> = {
     'Discover the competitors of {{scope}}: direct and indirect competitors serving the same audiences ({{audiences}}), ' +
     'with positioning, target segments and why each matters. Every competitor must be backed by evidence.',
   deep_dives:
-    'Deep-dive the most important competitors and the own company ({{scope}}): walk key flows (signup, onboarding, ' +
-    'pricing, checkout, core flow) with a screenshot per step, scan news and public filings, and collect customer ' +
+    'Deep-dive the most important competitors and the own company ({{scope}}): list every flow each one offers that can ' +
+    'be found (navigation, pricing and help pages, the product itself) and walk the key ones (sign-up, sign-in, ' +
+    'onboarding, pricing, checkout, core flow) step by step with a screenshot per step (flow_walkthrough); collect ' +
+    'public reviews and feedback about each of them (flow_reviews); scan news and public filings, and collect customer ' +
     'pain points. Apply the same task types to the own company via own_company_audit.',
   synthesis:
     'Link the interview symptoms of {{scope}} to research findings (symptom hypotheses) and synthesize ' +
     'evidence-backed recommendations, each referencing the findings that support it. Use verified findings only.',
+  flow_ranking:
+    'Rank the documented flows of {{scope}} per flow type: each persona judges pairs of flows as itself (simulated ' +
+    'head-to-heads), blended with the checklist scores.',
   persona_panel: 'Put every recommendation for {{scope}} to each persona independently (simulated feedback).',
   scoring: 'Score and prioritise the recommendations for {{scope}}.',
 };

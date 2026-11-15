@@ -433,7 +433,10 @@ export type Repos = ReturnType<typeof createRepos>;
 // one set per database connection. Tables with a composite primary key get a `LinkRepo`
 // (insert / list / delete by filter; no get / update by id).
 
-/** Spec of a table with a composite primary key. Only scalar column types. */
+/**
+ * Spec of a table with a composite primary key. Key and filter fields must be scalar; `json` columns
+ * may hold values (encoded as in `Repo`) but cannot be filtered on.
+ */
 export interface LinkSpec<T> {
   table: string;
   keys: ReadonlyArray<keyof T & string>;
@@ -448,16 +451,19 @@ export class LinkRepo<T> {
     private readonly db: DatabaseSync,
     private readonly spec: LinkSpec<T>,
   ) {
-    for (const [f, t] of Object.entries(spec.fields) as [string, FieldSpec][]) {
-      if (!SCALAR.has(colType(t))) throw new Error(`${spec.table}: LinkRepo supports scalar columns only ('${f}')`);
+    for (const k of spec.keys) {
+      if (!SCALAR.has(colType(spec.fields[k] as FieldSpec))) throw new Error(`${spec.table}: key column '${k}' must be scalar`);
     }
     this.cols = Object.fromEntries(Object.keys(spec.fields).map((f) => [f, toSnake(f)]));
     this.inner = new Repo<T, keyof T & string>(db, { table: spec.table, key: spec.keys[0]!, fields: spec.fields });
   }
 
   private encode(field: string, v: unknown): SQLInputValue {
-    if (v === undefined || v === null) return null;
-    return colType(this.spec.fields[field as keyof T] as FieldSpec) === 'bool' ? (v ? 1 : 0) : (v as SQLInputValue);
+    if (v === undefined) return null;
+    const t = colType(this.spec.fields[field as keyof T] as FieldSpec);
+    if (t === 'json') return JSON.stringify(v);
+    if (v === null) return null;
+    return t === 'bool' ? (v ? 1 : 0) : (v as SQLInputValue);
   }
 
   private where(filter: Record<string, unknown>): { sql: string; params: SQLInputValue[] } {
@@ -465,7 +471,9 @@ export class LinkRepo<T> {
     const params: SQLInputValue[] = [];
     for (const [f, v] of Object.entries(filter)) {
       if (v === undefined) continue;
-      if (!Object.hasOwn(this.cols, f)) throw new Error(`${this.spec.table}: cannot filter on field '${f}'`);
+      if (!Object.hasOwn(this.cols, f) || !SCALAR.has(colType(this.spec.fields[f as keyof T] as FieldSpec))) {
+        throw new Error(`${this.spec.table}: cannot filter on field '${f}'`);
+      }
       if (v === null) where.push(`${this.cols[f]} IS NULL`);
       else {
         where.push(`${this.cols[f]} = ?`);

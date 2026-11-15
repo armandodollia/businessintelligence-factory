@@ -8,6 +8,7 @@ export const WORKSPACE_PAGES = [
   { page: 'research', label: 'Research' },
   { page: 'findings', label: 'Findings & Evidence' },
   { page: 'competitors', label: 'Competitors' },
+  { page: 'flows', label: 'Flows' }, // flow records and flow ranking
   { page: 'strategy', label: 'Strategy' },
   { page: 'review', label: 'Review queue' },
   { page: 'decisions', label: 'Decision log' },

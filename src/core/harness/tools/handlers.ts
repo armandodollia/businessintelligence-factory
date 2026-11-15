@@ -45,9 +45,9 @@ export type ToolCallOptions = { signal?: AbortSignal };
 
 /**
  * Handler for a tool implemented outside this section. Receives the zod-validated input
- * (`ToolInput<name>`). For `propose_tasks` / `submit_persona_feedback` the dispatcher records the
- * Decision row (kind `task_proposal` / `persona_feedback`) after a successful call — extra
- * handlers must not insert it themselves.
+ * (`ToolInput<name>`). For `propose_tasks` / `submit_persona_feedback` / `submit_flow_verdicts` the
+ * dispatcher records the Decision row (kind `task_proposal` / `persona_feedback` / `flow_verdicts`)
+ * after a successful call — extra handlers must not insert it themselves.
  */
 export type ExtraToolHandler = (
   ctx: RunContext,
@@ -88,6 +88,7 @@ export type RunOutputs = {
 const EXTRA_DECISION_KIND: Partial<Record<ToolName, Decision['kind']>> = {
   propose_tasks: 'task_proposal',
   submit_persona_feedback: 'persona_feedback',
+  submit_flow_verdicts: 'flow_verdicts',
 };
 
 const fail = (error: string): ToolResult => ({ ok: false, error });
@@ -97,6 +98,23 @@ function formatZodError(err: z.ZodError): string {
   return err.issues
     .map((i) => `${i.path.length ? i.path.join('.') : '(input)'}: ${i.message}`)
     .join('; ');
+}
+
+/**
+ * The environment of the quote-verifying tools (`FactToolEnv`) for the dispatcher's deps: a quote on
+ * a still-pending artifact extracts and indexes it inline (KS-1 × KS-2, stored chunks), and is read
+ * by the OCR pass when the artifact is a scan. Extra handlers that verify quotes build theirs here.
+ */
+export function factToolEnv(deps: Omit<ToolHandlerDeps, 'extraHandlers'>, recordDecision: FactToolEnv['recordDecision']): FactToolEnv {
+  const { store, artifacts, config, events } = deps;
+  return {
+    store, artifacts, config, events, recordDecision,
+    ensureExtracted: async (artifactId) => {
+      await ingestorFor({ store, artifacts, config }).ensure(artifactId);
+      // Two-pass OCR: a quote may be on a scanned page a model is still reading.
+      await ocrSinkFor(artifacts)?.ensure(artifactId);
+    },
+  };
 }
 
 /**
@@ -126,15 +144,7 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
   }
 
   // Knowledge store KS-2: living-fact tools (save_finding beyond the replay rule, confirm / retract).
-  // KS-1 × KS-2: a quote on a still-pending artifact extracts and indexes it inline (stored chunks).
-  const factEnv: FactToolEnv = {
-    store, artifacts, config: deps.config, events, recordDecision,
-    ensureExtracted: async (artifactId) => {
-      await ingestorFor({ store, artifacts, config: deps.config }).ensure(artifactId);
-      // Two-pass OCR: a quote may be on a scanned page a model is still reading.
-      await ocrSinkFor(artifacts)?.ensure(artifactId);
-    },
-  };
+  const factEnv = factToolEnv(deps, recordDecision);
 
   // Knowledge store KS-4: every read tool goes through `knowledgeRead`; reviewer and escalation runs
   // are limited to their task's review slice (no task: an empty slice).

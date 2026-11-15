@@ -53,6 +53,7 @@ import { mountLessonsRoutes } from './lessonsRoutes.js'; // learning loop WP-E
 import { recordLessonsPromptVersions } from '../core/learning/lessons/switch.js'; // ruling R1
 import { mountWpfRoutes } from './experimentRoutes.js'; // learning loop WP-F
 import { mountMetricsRoutes } from './metricsRoutes.js'; // learning loop WP-G
+import { mountFlowRoutes } from './flowRoutes.js'; // flow records and ranking
 
 export type AppDeps = {
   store: Store;
@@ -96,7 +97,7 @@ const phaseSchema = z.enum(PHASES);
 const scopeLevel = z.enum(['company', 'division', 'slice']);
 const audience = z.enum(['external', 'internal']);
 const targetType = z.enum(['finding', 'recommendation', 'symptom', 'competitor', 'persona', 'persona_feedback', 'decision']);
-const DECISION_KINDS = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score'] as const;
+const DECISION_KINDS = ['decision', 'review', 'pushback', 'task_proposal', 'persona_feedback', 'score', 'flow_verdicts'] as const;
 const REQUEST_STATUSES = ['pending', 'resolved', 'denied'] as const;
 
 const schemas = {
@@ -724,6 +725,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- learning loop WP-G: metrics view --------------------------------------------------------
   mountMetricsRoutes(app, { store, config, artifacts }, workspace);
   // --- end WP-G --------------------------------------------------------------------------------
+  // --- flow records and ranking: flow types, rankings, flows, reactions, overrides, decisions -----
+  mountFlowRoutes(app, { store, config, artifacts }, workspace);
+  // --- end flow records and ranking ------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

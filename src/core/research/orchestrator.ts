@@ -540,8 +540,8 @@ async function executePhase(deps: ResearchDeps, rr: ResearchRun): Promise<Resear
 /**
  * Runs one phase for a workspace: a fresh orchestrator run plans tasks (`propose_tasks`), the
  * accepted tasks run through the review loop (concurrency bounded by the supervisor), then the
- * orchestrator gets one follow-up round with the results (failed tasks included). `persona_panel`
- * and `scoring` call `deps.phaseRunners` instead. Resolves with the finished ResearchRun
+ * orchestrator gets one follow-up round with the results (failed tasks included). The runner phases
+ * (`RUNNER_PHASES`: `flow_ranking`, `persona_panel`, `scoring`) call `deps.phaseRunners` instead. Resolves with the finished ResearchRun
  * (`done` or `failed`). Rejects if the workspace already has a running research run, or with
  * `AbortError` when `deps.signal` aborts.
  */

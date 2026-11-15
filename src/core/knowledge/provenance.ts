@@ -10,16 +10,19 @@
  * - symptom hypothesis → `evidence` (finding or artifact ids);
  * - persona → every profile field's `evidence`;
  * - recommendation → `findingIds`.
+ * - flow records (no stored flag, flow design §8.4): a flow version → its steps' screenshots; a review
+ *   mention → its stored copy (and chunk); a persona verdict → its two flows; a rank snapshot → its flows.
  * - entity → `entityIsUploadOnly` (KS-3, below); entity merge suggestion → either of its entities.
  * Cards are not resolvable here (KS-4 lists the facts, records and entities a card was built from in
  * `result_ids`). Unknown ids are not upload-derived.
  */
+import { flowRepos } from '../flows/repos.js';
 import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
 import type { Entity } from '../types.js';
 import { descendants, scopeOf } from '../workspace/tree.js';
 import { entityNameKey } from './entityKeys.js';
-import { factUsableSql, outputUsableSql, sourceUsableSql } from './usable.js';
+import { factUsableSql, flowUsableSql, outputUsableSql, sourceUsableSql } from './usable.js';
 
 const flag = (store: Store, table: 'artifacts' | 'chunks' | 'findings', id: string): boolean | undefined => {
   const row = store.db.prepare(`SELECT upload_derived AS d FROM ${table} WHERE id = ?`).get(id) as { d: number } | undefined;
@@ -42,6 +45,25 @@ export function evidenceOf(store: Store, id: string): string[] | undefined {
   if (r) return r.findingIds;
   const u = store.unitProposals.get(id);
   if (u) return u.evidence;
+  return flowRecordEvidence(store, id);
+}
+
+/** `evidenceOf` of a flow record (by id prefix: `flw_`, `rvm_`, `fvd_`, `frs_`); `undefined` for anything else. */
+function flowRecordEvidence(store: Store, id: string): string[] | undefined {
+  const r = flowRepos(store);
+  if (id.startsWith('flw_')) {
+    if (!r.flows.get(id)) return undefined;
+    return r.flowSteps.list({ flowId: id }).flatMap((s) => (s.artifactId ? [s.artifactId] : []));
+  }
+  if (id.startsWith('rvm_')) {
+    const m = r.reviewMentions.get(id);
+    return m ? [m.artifactId, ...(m.chunkId ? [m.chunkId] : [])] : undefined;
+  }
+  if (id.startsWith('fvd_')) {
+    const v = r.flowVerdicts.get(id);
+    return v ? [v.flowAId, v.flowBId] : undefined;
+  }
+  if (id.startsWith('frs_')) return r.rankSnapshots.get(id)?.ranking.map((x) => x.flowId);
   return undefined;
 }
 
@@ -68,7 +90,7 @@ export function itemIsUploadDerived(store: Store, id: string, seen: Set<string> 
 
 /** A record that references an entity: by `entity_id`, or as the source of an edge touching it. */
 export type EntityReference = {
-  kind: 'fact' | 'competitor' | 'persona' | 'symptom' | 'hypothesis' | 'capture' | 'relation';
+  kind: 'fact' | 'competitor' | 'persona' | 'symptom' | 'hypothesis' | 'flow' | 'review_mention' | 'capture' | 'relation';
   /** The referencing row (capture or relation id for those kinds). */
   id: string;
   /** The record whose provenance counts: the row itself, a capture's artifact, an edge's source. */
@@ -84,8 +106,9 @@ const GROUP_CTE = `WITH RECURSIVE grp(id) AS (
 
 /**
  * Every record that references entity `entityId` or a row merged into it: facts (any lifecycle),
- * competitors, personas, symptoms, symptom hypotheses, captures, and the source record of every edge
- * from or to it.
+ * competitors, personas, symptoms, symptom hypotheses, flows (any version: as their subject or as their
+ * `flow` entity; usable when current and usable), review mentions (as their subject; always usable),
+ * captures, and the source record of every edge from or to it.
  */
 export function entityReferences(store: Store, entityId: string): EntityReference[] {
   const out: EntityReference[] = [];
@@ -100,6 +123,15 @@ export function entityReferences(store: Store, entityId: string): EntityReferenc
     const rows = store.db
       .prepare(`${GROUP_CTE} SELECT t.id AS id, ${usable} AS usable FROM ${table} t WHERE t.entity_id IN (SELECT id FROM grp) ORDER BY t.rowid`)
       .all(entityId) as Array<{ id: string; usable: number }>;
+    for (const r of rows) out.push({ kind, id: r.id, recordId: r.id, derived: itemIsUploadDerived(store, r.id), usable: r.usable === 1 });
+  }
+  const flowRecords = [
+    ['flow', `SELECT t.id AS id, ${flowUsableSql('t')} AS usable FROM flows t
+      WHERE t.subject_entity_id IN (SELECT id FROM grp) OR t.entity_id IN (SELECT id FROM grp) ORDER BY t.rowid`],
+    ['review_mention', 'SELECT t.id AS id, 1 AS usable FROM review_mentions t WHERE t.subject_entity_id IN (SELECT id FROM grp) ORDER BY t.rowid'],
+  ] as const;
+  for (const [kind, sql] of flowRecords) {
+    const rows = store.db.prepare(`${GROUP_CTE} ${sql}`).all(entityId) as Array<{ id: string; usable: number }>;
     for (const r of rows) out.push({ kind, id: r.id, recordId: r.id, derived: itemIsUploadDerived(store, r.id), usable: r.usable === 1 });
   }
   const captures = store.db

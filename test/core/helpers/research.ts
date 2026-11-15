@@ -93,7 +93,7 @@ export const revise =
       await t.call('respond_to_review', { issue_id: m[1], action, reason: `${action} because reasons` });
     }
     const keep = keepOutputs
-      ? [...req.prompt.matchAll(/^- (?:finding|recommendation|persona|competitor|hypothesis) (\w+):/gm)].map((m) => m[1])
+      ? [...req.prompt.matchAll(/^- (?:finding|recommendation|persona|competitor|hypothesis|flow) (\w+):/gm)].map((m) => m[1])
       : [];
     await t.call('submit_result', keep.length ? { ...deliverable, keep } : deliverable);
   };

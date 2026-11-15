@@ -66,7 +66,7 @@ export function panelSummary(rec: Pick<Recommendation, 'personaFeedback'>, perso
 }
 
 /** The agent.md system prompt of a persona; recompiled (and rewritten) when the file is missing. */
-function agentMdOf(deps: ResearchDeps, persona: Persona): string {
+export function agentMdOf(deps: ResearchDeps, persona: Persona): string {
   if (persona.agentMdPath && existsSync(persona.agentMdPath)) return readFileSync(persona.agentMdPath, 'utf8');
   return writeAgentMd(deps.store, persona);
 }

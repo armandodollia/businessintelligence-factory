@@ -63,8 +63,9 @@ describe('role scope table', () => {
     const base = ['log_decision', 'save_artifact', 'request_user_action', 'request_approval'];
     // Reviewers judge only the deliverable and its evidence: no read_workspace (final review A4).
     // KS-4: expand joins read_artifact, both limited to the task's review slice by the dispatcher.
-    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'expand']));
-    expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback']));
+    // Flow records: reviewers may read the flow catalog (the questions behind check answers).
+    expect(new Set(ROLE_TOOLS.reviewer)).toEqual(new Set(['log_decision', 'submit_review', 'read_artifact', 'expand', 'read_flow_catalog']));
+    expect(new Set(ROLE_TOOLS.persona)).toEqual(new Set(['log_decision', 'submit_persona_feedback', 'submit_flow_verdicts']));
     // KS-1: describe_artifact for worker, orchestrator, interviewer, synthesizer.
     expect(new Set(ROLE_TOOLS.interviewer)).toEqual(
       new Set(['log_decision', 'update_profile', 'save_symptom', 'read_workspace', 'read_artifact', 'describe_artifact',
@@ -76,6 +77,7 @@ describe('role scope table', () => {
         'read_workspace', 'propose_business_unit', 'read_artifact', 'save_competitor', 'save_hypothesis', 'describe_artifact',
         'confirm_finding', 'retract_finding', // knowledge store KS-2
         'search', 'get_card', 'expand', 'list_changes', // KS-4
+        'read_flow_catalog', 'save_flow', 'save_flow_checks', 'save_review_mentions', 'propose_flow_type', 'propose_checklist', // flow records
       ]),
     );
     expect(new Set(ROLE_TOOLS.orchestrator)).toEqual(
@@ -469,7 +471,7 @@ describe('mcp server', () => {
     const reviewer = ctx('reviewer');
     const client = await connect(app, tokens.issue(reviewer));
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['expand', 'log_decision', 'read_artifact', 'submit_review']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['expand', 'log_decision', 'read_artifact', 'read_flow_catalog', 'submit_review']);
     const review = tools.find((t) => t.name === 'submit_review')!;
     expect(review.inputSchema.type).toBe('object');
     expect(review.inputSchema.properties).toHaveProperty('score');
@@ -517,7 +519,7 @@ describe('mcp server', () => {
         requestInit: { headers: { authorization: `Bearer ${token}` } },
       }),
     );
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(['expand', 'log_decision', 'read_artifact', 'submit_review']);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(['expand', 'log_decision', 'read_artifact', 'read_flow_catalog', 'submit_review']);
     await client.close();
     for (const authorization of [undefined, 'Bearer tok_unknown', `Basic ${token}`]) {
       const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json, text/event-stream' };

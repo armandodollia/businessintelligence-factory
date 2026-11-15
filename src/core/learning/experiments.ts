@@ -23,7 +23,7 @@ import { usageTotals, type UsageTotals } from '../metrics/usage.js';
 import { getPromptText, recordPromptVersion } from '../prompts/store.js';
 import type { ResearchDeps } from '../research/deps.js';
 import { roleForTask, runTaskWithReview } from '../research/reviewLoop.js';
-import { taskOutputs } from '../research/outputs.js';
+import { allOutputs, taskOutputs } from '../research/outputs.js';
 import type { Store } from '../store/db.js';
 import { newId, Repo, type TableSpec } from '../store/repos.js';
 import type { Task } from '../types.js';
@@ -241,7 +241,7 @@ function armResult(store: Store, exp: Experiment, arm: ExperimentArmSpec): ArmRe
   for (const r of runs) for (const d of store.decisions.list({ agentRunId: r.id })) targets.add(d.id);
   for (const t of tasks) {
     const o = taskOutputs(store, t);
-    for (const x of [...o.findings, ...o.recommendations, ...o.personas, ...o.competitors, ...o.hypotheses]) targets.add(x.id);
+    for (const x of allOutputs(o)) targets.add(x.id);
   }
   const ratings = store.ratings
     .list({ workspaceId: exp.workspaceId })

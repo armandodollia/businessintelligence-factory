@@ -61,8 +61,11 @@ export function recordWhatChanged(
           nextRunId: rr.id,
           ...diff,
         },
-        // KS-5: replaced (new versions) and retracted facts are referenced too.
-        refs: [...new Set([rr.id, prev.id, ...diff.newFindings, ...diff.changedArtifacts.map((c) => c.next), ...diff.replaced.map((r) => r.to), ...diff.retracted])],
+        // KS-5: replaced (new versions) and retracted facts are referenced too; flow records: new flows and versions.
+        refs: [...new Set([
+          rr.id, prev.id, ...diff.newFindings, ...diff.changedArtifacts.map((c) => c.next), ...diff.replaced.map((r) => r.to), ...diff.retracted,
+          ...diff.flows.newFlows, ...diff.flows.newVersions.map((v) => v.to),
+        ])],
       });
       out.push(decision);
     }
