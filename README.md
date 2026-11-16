@@ -2,1153 +2,170 @@
 
 # Business Intelligence Factory
 
-A local app that researches a business for you with a team of coding-agent CLIs (Claude Code,
-Codex, OpenCode). It interviews you about the business, sends agents to research the market and
-competitors (including walking through their signup, pricing and checkout flows in a browser),
-checks every result with an adversarial reviewer, builds evidence-backed findings and
-recommendations, puts those to simulated customer personas, and ranks them. You rate everything the
-agents produce, and those ratings feed back into weights and prompts.
+The Business Intelligence Factory (BIF) researches a business for you. You describe the business
+and its problems. A team of AI agents then studies the market, the competitors and your own
+company, checks every result against stored evidence, and turns what holds up into ranked
+recommendations. You stay in charge: you review what the agents produce, and your reactions make
+the next round of work better.
 
-Everything runs on your machine: a Node server with a SQLite database, a harness MCP server that
-the agent CLIs call into, and a small React web app. Design spec:
-[docs/superpowers/specs/2026-11-12-business-intelligence-factory-design.md](docs/superpowers/specs/2026-11-12-business-intelligence-factory-design.md).
+BIF runs on your own computer. It uses AI coding assistants you already have (Claude Code, Codex
+and OpenCode) as its agents. An *agent* here is one of these assistants given a single, narrow job,
+such as "find this competitor's prices" or "check this finding".
 
-## Setup
+## What it produces
 
-1. **Node 25+**, then `npm install`.
-2. **Config.** `cp bif.config.example.json bif.config.json` and edit it. The config sets:
-   - `providers`: which CLIs are enabled, their command and the models agents may use.
-   - `roles`: provider/model per role (orchestrator, interviewer, reviewer, synthesizer, persona,
-     and workers per task type). Every role model must be listed under an enabled provider.
-   - `loop`: review loop `maxRounds` / `passThreshold`, globally and per task type; `maxReasserts`
-     (default 1) caps how often a reviewer may reassert an issue the worker pushed back on.
-   - `limits`, `browser`, `identity`, `actionPolicy`, `scoring`, `server.port`, `dataDir`.
-   - `user.id`: who you are in the feedback log (default `local-user`). Every rating, override,
-     correction, answer and approval records this id; the API never takes it from a request.
-   - `budgets` (optional): token / cost caps per workspace and per research pipeline, e.g.
-     `"budgets": { "workspace": { "maxCostUsd": 50 }, "pipeline": { "maxTokens": 20000000 } }`. Past a
-     cap no new agent run starts; a "Waiting on you" request asks to extend it by one more cap (deny
-     to stop; raising the cap in config lifts a denial). Without `budgets` there are no caps.
-   - optional `escalation` (`enabled`, `model` — default `roles.orchestrator`, `maxQuestions` ≤ 3,
-     `maxPerTask`, default 2) and `telemetry` (`busEventRetentionDays`, default 30, 0 = keep;
-     `otlp: { enabled, endpoint, headers, serviceName }`, off by default).
-   - optional `knowledge` (knowledge store; every field has a default): `budgets` (tokens per
-     response kind `search` 1200 / `card` 800 / `expand` 2000 / `briefing` 1500, per-role overrides —
-     reviewer `expand` 3000, synthesizer `briefing` 4000 — and per-provider scale), `hardMaxTokens`
-     (8000), `freshness` (`defaultDays` 90, `byEntityKind`), `extraction` (`maxTextChars`,
-     `chunkTokens` 400, `maxChunkTokens` 600, `xlsxMaxRows`, `inlineMaxBytes`, `concurrency`),
-     `captions` (`required`, `minChars` 20), `dedupe` (`candidateLimit` 3, `similarityFloor` 0.5 —
-     Jaccard overlap of the word sets of the two normalized claims, 0–1; full-text bm25 only picks
-     which stored facts are compared), `retention` (`pruneMinAgeDays`), `ocr` (`enabled` true, `model`
-     "haiku", `images` "all" | "uploads" | "none", `minPageChars` 40, `maxPages` 30 per document,
-     `pagesPerCall` 8, `maxFileBytes`, `timeoutSeconds` 180, `concurrency` 2, `rateLimitPauseMinutes` 15).
-   - optional `flows` (flow ranking; every field has a default): `tieMargin` (5 points), `minMentionsForCheck`
-     (3), `mentionWindowDays` (365), `minAttributionConfidence` (0.6), `maxFocusedComparisons` (20 per
-     round), `lowConfidence` (0.5), `maxFlowsPerSitting` (8, 2–20), `generalCoverage` (0.3) and
-     `model` (verdict runs; default `roles.persona`).
-   - optional `council` (review council; it reviews nothing until you name a stage): `members` (each
-     with `name`, `provider`, `model`, `lens`, and optionally `effort` and `blocking`), `rounds` (3),
-     `passScore` (9), `blockOn` (`any`), `onUnavailable` (`fail`) and `stages` (the task types a
-     council reviews). The example file defines four members and seats them in no stage. See
-     *Review council* under [Concepts](#concepts).
-   - optional `personaPanel` (persona panel): `seats` (each with `provider`, `model` and optionally
-     `effort`), `personas` (pins a persona to a seat by its slug), `rounds` (3), `baseline` (true) and
-     `onUnavailable` (`report`). Unlike the council, the block is active as soon as it is there
-     (seats, rounds and, unless turned off, a baseline run), so the example file has none: without
-     the block every persona runs on `roles.persona` and there is no baseline. See *Persona panel*
-     under [Concepts](#concepts).
+- **Findings.** Single facts about the market, a competitor or your company, each tied to its
+  evidence: a screenshot, a saved web page, a document or a file you uploaded.
+- **Competitor profiles.** Who you compete with, how they position themselves, and how their key
+  journeys work (sign-up, pricing, checkout and so on).
+- **Ranked journeys.** For each kind of journey, such as signing up, a ranking of how well each
+  company handles it, yours included. BIF calls these journeys *flows*.
+- **Personas.** Evidence-based profiles of your customer segments, and of the people inside and
+  around the company whose approval a change needs.
+- **Recommendations.** What to do, each citing the findings behind it, scored and put in priority
+  order. Simulated reactions from the personas sit next to each one.
 
-   Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
-3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
-   - `claude` (Claude Code), `codex` (Codex CLI), `opencode` (OpenCode; disabled in the example).
-   - Check with `npm run smoke` (see [Smoke test](#smoke-test)).
+## From question to recommendations
 
-### Research browser profile
+```mermaid
+flowchart LR
+  A[You describe the business] --> B[Agents research]
+  B --> C[Each result is checked]
+  C --> D[Evidence-backed findings]
+  D --> E[Recommendations]
+  E --> F[Simulated reactions]
+  F --> G[Ranked list for you]
+  G --> H[Your feedback]
+  H --> B
+```
 
-Agents browse in a **dedicated, persistent research profile**, never your everyday browser profile.
-It stays logged into the throwaway accounts the agents create.
+1. **Interview.** You chat with an interviewer agent about the business: what it sells, who its
+   customers are, what is going well and what is not. You can upload spreadsheets, PDFs or decks.
+2. **Research.** BIF works in stages: the market, then competitors, then deep dives into each
+   competitor and your own company, then the people involved. In each stage a planning agent splits
+   the work into small tasks and other agents carry them out. Agents can browse the web, walk
+   through sign-up and checkout pages, and take screenshots as they go.
+3. **Checking.** Every task's result goes to a separate reviewer agent, which scores it and lists
+   problems. The first agent fixes them or explains why not, up to a set number of rounds. Only
+   results that pass are used later.
+4. **Recommendations.** An agent links the problems you described to what research found, and
+   writes recommendations that cite their findings.
+5. **Reactions.** Simulated customers and stakeholders read each recommendation and say how they
+   would react.
+6. **Ranking.** Recommendations are put in priority order using weights you can change.
+7. **Your review.** You rate, correct, include or exclude anything. Some research can repeat on a
+   schedule, and BIF shows what changed since last time.
 
-- **MCP backend, shared server** (`"backend": "mcp"`, `"mode": "shared"`, the default): the harness
-  starts **one** browser MCP server (`browser.shared`) the first time a run needs a browser, and
-  every browser-using run connects to it over HTTP (`http://127.0.0.1:<port>/mcp`, MCP server name
-  `browser`). All runs share one browser on one persistent profile; each agent is told to open its
-  own tab, work only there and close it when done. The default is a pinned Playwright MCP:
+## The main parts
 
-  ```json
-  "browser": {
-    "backend": "mcp",
-    "mode": "shared",
-    "shared": {
-      "command": "npx",
-      "args": ["-y", "@playwright/mcp@0.0.85", "--host", "127.0.0.1", "--port", "{{port}}",
-               "--shared-browser-context", "--user-data-dir", "{{profileDir}}",
-               "--output-dir", "{{outputDir}}", "--file-paths", "absolute"],
-      "port": 0,
-      "path": "/mcp"
-    },
-    "profileDir": "data/browser-profile"
-  }
-  ```
+**The business tree.** A *workspace* is one business or one part of it, such as a division,
+product line, region or team. Workspaces form a tree. BIF can suggest the parts of your business
+for you to accept or reject. Each part can use what its own tree knows, never another company's
+data. A parent part sees patterns that repeat across its children.
 
-  Placeholders: `{{profileDir}}` = absolute `browser.profileDir`, `{{port}}` = `port` (0 picks a free
-  port), `{{outputDir}}` = a folder under the OS temp dir where screenshots land (agents can pass
-  those files to `save_artifact`). The server runs in its own process group, logs to
-  `data/browser/shared-server.log`, is restarted if it dies, and is stopped when the app stops (a
-  leftover from a crash is killed at the next start). It opens a visible Chrome window, which is
-  also where you log the research profile into a site by hand when an agent asks you to.
-- **MCP backend, per-run servers** (`"mode": "per_run"`): each browser-using run spawns
-  `browser.mcpServers` itself (stdio), with `{{profileDir}}` substituted as above. A profile can be
-  open in only one browser at a time, so this mode caps `limits.maxBrowserRuns` at 1 (with a startup
-  warning). Always use `{{profileDir}}` (or an absolute path): CLIs run in a per-run working
-  directory, so a relative path would create a fresh, empty profile for every run.
-- With backend `mcp` and no browser configured (no `shared` in shared mode, empty `mcpServers` in
-  per-run mode) the app warns at startup and `propose_tasks` rejects tasks with `needs_browser`.
-- **T3 backend** (`"backend": "t3"`): no browser MCP server is passed; agents are told to use the
-  T3 Code browser tools. This only works when the agent CLIs run inside T3 Code with those tools
-  available. The harness cannot choose or check the browser profile in this mode: agents use
-  whatever profile T3 Code's browser is running with. The same rule still applies, so it must be a
-  **dedicated research profile, never your everyday one**. Before using this backend:
-  - run the app from a T3 Code project or environment set aside for research, whose browser is
-    signed into nothing personal (no personal email, banking, password manager or SSO sessions);
-  - check by opening the T3 Code browser and confirming it has none of your own sessions or saved
-    passwords;
-  - if you cannot guarantee that, use the MCP backend with `{{profileDir}}`, where the harness
-    enforces the separate profile itself.
+**Research and review.** Every piece of work is a *task* with a brief. A *reviewer*, a separate
+agent that did not do the work, checks it. A task that passes is *verified*. One that runs out of
+rounds is *unverified* and clearly marked. When a task cannot pass, BIF may ask you up to three
+multiple-choice questions and then try again with your answers.
 
-`limits.maxBrowserRuns` (default 2) caps concurrent browser-using runs.
+**Evidence.** Every finding must point to stored evidence, and quotes are checked against the
+stored text. Facts are kept over time: a later run confirms a fact, replaces it with a newer
+version ("price rose from $10 to $12") or retracts it. Nothing is deleted, so you can see a fact's
+history.
 
-### Agent CLI isolation
+**Personas and the persona panel.** A *persona* is a simulated member of an audience, built from
+evidence. In the *persona panel*, each persona reads each recommendation on its own, without
+seeing the others, and the reactions are shown side by side. The panel is a way to find objections
+and things to check with real people. It is not a survey, it produces no numbers about real
+customers, and by default it does not change priority.
 
-- **Codex** runs with its own `CODEX_HOME` (`data/cli-state/codex-home`): a generated, empty
-  `config.toml` and `auth.json` symlinked to yours (`$CODEX_HOME` or `~/.codex`), so your Codex MCP
-  servers, plugins and hooks are not loaded; only `bif` (and `browser`) are passed with `-c`. Sign
-  in with `codex login` as usual. The link is a symlink so a token refresh made during a run lands in
-  your own file; it is re-created before every run if missing or replaced.
-- **OpenCode** reads only the generated `.bif-opencode.json` (`OPENCODE_CONFIG`), with project
-  configs disabled and the global config dir redirected to `data/cli-state/opencode-config`
-  (credentials stay in OpenCode's data dir, so logins keep working).
-- **Claude Code** gets `--strict-mcp-config` (only `bif` and `browser`), but still loads your global
-  hooks and plugins (see Known limitations).
-- **Run tokens** (the per-run MCP credential) never go on a command line: Claude Code and OpenCode
-  read them from a generated config file in the run directory, Codex from the `BIF_MCP_TOKEN`
-  environment variable (sent as a bearer header to `/mcp`).
-- `save_artifact` with `file_path` only accepts files inside the run's working directory or the OS
-  temp dir (outside the data dir), after resolving symlinks.
+**Stakeholders.** A *stakeholder* persona stands for someone whose approval or data a change
+depends on: leaders, the board, investors, partner teams, or leaders at a competitor. Before BIF
+shows what its research found about your own stakeholders, it asks you a few fixed questions about
+each, so your answers are your own. You can record when someone leaves, moves or is promoted.
 
-## Running
+**The review council.** For the most important kinds of work you can ask for a *council*: several
+reviewers, each on its own AI model and each looking for one kind of problem, such as weak
+evidence or faulty reasoning. Their verdicts are combined by fixed rules, not by another AI. It
+costs more, so it is off until you choose where to use it.
 
-| Command | What it does |
+**Learning from feedback.** Your ratings and corrections are all recorded. When the same problem
+keeps coming back, BIF proposes a rule for the agents' instructions. Once a week a review of the
+week (the *retro*) proposes further changes, including changes to personas that you keep
+disagreeing with. Nothing changes until you accept it. BIF can also have a different model re-check
+past reviews, and run two versions of a task side by side to compare them.
+
+**A picture of you.** BIF keeps a short description of what you care about, learned from your
+actions. You decide every line of it, and it only reaches the agents that plan and present work,
+never the ones that check it.
+
+## Where you work in the app
+
+| Page | What you do there |
 |---|---|
-| `npm start` | API + harness MCP + built web app on `http://127.0.0.1:4317` |
-| `npm run dev` | same, restarting on source changes |
-| `npm run web` | Vite dev server for the web app (proxies `/api` and `/mcp` to port 4317); run alongside `npm start` |
-| `npm run build:web` | builds `web/dist`, which `npm start` serves at `/` |
-| `npm test` / `npm run typecheck` | tests (vitest) and type checks |
-| `npm run smoke` | real-CLI smoke test (spends a little real model usage) |
+| Business map | see the parts of the business and accept or reject suggested parts |
+| Interview | describe the business and upload files |
+| Research | start research, follow tasks and see what changed since the last run |
+| Findings & Evidence | read findings with their evidence; choose which ones recommendations may use |
+| Competitors, Flows | compare competitors and the rankings of their journeys |
+| Audience & Personas, Stakeholders | read the personas; answer the stakeholder questions |
+| Strategy | read recommendations, their priority and the simulated reactions; change the weights |
+| Review queue, Decision log | rate what the agents produced; see every decision and your feedback |
+| Lessons, You | accept or reject what BIF proposes to learn |
+| Usage & prompts, Metrics | see cost, quality trends and the instructions each agent ran with |
+| Schedule, Knowledge, Audits & experiments | repeat research on a schedule; search everything BIF knows; re-check reviews and compare versions |
 
-Environment overrides for `npm start`: `BIF_CONFIG` (config path), `BIF_DATA_DIR`, `PORT`.
+A "Waiting on you" banner appears when an agent needs an approval, a login or an answer.
 
-The server binds to 127.0.0.1 only and has no authentication. While it runs, it resumes interrupted
-work on start (an interrupted pipeline continues its current and remaining phases, and a scheduled one
-then records "what changed") and runs scheduled jobs (missed runs execute once on the next start).
+## Words used in this README
 
-## Concepts
-
-- **Workspaces and the business map.** A workspace is one business or one part of it. Its *scope* is
-  `company`, `division` or `slice` (a product line, region, team or internal platform), with
-  *audiences* `external` (customers), `internal` (employees) or both. Workspaces form a tree: the
-  optional `mapping` phase proposes child units, which you accept, edit or reject. A node can read and
-  cite anything in its own tree (tagged with the source), never another tree. Parents roll up their
-  children's symptoms and recommendations and flag patterns seen in two or more children as possible
-  company-wide issues.
-- **Interview.** A resumable chat with an interviewer agent that fills the profile (basics, revenue
-  model, customers, what is going well, what is going badly) and records symptoms with
-  severity/trend/confidence. Uploads (CSV, PDFs, decks) are optional evidence.
-- **Phases.** `mapping` (optional) → `market_research` → `competitor_discovery` → `deep_dives` →
-  `stakeholders` → `flow_ranking` → `synthesis` → `persona_panel` → `scoring`. Each research phase is a fresh orchestrator run that
-  proposes tasks; the program validates them against the config limits and runs the workers. A task
-  without a `model` uses the configured default for its type (`roles.workers.<type>`, else
-  `roles.workers.default`; recommendation synthesis uses `roles.synthesizer`); explicit overrides are
-  recorded as such in the task-proposal decision.
-- **Review loop.** Every worker result goes to a new reviewer run with minimal context, which scores
-  it 0–10 and lists issues (`blocking | substantive | nit | scope_expansion`). Score ≥ `passThreshold`
-  (default 8) → *verified*. Otherwise the worker fixes or pushes back (pushback on nits and scope
-  expansion is expected and logged) and resubmits, up to `maxRounds` (default 3); then it stays
-  *unverified* and is flagged with that status. The task's findings, recommendations, personas,
-  competitors and symptom hypotheses take its final status (*verified*, *unverified* or *failed*);
-  outputs from an earlier round that the final submitted revision neither re-saved nor cited by id
-  are *superseded* and never used (e.g. a "$10" finding corrected to "$20", or a claim dropped
-  without replacement). The reviewer sees the content of the submitted outputs and their evidence
-  ids. Only verified findings feed recommendation synthesis (from any node of the same
-  business tree); on the Findings page you can include an unverified finding (or exclude a verified
-  one) with the "Use in recommendations" toggle. Likewise only verified recommendations and personas
-  go to the persona panel ("Use in persona panel" toggle on the Strategy and Personas pages);
-  Strategy flags unverified recommendations with the last reviewer's objections and hides failed
-  ones unless you include them ("Show failed" lists them). The Competitors page, the review queue and
-  the interviewer's drill-down use only verified (or included) competitors and hypotheses.
-- **Living facts.** A finding is a fact with a stable identity across runs (a lineage of versions).
-  A later run *confirms* it, *replaces* it with a new version (price $10 → $12) or *retracts* it,
-  instead of saving a duplicate; nothing is deleted. `save_finding` checks the store first: an
-  identical current claim about the same entity (see Entities below) is confirmed automatically
-  (citing an artifact saved in the task), and similar current facts of the business tree about that
-  entity are returned without saving until the agent says `relation: "new"`, `{confirms}` or
-  `{replaces}`; `confirm_finding` / `retract_finding` do the same explicitly. A confirmation or
-  retraction must cite an artifact the task itself saved with `save_artifact` (every save is
-  recorded, even of bytes already stored). These observations apply only when the task is verified
-  (an unverified replacement stays an "unverified update" until you include it); a new version keeps
-  the entity of the one it replaces. Quotes in `evidence_refs` are checked against the artifact's
-  text — extracted on the spot if it was still waiting in the extraction queue. Only the current version of a fact feeds
-  synthesis; the review queue lists a fact's live version, so a new version is rated again. The
-  reviewer sees the prior claim, the facts a task confirms or retracts, and the verified quotes.
-- **Review history and disputes.** Every review round's issues are kept (`review_issues`), with
-  stable issue ids across rounds when the reviewer repeats an issue, and each issue's fate: `open`,
-  `fixed`, `pushed_back`, `upheld` (reasserted after a pushback) or `withdrawn` (dropped after a
-  pushback). The next reviewer sees the issues the worker pushed back on, with the worker's reason,
-  and must accept or reassert each; after `loop.maxReasserts` reasserts the worker is told to fix it.
-- **Review council.** A task type can be reviewed by a council instead of one reviewer: several
-  reviewer runs started in parallel, each alone, each through one lens, on the CLIs and models you
-  name. Their reviews are merged into one review per round by fixed rules in code; no model merges,
-  ranks or rules. It is opt-in per task type: with no `council` block, and for every task type you do
-  not name under `council.stages`, the review loop above is exactly what it was.
-
-  *Where it is worth its cost.* A council of N members costs N reviewer runs per round, each with its
-  own tokens, logs and budget use. So seat one where a wrong pass is expensive and the tasks are few:
-  `synthesize_recommendations` (few tasks; its recommendations and their scores are what you act on)
-  and `symptom_hypotheses` (causal claims that steer later research). One reviewer is enough for bulk
-  evidence gathering, which has many tasks per run and is sampled by the reviewer audit. The persona
-  panel, stakeholder reads, learning runs, the combine run and escalation are not review steps and
-  never get a council.
-
-  *Configuration.*
-
-  ```jsonc
-  "council": {
-    "rounds": 3,              // most review rounds of a council stage (default 3)
-    "passScore": 9,           // every blocking member must score this or more (default 9)
-    "blockOn": "any",         // any | majority | all: blocking members needed to uphold an issue (default any)
-    "onUnavailable": "fail",  // fail | report: what a missing blocking member does (default fail)
-    "members": [
-      { "name": "evidence",  "provider": "claude", "model": "opus",        "lens": "evidence" },
-      { "name": "second",    "provider": "codex",  "model": "gpt-6.1-sol", "lens": "evidence", "effort": "high" },
-      { "name": "reasoning", "provider": "claude", "model": "sonnet",      "lens": "reasoning" },
-      { "name": "redo",      "provider": "claude", "model": "opus",        "lens": "rewrite", "blocking": false }
-    ],
-    "stages": {
-      "synthesize_recommendations": { "members": ["evidence", "second", "reasoning"], "rounds": 4 },
-      "symptom_hypotheses": {}
-    }
-  }
-  ```
-
-  - `members[].name`: unique; stages seat members by it and the council table shows it.
-  - `members[].provider`: `claude`, `codex` or `opencode` (`cli` is accepted as another spelling; give
-    one of the two). Any other name is a configuration error that lists these three.
-  - `members[].model`: a model of that provider.
-  - `members[].lens`: exactly one of `evidence` (each claim against the copy it cites), `brief` (each
-    acceptance criterion and each thing the brief asks), `reasoning` (the step from evidence to
-    conclusion), `privacy` (upload-derived or interview text where it must not be, data of another
-    business tree, stored secrets), `value` (useless findings: ones whose removal would change no
-    recommendation, hypothesis or answer) and `rewrite` (a better way to do the same task). Every
-    member also reports a useless finding or a rewrite when it sees one.
-  - `members[].effort` (optional): the reasoning effort in the CLI's own words (e.g. `high`), passed
-    as Claude Code `--effort`, Codex `-c model_reasoning_effort=` or OpenCode `--variant`.
-  - `members[].blocking` (default `true`): a non-blocking member's score is never counted, its issues
-    alone uphold nothing, and a round does not wait for it: it is started after the blocking members,
-    and one still running (or not started yet) when they have ended is cancelled and shown as "not
-    waited for".
-  - `rounds`, `passScore`: for a council stage they replace `loop.maxRounds` and `loop.passThreshold`
-    (and their per-task-type overrides).
-  - `blockOn`: an issue is upheld when one blocking member raised it (`any`), more than half of the
-    blocking members with a score (`majority`), or all of them (`all`). Other issues are shown to the
-    worker as advice.
-  - `onUnavailable`: see below.
-  - `stages`: the task types a council reviews. `stages.<type>.members` seats some members by name
-    (omitted: the whole council); `stages.<type>.rounds` and `.passScore` override the council's. A
-    stage must seat at least one blocking member.
-
-  *A round.* Each member is started with what the single reviewer is started with (same tools, same
-  review slice) plus the council rules and its lens, and never sees another member's review. The
-  rules every member is told: nothing under review is precious (it may propose discarding the
-  deliverable and redoing it another way, within the same task); no nits (style and preference never
-  block and never lower a score); no scope creep (a real problem outside the brief is a follow-up);
-  evidence or nothing (an issue that names neither an output nor an evidence copy is a question); a
-  score below the pass score needs a blocking or substantive issue. Blocking members are started
-  first, so a non-blocking member never holds a worker slot one of them waits for. Only blocking
-  members decide: what a non-blocking member raises is attached to the issue blocking members
-  raised about the same thing (its name, its evidence, its words) or shown as advice, and never
-  changes whether an issue is upheld or whether the round passes. The merge then:
-  turns each member's issue that names neither an output nor evidence into that member's question,
-  before anything is joined (such an issue is no vote for what another member showed);
-  joins issues of different members about the same thing, keeping every member's name and wording
-  (the text the worker reads is the first wording, then "Also raised by <name>: ..." for each other
-  one that is not a near-repeat; the same
-  thing: both reuse the id of an earlier issue they were shown, or they name a common output in
-  loosely similar words, or their words alone are close); drops nits and scope issues (scope issues
-  are kept as follow-ups); takes off each issue the ids that are not outputs of the task or not in
-  its review slice (an issue left with neither is a question too); lets an
-  issue the worker pushed back on block again only when a blocking member that raises it again says
-  something new (the earlier words repeated do not block);
-  from the second review of a deliverable treats a substantive issue no member raised before as
-  advice, so the task does not grow with every round (a new blocking issue still blocks; the first
-  review of work that was done again after an escalation is a first review, whatever its round
-  number); applies `blockOn`; and lets an upheld
-  rewrite replace every other issue about the outputs it discards. A score below the pass score
-  stands only when its member raised an upheld issue. The round passes when every counted score is at
-  or above the pass score and no upheld issue stands; otherwise the worker answers the upheld issues
-  and is shown the advice and the questions. At the round limit the task ends *unverified* and goes
-  to you through the escalation, like any other.
-
-  *When a member is unavailable.* A member is unavailable when its provider is disabled, its model
-  is not in that provider's `models`, its CLI cannot be started, or its run ends without a valid
-  review. This is never a configuration error, so one configuration works on machines with different
-  CLIs: the server prints a warning at start-up naming the member, and the council table shows it.
-  No other model ever takes a member's place. With `onUnavailable: "fail"`, a missing blocking member
-  ends the task *unverified*, with the member, provider, model and cause as the reason, and no
-  revision is made on a partial council: before any member runs when the configuration cannot start
-  it, and once the round's blocking members have ended when its run fails or gives no review (the
-  other members' reviews are kept on the round's record). With `"report"` the round goes on without it; with no
-  blocking member left it fails all the same. A non-blocking member never ends a task: it is shown
-  as unavailable and the round runs with the others, under both settings. A round that failed
-  because a member was unavailable is treated as "no review took place": its score is 0, nothing is
-  put to the worker, and the last review shown on the task's results says that the round did not
-  count. Known limit:
-  when you then re-run the task from the escalation, the work is redone, not only reviewed again.
-
-  *What you see.* Where a result shows its last review (Findings, Strategy, Personas, Competitors),
-  a council review says so and "Show the council" opens the table: members down, rounds across,
-  each cell `7/10`, "no score", "unavailable" or "not waited for"; below it the open issues with who
-  raised each, the advice, the questions and the follow-ups. On the Research page every task a
-  council reviewed has "Show the council" in its row, also a task that passed, and in the list of
-  review rounds a member's own review is labelled "council member: <name> (<lens>)". The table is
-  served by `GET /api/workspaces/:id/tasks/:taskId/council` (a task of another business tree answers
-  like an unknown one; private own-stakeholder research is withheld there as everywhere). Settings
-  lists the configured council read-only, each member available or not and why (`GET /api/council`:
-  the configuration only, nothing of any task). Everything else reads a
-  council round as one review: the issue history, outcomes, the review queue ("Council review
-  score"; a member's own review stays ratable, marked with its name), experiments and the export.
-  The reviewer audit skips tasks whose final review was a council. Runs, usage and cost stay per
-  member run.
-
-  For BIF's own development the same idea is a skill, `.claude/skills/council/SKILL.md`: members
-  review a feature branch against its plan and spec. Both are adapted from the council skill of
-  tstack (https://github.com/t3dotgg/tstack/blob/main/skills/council/SKILL.md). Design:
-  [docs/superpowers/specs/2026-11-16-review-council-design.md](docs/superpowers/specs/2026-11-16-review-council-design.md).
-- **Decision outcomes.** Agent decisions get labels after the fact (`decision_outcomes`): `confirmed`
-  (task verified), `over-scoped` / `missed-evidence` / `weak-review` (task unverified),
-  `run-failed`, `missed-evidence` (output superseded by a later round), `stale` (a scheduled
-  re-run saved a new fact on the same subject with another claim, or a screenshot the finding cites
-  changed, or the fact passed its TTL without a re-check), `user-rejected` (you excluded an output — finding,
-  recommendation, persona, competitor or symptom hypothesis — or rejected a unit proposal; excluding
-  a verified output also marks the passing review `weak-review`), `confirmed` (you included an output
-  the review did not verify), `reviewer-false-positive` (an issue dropped after a pushback) and
-  `worker-miss` (an upheld issue the worker then fixed); for fact versions, `confirmed` (a verified
-  confirmation), `changed` (replaced by a new version) and `retracted` (by a run, or `user-rejected`
-  when you retract it). Your actions reach outcomes from one place: the feedback event
-  each action records (see Feedback log) — so each action writes its outcome once, under your
-  `user.id`. An outcome can also judge a non-decision subject (e.g. a fact version), and each one is
-  written once per subject, outcome and source event. The Decision log shows the counts per role,
-  task type and prompt version (this workspace or the whole business tree).
-- **Entities and relations (knowledge store).** Every finding, competitor, persona, symptom and
-  symptom hypothesis is filed under a named *entity* of its business tree (company, competitor,
-  product, persona, topic, cause, …), matched by name or alias; separate trees never share one. A
-  finding without an explicit `entity` is filed under the competitor / persona / company entity its
-  subject names, else a unit's company name, else a topic. `save_artifact` can name an `entity` too
-  (an artifact with a `flow` then links the entity to that flow). An entity is only created when a
-  record is saved under it — never by a duplicate check or a confirmation. A near-duplicate name is saved anyway and
-  shows up as a *merge suggestion*; merging or renaming an entity is your action (feedback events
-  `entity_merge` / `entity_rename`) and keeps old names resolvable as aliases. Typed edges
-  (`competes_with`, `offers`, `has_flow`, `causes`, …) each name the record that asserts them and
-  count only while that record is usable. An entity name that only uploads mention is treated like
-  upload text (the same export and exposure rules), and keeps that status as an alias after a merge.
-- **Evidence rule.** Every finding cites at least one stored artifact of its business: screenshots
-  per flow step, archived pages, documents or uploads. A confirmation or retraction cites an artifact
-  its own task saved (see Living facts); a quote in `evidence_refs` must occur in the artifact's text;
-  screenshots need a description (see Evidence text). Recommendations cite only usable findings (the
-  current, verified or included version; a replaced, retracted or excluded fact is refused), so the UI
-  can trace recommendation → findings → artifacts.
-- **Evidence text (knowledge store).** Every save of an artifact (and every upload) is recorded as a
-  capture (who, which run and task, URL, flow step), even when the bytes are identical to an earlier
-  save. Text is extracted in-process from HTML, PDF, docx, pptx, xlsx, csv, markdown, JSON and text
-  (small files at once, larger ones on a background queue that resumes after a restart), with
-  identity passwords redacted, and split into searchable passages. A document with the same text as
-  an earlier one of the business tree points at it instead of being indexed twice. Screenshots and
-  images saved by agents need a `description` (≥ `knowledge.captions.minChars`, default 20
-  characters); images without one (e.g. uploads) can be described later with `describe_artifact`.
-- **Scans and images: two-pass OCR (knowledge store).** A PDF page with a usable text layer is
-  settled by rules, with no model call. Pages without one, and images, are read in the background
-  by a small model (Haiku, through your Claude CLI, with no tools and no access to anything but the
-  file). The transcription is appended as passages marked `(ocr)`, so it is searchable and quotable
-  like other evidence text and keeps the upload flag of its artifact. Each model call is logged
-  with its tokens and cost (`ocr_runs`, shown in the knowledge metrics). This sends those files to
-  the model provider; set `knowledge.ocr.enabled: false` (or `images: "none"`) to keep them local.
-  It runs only when the `claude` provider is enabled.
-- **Knowledge read tools (knowledge store).** Agents read the store through `search` (facts,
-  document passages, artifacts, entity names, records; FTS ranking, labelled hits with ids, no
-  bodies), `get_card` (a card computed from reviewed records for an entity or a node), `expand`
-  (one id in detail), `read_artifact` (outline, extracted text, image, or the raw text file — paged)
-  and `list_changes` (new, replaced, retracted and newly stale facts, changed cited pages);
-  `read_workspace` returns a node's card and counts. A query sees its node, the node's sub-units and
-  what it inherits from its parents; the rest of the business only with `scope: "tree"`; other
-  businesses never (their ids answer exactly like unknown ids). A read by id returns the named item
-  from any part of the business, labelled with its source, while what it lists around the item (card
-  facts, relations, neighbours) follows the same node scope unless `scope: "tree"` is passed. Every
-  response fits a token budget per role (`knowledge.budgets`, capped by `hardMaxTokens`) and continues
-  with a `cursor` that never skips anything: a text page that ends mid-passage says `cut: true` and the
-  next page continues from that character. A list item that does not fit the rest of a page starts the
-  next page; only one too big for a whole page is shortened (`cut: true`, dropped list entries counted
-  in `omitted_entries`) and carries `full`, the exact call that returns it whole (its own `expand`, its
-  passage, that line of `get_card` / `read_workspace`, or the same request at it with a larger
-  `max_tokens`, which may go up to the hard maximum). A value larger than the hard maximum is served
-  cut with `too_large` and its size. A fact's quotes are items of their own; a node card lists one line
-  per profile key; `expand` of a node id returns its card. Evidence text is redacted and served inside `<<<EVIDENCE … >>>` fences as
-  untrusted data. Reviewers (and
-  escalation agents) can only `expand` / `read_artifact` the ids of their task's review slice.
-  Synthesizer and interviewer see usable facts only. Every read — and the store text a prompt carries,
-  logged before the run starts — is recorded in `retrieval_events`; a run shown upload-derived text
-  counts as upload-exposed.
-  Nothing inside a business is confidential from another part of it: node scope is a relevance
-  default, a node-scoped `search` says how many more matches exist elsewhere in the business (counts
-  only), and around a symptom or cause entity the `causes` / `addresses` relations of the whole
-  business are listed, each labelled with the part it comes from.
-- **Knowledge in prompts and recurring runs (knowledge store).** Prompts no longer list every finding:
-  each role gets a fixed-size briefing built from cards (orchestrator 1 500 tokens, worker 1 500,
-  synthesizer 4 000; `knowledge.budgets`), which leaves items out by naming their ids, then by counts, and
-  is logged as a read before the run starts. The orchestrator sees the node card, an entity index,
-  changes since the last run of the schedule and the facts due for re-check (stale, or reaching their
-  TTL before the schedule's next run), and may give each task `recheck_fact_ids`, which the worker's
-  prompt shows with their claims; recurring runs therefore confirm, replace or retract facts instead of
-  saving them again. At company level the orchestrator also sees the causal edges that cross parts of
-  the business, from the same rule the cards use. Uploads appear in prompts as metadata only (id, type,
-  size, date). The scheduled "What changed" comes from the run's applied fact changes (new, replaced
-  old → new, retracted, confirmed count) plus the screenshot comparison, with text matching only for
-  facts saved as `new` (see Scheduler).
-- **Knowledge tracking (knowledge store).** When a run saves something citing ids it was shown by a
-  read, those ids are marked used (`retrieval_uses`); hit rate = reads with a used result. Living facts
-  write decision outcomes once each (`confirmed`, `changed`, `retracted`, `stale`, `user-rejected`, and
-  `duplicate-saved` when you merge away a fact the agent saved as `new` after the duplicate check showed it
-  a match, or retract it as a duplicate of another fact); the scheduled "what changed" records them once,
-  through one path (see Scheduler). Blocked knowledge reads (outside a reviewer's slice, or another
-  business's ids) are policy events. The export adds retrieval events and fact observations, under the
-  upload rules (see Export and uploads).
-  `GET /api/workspaces/:id/knowledge/metrics` (store size, freshness, hit and zero-result rates, retrieved /
-  used tokens per role, task type, prompt version and model, share of input tokens that was retrieved
-  knowledge) and `GET /api/workspaces/:id/knowledge/signals` (learning signals per role).
-- **Knowledge view (knowledge store).** The *Knowledge* tab searches the store as you ("this part of
-  the business" / "whole business"), lists entities and opens their cards, a fact's history and
-  evidence (shown as plain text, never rendered), merge suggestions, stale facts, conflicts and
-  unverified updates, and recent changes. Upload-derived items are marked with why the export leaves
-  them out. Retracting a fact (optionally as a duplicate of another fact of the same business),
-  applying an unverified update, changing where a fact applies, merging or renaming entities and
-  rejecting a suggestion are your actions (feedback events, actor `user.id`). The storage report shows, per part and age, the stored files no record references;
-  nothing is removed automatically. Pruning is your explicit action on files you pick, at least
-  `knowledge.retention.pruneMinAgeDays` (default 90) days old: it is refused as a whole if any file
-  is still cited (by any fact version, observation, record, the latest capture of a flow step, an
-  upload list) and removes only the file — the description and extracted text stay, and capturing
-  the same bytes again restores it. Each prune is logged (a decision and an `artifact_prune` feedback
-  event).
-- **Flows and flow ranking.** BIF records how each company in the picture, your own included, lets
-  people get a job done (sign up, sign in, recover an account, pay, cancel, invite a teammate, get
-  support) and ranks the ways of doing the same job against each other.
-  - *Flow records.* In `deep_dives` a worker lists the flows a subject offers, gives each one a type
-    from the business's catalog (sign-up, sign-in, account recovery, onboarding, pricing and plan
-    choice, checkout, cancel or downgrade, invite a teammate, get support; a new type is *proposed*
-    and takes part in rankings once you accept it or merge it into another), walks it one screen at a
-    time and saves it with `save_flow`: the goal, whether it was reached (or where and why the walk
-    stopped: payment, phone, identity check, captcha, …) and, per step, what was done, what was seen,
-    what was asked for, the page address and the screenshot. A subject can have several *variants*
-    of one type (sign-up by email, by single sign-on); the one it puts first is the *primary*, and
-    only primaries are ranked unless you ask for every variant. A flow is a living record, like a
-    fact: a re-walk with the same steps confirms it at once, changed steps are reported to the worker,
-    which saves a new version that becomes current when its task is verified. A flow that stopped
-    before its goal is kept, ranked on the steps walked and marked *partial*.
-  - *Checklists.* A general checklist applies to every flow (dead ends, errors that say how to fix
-    them, asking only for what the next step needs, deceptive patterns, keyboard and phone-width use,
-    …). Sign-up, sign-in, account recovery and checkout have their own, built from published guidance
-    (NIST SP 800-63B, WCAG 2.2, web.dev, GOV.UK, Baymard, NN/g) and active from the first run. Workers
-    answer the checks with `save_flow_checks`. An *objective* check counts in the checklist score
-    (the weighted share of applicable checks passed); an *audience-dependent* one is only recorded and
-    shown to the personas. An agent may propose a checklist for a new type; it waits for you.
-  - *Reviews.* A `flow_reviews` task collects public feedback (app stores, review sites, forums,
-    support boards) with `save_review_mentions`: each quote checked against its stored page, stored
-    once, dated, with a polarity and, when clear, the flow type and check it speaks to. Reviews answer
-    what a walkthrough cannot see ("does the code arrive?"): at least `minMentionsForCheck` recent,
-    confidently attributed complaints make the check *reported problem* (or *disputed* when they
-    contradict a walkthrough's pass); fewer leave it at *no signal*, which neither helps nor hurts the
-    score. Thin review coverage is normal and reads as "no signal", never as "no problems".
-  - *The ranking rule.* The `flow_ranking` phase (a runner phase after `deep_dives`) ranks each node's
-    flows per flow type. Existing schedules were updated to include the ranking step: once, on
-    upgrade, `flow_ranking` was added right after `deep_dives` in every schedule that has
-    `deep_dives` and did not have it. Your overrides come first: "this one is better than that one" is a hard rule
-    the order always keeps. Below them, `rank score = coverage × checklist score + (1 − coverage) ×
-    persona score`. Coverage (0–1, per checklist: sign-in 0.7, sign-up, checkout and account recovery
-    0.6, the general checklist alone 0.3) says how much of the job the checklist can settle, so the
-    more a flow type is a matter of taste, the more the personas count. Scores within `tieMargin` are
-    ordered by the personas' direct head-to-head; a flow alone in its type shows "no comparison".
-    Opening a position shows both scores, the coverage, each check with its evidence, the verdicts, the
-    review counts and your rulings.
-  - *Persona head-to-heads, simulated.* The node's audience personas judge in two stages. First each
-    persona reads all flows of a type in one sitting (overlapping groups when there are many) and gives
-    a verdict on every pair: winner or tie, strength, confidence and a short reason. Then single pairs
-    get a focused second look when the persona was unsure, the personas split, the verdicts form a
-    loop, the two flows are close or decide a top-three place, a verdict strongly contradicts the
-    checklist, or you disagreed with it (at most `maxFocusedComparisons` per round). Personas see the
-    steps, the audience-dependent answers, the notable note and a review digest, all fenced as
-    untrusted text, never the checklist score. Verdicts are labelled simulated and kept until either
-    flow or the persona has a new version, so a recurring round only judges new or stale pairs.
-  - *Your reactions, with reasons.* The **Flows** page shows flow types down the side and the chosen
-    type's ranking (rank, checklist, personas, reviews); open a flow for its screenshot strip, checks,
-    reviews and verdicts, or compare two side by side. You can agree or disagree with a position or a
-    verdict, override a pair, correct a check, accept, edit, merge or reject a proposed flow type,
-    accept (with your coverage) or reject a proposed checklist, edit a checklist (the built-in ones
-    too: its coverage, a check's weight or question, or remove a check; saving makes a new version
-    and says how many flows need a re-walk; adding checks is not offered yet), and correct a review's
-    attribution, each with an optional reason. Each is a feedback
-    event naming exactly what it reacts to (for a verdict also the persona, its version, the stage and
-    both flow versions); agreement is kept like disagreement. A ruling follows its two flows to new
-    versions and then asks whether it still holds. "What changed" lists new flows, new versions,
-    confirmations and rank moves. Flows stay inside their business tree; upload-derived flows follow
-    the export rules below, and persona verdicts are never exported as training data. API under
-    `/api/workspaces/:id/flows` (`types`, `rankings/:flowTypeId`, `checklists`, `compare`, `:flowId`,
-    and the reaction, override, decision and `checklists/:checklistId/edit` routes).
-  - *Not built yet.* Personas change only through persona learning in the weekly retro (below), never
-    at the moment you react; stakeholder personas (below) do not judge flows, and only web flows are
-    walked, not mobile apps.
-- **Action policy.** Agents may browse, sign up with disposable identities and walk checkout up to
-  payment. Payment details, demo requests and contacting real people need your approval (the
-  "Waiting on you" banner). Purchases are never made.
-- **Escalations.** When a task ends *unverified* or *failed*, an `escalation` agent may ask you up to
-  three multiple-choice questions about it (one option recommended, preselected) in the "Waiting on
-  you" banner. Once every question of that escalation is answered (not all dismissed), the task runs
-  again through the review loop, with a fresh round budget, your answers and a summary of what its
-  previous attempt did and why it failed review. At most `escalation.maxPerTask` escalations per task.
-- **Policy history.** Every approval request, grant and denial and every blocked attempt (a tool call
-  outside the role's scope, or an approval request for a *never* action) is recorded. Worker,
-  synthesizer and orchestrator prompts list that role's last five denials in the same business tree,
-  so agents stop retrying refused actions. `GET /api/workspaces/:id/policy-events`.
-- **Event history.** Bus events that used to exist only on the live SSE stream (tool-call validation
-  errors, run and task status changes, request traffic) are kept in `bus_events` for
-  `telemetry.busEventRetentionDays` (`GET /api/workspaces/:id/bus-events`). With
-  `telemetry.otlp.enabled` they are also sent as OTLP/HTTP JSON logs to `<endpoint>/v1/logs`
-  (built-in `fetch`, no SDK dependency; ids, types and statuses only, no agent or user text).
-- **Personas are simulated.** Persona profiles are researched with evidence, compiled into persona
-  prompts, and every recommendation is put to each persona. Their feedback is labelled *simulated*,
-  shown in its own column, and has weight 0 in priority unless you change `scoring.personaWeight`.
-- **Persona panel.** In the `persona_panel` phase every usable recommendation is read by every usable
-  persona, each as its own run with a fresh context: the persona's profile, the recommendation, and
-  nothing else. No run plays two personas, and no persona sees another's reaction. The reactions are
-  shown side by side and are never merged into one.
-
-  *What it is, and is not.* A panel produces hypotheses: reasons a recommendation might land badly
-  or well, to check with real people. It is not a sample, not a measurement and not a verification
-  step.
-
-  | A panel is for | A panel is never for |
-  |---|---|
-  | Finding objections before real people do | Replacing interviews or recruitment |
-  | Showing where audiences would disagree | Any number about real people: shares, sizes, "most customers" |
-  | Red-teaming a recommendation | Saying which segment prefers what, as a finding |
-  | A list of things to go and check | Validating an idea, or any final decision |
-
-  It differs from the review council: a council verifies work, and its members' reviews are merged
-  into one verdict that can send the work back. A panel simulates reactions. They are never merged,
-  never pass or fail anything, and never block.
-
-  *Configuration.* With no `personaPanel` block the panel is what it was: every persona on
-  `roles.persona`, every recommendation read again on every run, and the feedback of before. With the
-  block:
-
-  ```jsonc
-  "personaPanel": {
-    "rounds": 3,                // most reads of one recommendation by one persona (default 3)
-    "baseline": true,           // one run with no persona per recommendation (default true)
-    "onUnavailable": "report",  // report | fail: what a persona that cannot run does (default report)
-    "seats": [                  // personas take the seats in turn (default: one seat with roles.persona)
-      { "provider": "claude", "model": "sonnet" },
-      { "provider": "codex", "model": "gpt-6.1-sol", "effort": "medium" }
-    ],
-    "personas": { "smb-finance-lead": { "seat": 0 } }   // optional: pin a persona to a seat by its slug
-  }
-  ```
-
-  - `seats`: the CLIs and models the personas run on. `provider` is one of BIF's CLIs (`cli` is
-    accepted as another spelling), `model` one of that provider's models, and `effort` is optional: it
-    is passed where the CLI has the setting and is a configuration error where it has none, as for a
-    council member. The personas of a node, sorted by slug, take the seats in turn, so the assignment
-    is the same on every run and for every recommendation. Spread the panel over more than one model
-    where you can: personas on one model share its blind spots. A persona has the same seat when it
-    judges flows, whatever `flows.model` says.
-  - `personas`: pins a persona to a seat (`seat` is the place in `seats`, from 0). A pin moves nobody
-    else. A pin to a seat that does not exist is a configuration error; a pin for a slug no persona
-    has is ignored, because personas come and go.
-  - `rounds`: a persona reads a recommendation only when it has not read its text (title and summary)
-    as it is now. Reading unchanged work again is not a round, so a re-run of the phase starts no run
-    for it. When the text changed, the next round is a fresh run whose prompt shows the text that
-    persona read before and the text as it stands now (each read is stored with its text; both are
-    shown inside a fence, as data) and lists that persona's own earlier concerns that are still open,
-    never another persona's: it rules on each (`resolved`, or `stands` with a reason) and adds new
-    concerns only about what differs between the two texts. The new reaction becomes the current one
-    and the earlier rounds are kept. After `rounds` reads nothing more runs for that persona and
-    recommendation, and the page says "Round limit reached". A reaction stored before the block was
-    there counts as round 1; its text was not kept, so its next round is told so and shown the text
-    as it stands now only.
-  - `baseline`: each recommendation is also read by one run with no persona ("a general reader with
-    no particular stake"), on seat 0, with the same prompt and tool and by the same rule of rounds.
-    It shows what the personas add: a reaction whose concerns and reasoning say what the baseline
-    says is marked "Adds nothing beyond a general reader" and is not counted as agreement. It is left
-    out of the ranges under "Where they disagree" and out of the persona term of priority (which
-    counts only when `scoring.personaWeight` is above 0). The baseline is stored apart, is never a
-    persona's feedback and is not rated. *Cost:* a baseline adds one run per recommendation per round.
-    With 4 personas and 10 recommendations a round is 50 runs instead of 40. A baseline that fails is
-    reported, and the reactions to that text then stay unmarked.
-  - `onUnavailable` and unavailable personas: a persona is unavailable for a recommendation when its
-    seat cannot be started (the provider is disabled, or the model is not in that provider's `models`)
-    or its run ends without a valid answer after the one retry. It is never run on another seat or
-    model. A seat that cannot be started is not a configuration error, so one configuration works on
-    machines with different CLIs: the server prints a warning at start-up that names the seat. With
-    `"report"` the panel goes on without that persona, and the page shows it as "Unavailable" with
-    the reason. With `"fail"` every persona that can run still runs and its reactions are kept, and
-    the panel phase then ends as failed with a reason that names the persona, its provider and model
-    and the cause. A baseline that cannot be had never fails the phase.
-
-  *The answer.* With the block, the prompt states the rules of a persona (you are one person; ground
-  each concern in your profile or say you are unsure; do not please; judge the recommendation as
-  given; nothing is precious; no numbers about other people; argue the other side; work alone) and
-  asks for more than scores: the other side (what would make the persona dismiss it if it liked it,
-  or take it up if it did not), another route to the same goal, what it is unsure about because its
-  profile does not say, and for each concern the part of the profile it rests on. A concern without
-  a basis is kept and shown as "No basis in the profile". A sentence that makes a claim about other
-  people in numbers (a share of a group, "most customers", a market size) is found by a simple
-  pattern check and shown struck out with "About other people: not counted" and the reason. The
-  check runs over every text of an answer that the page shows, the basis of a concern and the reason
-  of a ruling included. Nothing a persona wrote is deleted. An earlier concern keeps these marks
-  when a later round lists it for a ruling: its basis, "No basis in the profile", or its struck-out
-  sentence.
-
-  *What you see.* On the Strategy page, in the Simulated column of a recommendation: each persona
-  with its round, its seat ("Runs on"), its scores to rate as before, its concerns with what each
-  rests on, the other side, another route, what it is unsure about, its rulings on its earlier
-  concerns ("Resolved", "Still stands"), each earlier concern with the marks it was raised with, and
-  its earlier rounds on demand. Above the personas, "Where they disagree" (marked simulated, as every
-  reaction is) lists each scale on which the counted personas differ by two points or more, as the
-  range ("adoption 1 to 4"). No average of persona scores is shown anywhere: an average hides the
-  disagreement, and an average of simulated people is not a number about real ones. Below them,
-  "General reader (no persona)" opens the baseline. All of it is served with the recommendation by
-  `GET /api/workspaces/:id/recommendations` (`panel`), and all of it stays marked simulated: it is a
-  list of things to check with real people, it changes no score and no priority by itself, and in the
-  export the baseline is a `persona_feedback` line marked `baseline: true` that joins no rating.
-  Stakeholder reads are unchanged: they have their own tool and the offline rule.
-
-  For BIF's own development the same idea is a skill, `.claude/skills/persona-panel/SKILL.md`.
-  Both are adapted from the council skill of tstack
-  (https://github.com/t3dotgg/tstack/blob/main/skills/council/SKILL.md). Design:
-  [docs/superpowers/specs/2026-11-16-persona-panel-design.md](docs/superpowers/specs/2026-11-16-persona-panel-design.md).
-- **Ratings and calibration.** Every criterion value on every item can be rated: agree, or disagree
-  with your own value and reason (inline or in the Review queue). Ratings are kept as history:
-  changing a rating adds a new row and the latest one is what the UI shows as your current rating
-  (re-submitting an unchanged rating sends nothing). Priority is a weighted combination
-  of recommendation criteria; the Strategy page edits the weights and offers weights refit from your
-  priority overrides (never auto-applied). Worker pushbacks are ratable too (criterion `pushback`, 0–1:
-  how justified it was). The Decision log page proposes prompt patches per role from
-  your disagreements; you edit and approve them before they are written. An approval keeps the
-  role's calibration history (revertable on the Usage & prompts page) and is logged as a decision and
-  a feedback event; weight changes and reverts are logged the same way. The decision log plus ratings
-  export as JSONL.
-- **Feedback log.** Every human action on agent output is also an append-only feedback event: who
-  (`user.id`), when, what changed (before → after), why, and the agent run and prompt version that
-  produced the item. Recorded actions: include overrides (findings, recommendations, personas,
-  competitors, symptom hypotheses), profile edits, unit proposal accept / accept-with-edits / reject,
-  symptom hypothesis corrections (Findings page), request and escalation answers, weight changes,
-  prompt patch approvals and calibration reverts, and fact actions (scope change, retraction,
-  accepting an unverified update). Ratings store the agent run and prompt version they judged. Feedback feeds calibration:
-  excluding an output counts as a disagreement with it, including an unverified one as an agreement,
-  and unit proposal rejections / edits are scaled disagreements on the proposing decision, so they
-  rank among the prompt patch examples. When an agent revises an item after you rated it, the item
-  returns to the review queue. The Decision log page lists the feedback with actor, time and reason.
-  The export adds answered requests, the interview transcript (each turn linked to its interviewer
-  run), feedback events and each output's final review status, under the upload rules below.
-- **Export and uploads.** The JSONL export (`GET /api/workspaces/:id/export`) leaves out by default,
-  unless `?includeUploads=1`:
-  - everything that cites an internal upload or anything the knowledge store marks upload-derived (a
-    fact confirmed with an upload, a later version of such a fact, a record citing one;
-    `explainUploadDerived` says why);
-  - every judgment of an **upload-exposed run**, that is a run that was *shown* upload-derived text by
-    a read tool or its prompt, even if it cited none;
-  - the **task of such a run**: its reviews, deliverable decisions and outputs;
-  - later judgments that **cite one of those outputs**, treated like an upload: by id, through a
-    record that cites it (a recommendation's findings), or because their task's outputs cite it (then
-    all of that task's judgments go, as when a task's outputs cite an upload). So if a synthesis task
-    saves a recommendation citing a fact from an exposed task, its judgments, persona feedback on that
-    recommendation and your ratings of either are left out.
-
-  Only citing excludes. A later run that is only shown one of those outputs is not exposed by that,
-  its reads are exported, and a judgment citing only that task's other outputs is exported. Exposure
-  is computed at each export from the retrieval log and never stored, so it cannot spread through
-  cards or briefings. Each export reports what it left out, counted by cause: cites an upload, exposed
-  run, task of an exposed run, references an output of such a task. The report comes in the
-  `x-bif-export-summary` header and from `GET /api/workspaces/:id/export/summary`. The Decision log
-  (like the Metrics page) computes it only when you press its button, because that runs the whole
-  export, and shows it with an "including uploads" link. Known limit: uncited text paraphrased from such an output and carried on two tasks
-  later is not caught.
-- **Usage, cost and prompts.** Every agent run's token usage (input, output, cache read/write) is
-  stored with its cost, computed from the dated price table `src/core/harness/pricing.json` (USD per
-  1M tokens, editable — bump its `version` / `effectiveDate` when you change a price; the codex model
-  price is a marked placeholder) next to the cost the CLI itself reports. Runs also record attempts,
-  rate-limit back-offs, round, task type and why they failed. Every prompt version hash recorded
-  anywhere (runs, decisions, usage, ratings, feedback events, outcomes, review issues) resolves to its
-  full text. The **Usage & prompts** page shows costs per role / model / prompt version / task,
-  budget status, a per-prompt-version trend (rating agreement, mean delta, review pass and
-  first-round pass rate), the calibration history of each role (revert to any earlier version) and every agent run with a paged event viewer. API:
-  `GET /api/costs[?workspaceId=]`, `GET /api/runs/:id`, `GET /api/runs/:id/events?offset=&limit=`,
-  `GET /api/prompts/:hash`, `GET /api/workspaces/:id/agent-runs`,
-  `GET /api/workspaces/:id/metrics/prompt-versions[?role=]`,
-  `GET /api/workspaces/:id/calibration/versions[?role=]`,
-  `POST /api/workspaces/:id/calibration/versions/:versionId/revert`.
-- **Lessons and the weekly retro.** Per role and per business, BIF watches recurring problems: review
-  issue classes per task type, negative decision outcomes, run failures (not rate limits or other
-  infrastructure), policy denials, your exclusions / corrections / rating disagreements on an agent's
-  output, knowledge-store signals (zero-result searches, unused reads, duplicates, missing captions,
-  rejected quotes), reviewer-audit misses (below) and signals other features record (`recordLessonSignal`;
-  a note is kept only when it names a task, run or item that is not upload-derived or exposed). When one recurs in 3
-  tasks, a rule is **proposed** on the **Lessons** page; you accept or reject it (with an optional
-  reason), and only an accepted rule is appended to that role's prompt, tagged with a tracking
-  marker (`[L-7F3A2C.v1]`), so the prompt version changes and every run's stored prompt shows which
-  rules it had. The page shows each rule's effect: the category's rate before the rule and under its
-  current version, and per prompt version (with pass rate, rating agreement and cost). The engine
-  then proposes to strengthen a rule that keeps recurring, retire one after 10 clean tasks, or revert
-  one whose rate did not drop after 5 tasks; each is again yours to accept. At most 15 rules per role.
-  Rules are written from templates, never from stored text; examples quote review issues only when
-  they are not upload-derived and not from an upload-exposed run or task (the export's rule), else
-  they name the id. Every Monday 06:00 (`lessons.retro.cron`) the scheduler runs a **retro** per
-  business: the `retro` agent reads a digest of the week (task results, costs, outcomes, review
-  issues, failures, denials, your feedback, knowledge signals, rules and pending proposals; fixed size,
-  redacted, fenced, logged as a read before the run starts) and proposes prompt rules and
-  calibration notes citing digest ids — pending until you accept each one. Accepts and rejects are
-  feedback events (`lesson_accept` / `lesson_reject`) with your `user.id`; accepts are also
-  Decisions. API: `GET /api/workspaces/:id/lessons`, `POST …/lessons/evaluate`,
-  `POST …/lessons/proposals/:pid/accept|reject` (`{reason?}`), `POST …/lessons/rules/:rid/propose-retire`,
-  `POST …/lessons/retro`. Config: `lessons` (`enabled`, `minTasks`, `retireAfterCleanTasks`,
-  `minEffectTasks`, `maxRulesPerRole` ≤ 15, `retro: { enabled, cron, model, windowDays, maxProposals }`).
-  `lessons.enabled: false` is a kill switch: no proposals, no retro, and accepted rules leave every
-  prompt (the new prompt versions are recorded). Runs that must not see lessons (experiment arms,
-  reviewer audits) carry a stored lessons-off flag, so they keep it after a restart, and they feed no
-  lessons either: their outcomes, ratings, feedback, failures and denials are not signals (reviewer
-  audit misses count once, as described below).
-- **Persona learning.** Your reactions to what a simulated persona says teach that persona to judge
-  more like the audience you know, in the weekly retro only and only with your approval.
-  - *What counts as a signal.* Every reaction to one persona's own output, agreeing or disagreeing:
-    your agree / disagree on one of its flow verdicts; your ruling on a pair it judged (the persona's
-    winner against yours; a tie disagrees; an explicit reaction to the same verdict wins over the
-    ruling); your ratings of its panel feedback on a recommendation (appeal, adoption, willingness to
-    pay, friction) and of its profile fields; and including or leaving out the persona. The latest
-    reaction per thing counts, with the reason you typed. Reactions to a ranking position do not count
-    (a position mixes the checklist, every persona and your overrides). Signals are read from the
-    feedback log; nothing new is stored for them.
-  - *The gate.* At the retro, each persona's open reactions (since its last learning run, at most
-    `windowDays` old) are counted. A persona qualifies for a change only with at least 6 reactions
-    (`minSignals`), on at least 4 different things (`minDistinctItems`), and disagreement clearly above
-    30% (`disagreeFloor`: the lower end of the 95% Wilson interval of the disagreement rate). So 5 of 6
-    qualifies, 4 of 6 does not, 5 of 8 does, 10 of 20 does not. Agreements count against a change. A
-    persona that does not qualify shows what is missing ("4 of 6 reactions", "3 of 4 different
-    things", "disagreement not clearly above 30%").
-  - *What the retro does.* For each qualifying persona (most disagreements first, at most 5 per retro;
-    a persona whose last proposals still wait for you is skipped), one `retro`-role run states its
-    assumption (how the persona misjudges) and proposes at most 3 adjustments: add, replace or retire
-    a short second-person correction, each resting on at least 3 of the reactions it was shown (2
-    different things, 2 disagreements). The run is shown no upload-derived text; if it was, its
-    proposals are refused. An engine step also proposes retiring an adjustment whose disagreement did
-    not drop after 6 more reactions. A failed learning run never fails the retro and consumes nothing.
-  - *Changes wait for you.* Proposals appear under "What the tool has learned" on each persona card
-    (the **Lessons** page counts those waiting in the whole business). Accept (optionally with your
-    edited text, at most 400 characters), reject, or retire an active adjustment, each with an
-    optional reason; each is a feedback event and a Decision. Only an accept changes the persona: a new
-    persona version whose agent.md gains "Corrections from people who know your segment" with a
-    marker (`[A-3F9C21.v2]`), so its flow verdicts stop being live and are judged again in the next
-    ranking round, and its panel feedback is replaced at the next panel. Research that saves the
-    persona again keeps its adjustments. Each card shows each adjustment's disagreement before and
-    since. Everything stays inside its business tree; learning proposals and their decisions follow the
-    training export's treatment of lesson proposals (their Decisions join only ratings of themselves).
-  - *Settings* (`personaLearning`, all optional): `enabled` (true), `minSignals` (6),
-    `minDistinctItems` (4), `disagreeFloor` (0.3), `windowDays` (180), `maxPersonasPerRetro` (5),
-    `maxProposalsPerPersona` (3), `minEvidence` (3), `maxAdjustments` (8 per persona),
-    `minEffectSignals` (6), `model` (default: the retro model). Learning runs only when lessons and the
-    retro are on.
-  - API: `GET /api/workspaces/:id/persona-learning`, `GET …/personas/:personaId/signals`,
-    `POST …/persona-proposals/:proposalId/accept` (`{text?, reason?}`), `POST …/persona-proposals/:proposalId/reject`
-    and `POST …/persona-adjustments/:adjustmentId/retire` (`{reason?}`).
-- **Stakeholder personas.** A proposal only matters if the people and systems it depends on say yes.
-  For each node BIF keeps simulated personas of its stakeholders, learns them from what you say, and
-  shows how each would read a recommendation.
-  - *Who counts.* Everyone whose approval, decision or data the node depends on: the people who run
-    the company (leaders, managers), investors, the board and other owners, regulators and partners,
-    and, lower in the tree, the team or system above and sister teams and systems (types `leader`,
-    `manager`, `investor`, `board`, `owner`, `team`, `system`, `regulator`, `partner`, `other`). They
-    are built for your own node (*own*) and for the most important competitors (*competitor*: leaders,
-    owners, investors, parent company). A stakeholder is a persona of kind `stakeholder` with a label
-    (a role, team or system; a person's name only when it is in public evidence), a relation ("approves
-    pricing changes") and eleven profile fields (`role_mandate`, `goals_incentives`,
-    `decision_criteria`, `constraints`, `risk_tolerance`, `dependencies`, `known_positions`,
-    `objections`, `information_needs`, `communication_style`, `influence`), each with a value, a
-    confidence and evidence. Segment personas are unaffected: the persona panel, flow verdicts, the
-    Personas page and persona ratings read segment personas only.
-  - *How they are built.* The `stakeholders` phase (after `deep_dives`; existing schedules gained it)
-    plans two task types, both saving with `save_stakeholder` (at most `maxOwn` own, `maxPerCompetitor`
-    per competitor, counting those not failed or superseded), with review and status as for personas.
-    Only runs of these two task types may save a stakeholder; a label is one line of at most 80
-    characters (newlines and tabs become spaces, as in the relation). `competitor_stakeholders` uses the
-    browser, public sources only, and never searches for a person not named in public evidence (except
-    the former colleagues it is told to follow, see below); it is planned only when the tree has
-    competitors or the node has former colleagues to follow. `own_stakeholders` works from what the store already
-    holds (captured public pages, internal uploads, the interview, the business tree: parent and
-    sibling nodes are offered as `team` or `system` stakeholders, and your statements not yet tied to
-    a stakeholder) and from the public web (the company's leadership, board, ownership and investor
-    pages, registry filings, parent and sister organisations, press). It runs like any other research
-    task, on the usual models (its reviewer may be on another provider, Codex included), with a
-    browser when the planner asks for one. Every field still cites an artifact: the worker saves a copy
-    of each public page it relies on. Its prompt forbids putting anything from internal uploads or the
-    interview into a search query, web form or other web request; it searches for the company's public
-    record by its public name. (Decided by you on 2026-11-15; it was offline before.)
-    These runs may save only stakeholders and copies of the pages they rely on (`save_artifact` with
-    only kind `page_snapshot` or `document`, mime, the content and the page's http(s) `source_url`;
-    the title is taken from the URL; plus finish, answer review and read), cannot ask you anything and
-    are never escalated. Those page copies are withheld with the research: while it is withheld they
-    answer as unknown everywhere (knowledge search and pages, artifact links, gc, the export). When the
-    same bytes were also uploaded or captured by another task, that artifact stays served, but nothing
-    of the private capture is shown with it, and what is shown comes from the served captures. The
-    reviewer of this task is given the same web rule as the worker. The company audit and filings prompts also capture public
-    leadership, ownership and investor pages as artifacts (they do not save stakeholders). Each stakeholder gets an agent.md ("You are <label>, a
-    stakeholder of <scope>…"; for a competitor's, "…at <competitor>, a rival of <scope>").
-  - *Hidden until you answer: the question round.* A first save of an own stakeholder is **hidden**.
-    When the `stakeholders` phase ends, every hidden own stakeholder that is not superseded or failed
-    and has no questions yet gets four questions from fixed templates filled with its label only (one
-    set for people, one for teams and systems), plus two for the node ("Is anyone missing…", "Is
-    anyone on this list not relevant…"). No model writes or picks a question, so a question cannot
-    reveal what research found. Answers come first so that they are your own, not an echo of the
-    research. While a stakeholder is hidden, every API response shows only its id, label, type and
-    number of open questions: never its profile, relation, evidence, agent.md, adjustments, proposals,
-    signals or reads; it gives no reads and is skipped by learning. While own-stakeholder research
-    runs, and while its node has any hidden stakeholder, the raw activity of that research (run events,
-    prompts, result summaries, review decisions, evidence refs, lessons quotes, audit issues) is
-    withheld from every API response and the live event stream, and shown again once the task has
-    finished and none is hidden; the pages say "Withheld until you answer the
-    stakeholder questions", and the decision log shows only the save's label, type and confidences. On
-    the **Stakeholders** page you answer (every answer optional, at most 4,000 characters, redacted),
-    skip one stakeholder, skip all, or press "Show what the tool found" (a skip). A stakeholder you
-    answered or skipped opens for good; one you left blank stays hidden and in the round. The node
-    questions close with the round. Later stakeholders get a new round the same way. With
-    `stakeholders.enabled: false` the `stakeholders` phase is skipped (no tasks, no round; a harness
-    decision `phase_skipped` records it), no reads run, and the page shows no round: hidden
-    stakeholders found earlier are listed with only "Show what the tool found", so none stays hidden.
-  - *Statements.* Everything you say about a stakeholder is an append-only, internal statement:
-    question answers, notes ("Add a note" on a card), real decisions ("Record the real decision" on a
-    recommendation: stakeholder, `approved` / `approved_with_conditions` / `rejected` / `deferred`, and
-    your reasoning) and what the interviewer records with `note_stakeholder` when you mention a
-    stakeholder (it sees the node's stakeholders as id, label and type only; the quote, at least 12
-    characters, must be text you typed in the interview). Storing a statement changes no persona.
-  - *Reads.* In the `persona_panel` phase, after the segment personas, each open, usable stakeholder
-    reads each usable recommendation of its node (own stakeholders first, at most `maxReadsPerPanel`
-    runs): an own stakeholder answers `approve`, `approve_with_conditions`, `reject` or `not_my_call`,
-    a competitor's `ignore`, `watch`, `copy` or `counter`, with conditions, concerns, reasoning and what
-    would change its mind. Reads are shown on the recommendation, labelled simulated, and never change
-    its priority; a new read replaces the stakeholder's earlier one. You can agree or disagree with a
-    read, with a reason; the page shows your latest reaction after a reload and you can change it.
-    An own stakeholder's read runs offline (its agent.md is internal) on the persona model, or on a
-    model that can run offline when that one cannot; with none, its reads are skipped and a harness
-    decision says why. A competitor's stakeholder reads as before.
-  - *People who leave, move or change position.* People change jobs; you record it, the tool never
-    does by itself. On the **Stakeholders** page each open own stakeholder has a "Position" line and
-    "Change position":
-    - **Left the company.** Give the date and where they went: a competitor of the business, "A
-      company not listed" (it is added as a competitor, marked as not researched yet) or "Elsewhere".
-      From then on the person is a *former colleague* and no longer one of your stakeholders: no
-      question round, no approval read, no real decisions, no place under `maxOwn`. At a competitor
-      they read your recommendations as a rival (`ignore`, `watch`, `copy`, `counter`) who knows your
-      plans and people as they were the day they left, and nothing later. Elsewhere, they are kept under
-      "Former stakeholders" and read nothing.
-    - **Moved to another team or division**, **Promoted**, **Demoted.** The stakeholder goes to the
-      other node, or gets a new type and title; its open questions go with it.
-    - **Moved to another company** (for someone who already left) and **Returned** (they work here
-      again, with the profile as it stands). Both take an optional new name, for when the name is
-      already in use where the person goes; the page then shows why the change was refused.
-    Dates are days, not in the future. Every change is kept in a history that cannot be edited or
-    deleted; a stakeholder that is still hidden must be opened first.
-  - *Two layers for someone who left.* What you knew and what the web shows are stored apart:
-    - **What we knew**: the profile as it was the day they left.
-    - **What is public**: what research finds about them on the public web since. The `stakeholders`
-      phase follows at most `maxFollowed` former colleagues per task, those not looked at for longest
-      first. It also notes where they work now ("What research last saw"); you decide whether to
-      record that as a move.
-    - **Combined**: after the research, one run without web access writes a single profile from both.
-      Each field says what it rests on (from what we knew, from public sources, from both, or
-      concluded from both) and says so where the two disagree. Public sources flatter their subject,
-      so what you knew stays the base for how the person decides.
-    Only research that failed (it could not finish) is "Not used": what it found is kept and shown
-    under that note, and the combined profile stays as it was. Research that finished without being
-    verified is still combined; the page then says "Used, although the research that found this was
-    not verified". The person stays usable either way.
-  - *What stays internal.* What you knew about a former colleague never goes into a web request. The
-    research is told only who to follow: the label, the position held here, until when, and where they
-    went. Reads, learning and the combining run for these personas run without web access (skipped,
-    with a note in the decision log, when no enabled provider can). Position changes, your notes and
-    the record of the combining run stay out of the default export; what the research found in public
-    is exported like any competitor research. One limit: a run with web access works in a folder under
-    the data directory and could read files there, a former colleague's agent.md included (see
-    *Isolation* below).
-  - *What the retro does.* Only the weekly retro changes a stakeholder, through persona learning
-    (above). A stakeholder goes to a learning run when the gate qualifies or it has a statement no run
-    has consumed; the run is shown its open statements (fenced, with ids) besides its reactions:
-    your reactions to its reads and your recorded decisions compared with its read of the same
-    recommendation (approved against approve agrees, rejected against reject agrees, anything else
-    disagrees; `deferred` and `not_my_call` give no signal). A proposal citing a statement needs no
-    further evidence; one resting only on reactions keeps the usual rule. A finished run consumes the
-    statements it was shown. You accept or reject each proposal as for segment personas; an accept
-    makes a new persona version whose agent.md carries the correction. The learning run of an own
-    stakeholder is offline, on the learning model or one that can run offline (skipped, with a harness
-    decision, when none can).
-  - *Export.* An adjustment that rests on a statement is internal. Internal proposals, adjustments and
-    their decisions, every decision of an `own_stakeholders` task (worker, reviewer, harness) and
-    feedback on it, and all stakeholder statements, questions, reads and stakeholder feedback events
-    (position changes among them), and the record of a combine run, stay out of the default training
-    export (exclusion reason `internal`); `?includeUploads=1` includes them. So do your ratings of, and
-    your include overrides on, an own stakeholder or a former colleague, whatever decision they belong
-    to; those of a competitor's stakeholder who never worked for you are exported as before.
-  - *Isolation.* Stakeholders, questions, statements and reads are keyed by business tree; an id of
-    another tree answers 404. Hiding applies to what BIF serves: an agent with shell access on the
-    machine can read files under the data directory (agent.md files, run logs), as was already true
-    for uploads.
-  - *Settings* (`stakeholders`, all optional): `enabled` (true), `maxOwn` (8), `maxCompetitors` (3),
-    `maxPerCompetitor` (3), `maxReadsPerPanel` (40), `maxFollowed` (5: how many former colleagues one
-    research task follows on the web; 0 turns following off).
-  - API (under `/api/workspaces/:id`): `GET …/stakeholders`, `GET …/stakeholder-questions`,
-    `POST …/stakeholder-questions/answers` (`{answers: [{questionId, text}], skip?: [personaId], skipAll?}`),
-    `POST …/stakeholders/:personaId/reveal`, `POST …/stakeholders/:personaId/notes` (`{text, field?}`),
-    `GET …/stakeholders/:personaId/statements`, `POST …/recommendations/:recId/stakeholder-decisions`
-    (`{personaId, decision, reasoning}`), `GET …/recommendations/:recId/stakeholder-reads` and
-    `POST …/stakeholder-reads/:readId/reaction` (`{reaction, reason?}`). The persona learning routes
-    serve open stakeholders too, never hidden ones. Positions: `GET …/stakeholders/:personaId/positions`
-    (the history, newest first, and for a former colleague both layers, whether the public one is used
-    and when the profile was last combined) and `POST …/stakeholders/:personaId/position`:
-    `{change: 'left', date, to: {competitorId} | {newCompetitor: {name, site?}} | {elsewhere: {companyName?}}, label?, title?, note?}`
-    (for someone who already left: moved on to that company),
-    `{change: 'moved' | 'promoted' | 'demoted', date, toWorkspaceId?, stakeholderType?, title?, note?}` or
-    `{change: 'returned', date, toWorkspaceId, stakeholderType?, title?, note?}`. `GET …/stakeholders` lists
-    former colleagues at a competitor in that competitor's group and the others under `former`.
-- **A persona of you.** BIF keeps a short picture of the person it works for, learned from what you do
-  in the tool, and gives it to the agents that decide what to work on and how to present it. You see
-  it, and decide every line of it, on the **You** page.
-  - *One per person per business.* Each person who acts in a business tree has their own picture of
-    that tree; trees never share one, and the You page shows and decides only your own. Today the person
-    is the configured user (`user.id`), and the retro learns only for that person: actions recorded
-    under another id (for example before `user.id` was set) are not learned from. The feedback log,
-    run logs and stored prompts of a business are not separated by person. The picture never holds your user id, name or email address: it
-    calls you "the person you work for".
-  - *What it learns from.* Only your actions in that business and the reasons you typed with them:
-    what you include or leave out, which proposals you accept, edit or reject, the facts you retract
-    or correct, your agree / disagree on ratings, verdicts and reads, your rulings in flow rankings,
-    your decisions on lessons and on earlier lines of this picture. A change of the scoring weights
-    counts as a correction (it says what you care about most). Answering an approval request counts
-    (granted or denied); answering a login, captcha or other request does not, and neither do
-    schedule and settings changes or uploads. Nothing is learned from the interview or from uploaded
-    documents.
-  - *When it learns: only in the scheduled retro.* Nothing changes while you work. At each retro BIF
-    counts your actions since its last finished learning run (at most `windowDays` old). It looks at them
-    only when there are at least 12 actions on at least 6 different things; otherwise the You page
-    says what is missing ("7 of 12 actions", "4 of 6 different things"). Then one offline run (no web,
-    no browser, only the harness tools) reads those actions and proposes at most 3 changes: add,
-    replace or retire a short line. Each line it adds or replaces must rest on at least 3 of your
-    actions on at least 2 different things, and has one of eight topics: `priorities`, `quality_bar`,
-    `evidence_standards`, `decision_style`, `risk_appetite`, `domain_knowledge`, `communication`,
-    `recurring_corrections` (at most 3 lines per topic, 12 in all). The run also states the assumption
-    it is making about you. A failed run changes nothing and its actions wait for the next retro. When
-    no enabled provider can run offline (Codex cannot), the run is skipped and a Decision records it.
-  - *Every line waits for your decision.* Proposals appear on the You page: accept (optionally with
-    your own wording), reject, or later retire a line, each with an optional reason. Nothing reaches a
-    prompt until you accept it. A line you write or edit may not contain your user id or an email
-    address; it is refused and you can rewrite it. Your decisions are actions too: a line you rejected
-    is shown to the next retro with your reason, so it is not proposed again the same way.
-  - *Where the picture goes.* Your accepted lines go, under "The person you work for", at the end of
-    the system prompt of the **orchestrator, synthesizer and interviewer** of that business only. They
-    never reach workers, reviewers, the simulated personas, escalations or the retro, so the checking
-    and the simulated judgement do not bend to your taste. A prompt's version changes when its lines
-    do, so each run shows which picture it carried. The picture is not a persona of the market: it is
-    in no panel, ranking round, stakeholder read, knowledge search, card or persona list.
-  - *Switching it off.* `userPersona.enabled: false` stops learning and removes the picture from the
-    prompts; `userPersona.useInPrompts: false` keeps learning (and the You page) but leaves the
-    prompts exactly as they were without it. Learning also needs lessons and the retro to be on.
-  - *Settings* (`userPersona`, all optional): `enabled` (true), `useInPrompts` (true),
-    `minInteractions` (12), `minDistinctTargets` (6), `minEvidence` (3), `maxProposals` (3),
-    `maxPerField` (3), `maxAdjustments` (12), `windowDays` (180). The model is persona learning's.
-  - API (under `/api/workspaces/:id`, any node of the tree): `GET …/user-persona` (the gate, statistics,
-    lines by topic, proposals, last run) and `GET …/user-persona/interactions?limit=&before=&line=`
-    (your actions, newest first; `line` gives the actions a line rests on). Accept, reject and retire
-    use the persona learning routes above.
-- **Reviewer audits and experiments (learning loop WP-F).** *Audits:* a different model (another
-  enabled provider than the original reviewer when there is one; `audit.model` in config overrides)
-  re-reviews the N most recently verified tasks of one business tree that were not audited yet, with
-  the reviewer's input for the final round (same prompt, prompt reads logged before the run starts,
-  reads limited to the task's review slice) but without lesson rules, so it judges independently of
-  what the reviewer learned. An audit never changes the task. When the
-  auditor fails work the reviewer passed (a *miss*), the passing review gets a `weak-review` decision
-  outcome (source `reviewer_audit`) and the miss counts once per issue class and task as a reviewer
-  lesson signal for its tree. An auditor without a
-  valid review is `invalid`, not a miss. Start one from the **Audits & experiments** page or
-  `POST /api/workspaces/:id/audits {n?, taskIds?}`; schedule them with a cron
-  (`POST /api/workspaces/:id/audit-schedules {cron, n}`, run by the normal scheduler, the same way as
-  the weekly retro).
-  *Experiments:* re-run a finished task as arm A and arm B (worker model and / or a stored worker
-  prompt version; 1–5 repeats) through the normal review loop, with lessons off
-  (`POST /api/workspaces/:id/experiments`). Tasks that use the browser are refused unless
-  `experiments.allowBrowser` is true; then the request must carry `confirmBrowser: true` and the page
-  says that real-world actions repeat for each arm and each repeat. The page compares review pass rate, first-round pass
-  rate, rounds, review scores, your ratings and cost per arm (`GET /api/experiments/:id`). Arm tasks
-  sit in their own research run; their outputs are retired when they end (nothing reaches findings,
-  knowledge or synthesis), they write no outcomes and never ask you questions. Experiment and audit
-  runs and their decisions are tagged (`experiment_id`, `arm`, `audit_id`), stay out of the
-  prompt-version metrics, outcome reports, calibration and prompt-patch examples (your ratings of
-  them still count in the arm comparison), count against budgets like any run, follow the same
-  upload-exposure and export rules, and their export lines carry the tags.
-- **Metrics (learning loop WP-G).** The **Metrics** page charts review pass rate, first-round pass
-  rate, rounds to pass, run failure rate, cost and rating agreement per day or week, with tables per
-  role / task type / prompt version / model (pass, rounds, review issues, failures, ratings, outcome
-  labels, cost), failures by reason, review issues by class and the knowledge-store metrics (human
-  reads apart). Scope is this part or the whole business, never another business. Experiment and
-  reviewer-audit runs are left out unless you tick "Include experiment and audit runs". A lessons
-  table shows each lesson rule's effect per prompt version (the same figures as the **Lessons** page). The training-export exclusion summary is
-  computed only when you press its button (it runs the whole export). API:
-  `GET /api/workspaces/:id/metrics[?scope=tree|node&since=&until=&groupBy=role|task_type|prompt_version|model&bucket=day|week&includeExperiments=1]`.
-- **Scheduler and "What changed".** Recurring jobs per workspace (cron) re-run phases; each run is
-  diffed against the previous run of the same phase and schedule, shown on the Research page. The
-  diff lists the facts the run replaced (old → new), retracted and confirmed (from its applied fact
-  changes), new findings (text matching only for facts saved as `new`), subjects no longer found and
-  changed screenshots. The same step records the decision outcomes once each through one path: the
-  run's lineage outcomes, `contradicted` (a previous fact the run neither confirmed, replaced nor
-  retracted, when it saved a new fact on the same subject with another claim), `changed` (a cited
-  screenshot changed) and `stale` (past its TTL). Replaying the step after a restart adds nothing.
-
-## Where data lives
-
-Under `dataDir` (default `./data`, gitignored):
-
-| Path | Contents |
+| Word | Meaning |
 |---|---|
-| `data/bif.db` | SQLite, one database for every business: workspaces, interview, runs, decisions, outputs, the learning-loop tables and the knowledge store (tables by area: design spec §5.1) |
-| `data/<workspaceId>/artifacts/` | screenshots, page snapshots, documents and uploads (content-addressed by sha256) |
-| `data/<workspaceId>/personas/<persona>.md` | compiled persona prompt (latest version; `<persona>.v<N>.md` keeps each version) |
-| `data/<workspaceId>/runs/<agentRunId>/` | per-run working directory (`cwd/`), event log (`events.jsonl`) and the full prompt (`prompt.md`; `prompt.attemptN.md` per rate-limit retry) |
-| `data/<rootWorkspaceId>/calibration/<role>.md` | current approved prompt calibration of one business tree (every earlier version is kept in the database, `calibration_versions`) |
-| `data/browser-profile/` | the research browser profile (`browser.profileDir`) |
+| Agent | an AI assistant given one narrow job |
+| Workspace | one business, or one part of it |
+| Task | one piece of research work with a brief |
+| Finding | one fact, tied to stored evidence |
+| Verified | a result that passed review |
+| Persona | a simulated person, built from evidence |
+| Flow | a journey such as signing up or checking out |
+| Retro | the weekly review in which BIF proposes improvements |
 
-Approved prompt patches are per business: they are merged (appended, deduplicated) into
-`data/<rootWorkspaceId>/calibration/<role>.md` of the workspace's tree root and only reach prompts
-of that business tree — another company's prompts never see them. Nothing is written under `src/`.
+## What stays private
 
-## Smoke test
+- Everything is stored on your computer. The server only accepts connections from the same
+  computer, and has no login, so other programs on the computer can reach it.
+- The agents send what they work on to the AI provider behind each assistant, as any use of those
+  assistants does. Scanned documents and images are read by an AI model too, unless you switch that
+  off.
+- Agents browse with a separate research browser profile, never your everyday one. Payments, demo
+  requests and contacting real people need your approval. Purchases are never made.
+- Agents see your uploaded files only as a name, type and size until they open one, and every
+  opening is logged. Research about your own stakeholders is told never to put anything from your
+  uploads or the interview into a web search.
+- The data export for training leaves out anything that came from your uploads or from the inside
+  view of your stakeholders, unless you ask for it.
 
-`npx tsx scripts/smoke.ts` boots the real server on a temporary data dir and runs, per provider:
+## Getting started
 
-- a real worker run (`log_decision`, then `submit_result`, through the real MCP server);
-- a shared-browser run;
-- the **knowledge-store flow**;
-- the **flow records smoke** (`flows`): a worker records a fictional sign-up from three seeded screen
-  notes (no browser) with `read_flow_catalog`, `save_flow` and `save_flow_checks`, then the real
-  ranking round runs with that provider as the persona over two seeded flows. Both are judged from
-  the store.
-- the **persona learning smoke** (`persona-learning`, default claude, only when named): six
-  reactions (five disagree) to a seeded persona's verdicts, then the real retro with that provider as
-  the learning model; it checks one `submit_persona_learning` call and the stored run and proposals,
-  and that the persona did not change.
-- the **stakeholder personas smoke** (`stakeholders`, default claude, only when named): a node with
-  three internal notes, one `own_stakeholders` task through the real review loop (not offline) and the
-  phase-end question round; it checks that the worker run is not offline (a Claude worker's CLI was
-  offered built-in tools; browsing is not required), that at least one hidden own stakeholder cites the notes, that each has its four template questions (and
-  the node its two), and that the task's research is withheld.
-- the **stakeholder positions smoke** (`stakeholder-positions`, default claude, only when named): an
-  own stakeholder of a fictional company is marked as left for a competitor; one
-  `competitor_stakeholders` task follows the person from two captured public pages through the real
-  review loop, then the real combine run writes one profile from both layers. It checks the public
-  layer (and that the persona's own profile, status and version did not change), that no prompt of
-  the research held what was known from inside, one offline combine run with one
-  `submit_combined_profile` call, and that every combined field says what it rests on.
-- the **user persona smoke** (`user-persona`, default claude, only when named): twelve actions of the
-  configured person on six fictional competitors through the real action functions, then the real
-  retro with that provider as the learning model; it checks one offline learning run (only harness
-  tools offered and called), one `submit_persona_learning` call, the stored proposals (a user topic,
-  evidence among the actions shown, no identifier of the person), and that no line or brief exists
-  before the user decides.
+You need Node.js 25 or later and at least one of the AI assistants installed and signed in.
 
-- the **review council smoke** (`council`, only when named): one small task of a council stage with
-  two Claude members on the two cheapest models (lenses `evidence` and `brief`), and one member of
-  another CLI when `BIF_SMOKE_COUNCIL_EXTRA` is `codex` or `opencode`. It checks that every member ran
-  as its own reviewer run on its own model and that the runs overlapped, that each prompt holds its
-  lens and no other member's, one `council_review` decision per round, that the task's final status
-  follows the council's last round, and that the council route serves the rounds. A second task then
-  seats a member whose model does not exist under `onUnavailable: "fail"`: it must end *unverified*
-  naming that member, with no reviewer run on any other model.
-- the **persona panel smoke** (`persona-panel`, only when named): three personas of a fictional
-  courier firm on two Claude models with a baseline, on one recommendation; then the recommendation's
-  summary is changed and the panel runs again, and once more on the unchanged text. It checks one run
-  per persona on its own seat with its own profile and no other persona's, that the baseline ran with
-  no persona and is stored apart from the persona feedback, that each round-2 prompt lists the
-  reader's own earlier concerns and no other reader's and shows the text it read before and the text
-  as it stands now, that the rulings are stored and the earlier round is kept, that the third pass
-  starts no run, and that the recommendations route serves the panel.
+```sh
+npm install
+cp bif.config.example.json bif.config.json
+npm run build:web
+npm start
+```
 
-It then does an interview round-trip over HTTP with the claude CLI as interviewer.
+Then open http://127.0.0.1:4317 in your browser. Sign in to each assistant you enable (`claude`,
+`codex`, `opencode`) once in a terminal before starting. The settings file controls which
+assistants and models are used; the Settings page edits the same file.
 
-The knowledge flow uses the real worker system prompt, a real task and a verified fact seeded
-from an earlier task. The worker:
+## Where to read more
 
-1. saves a local HTML page with `save_artifact` and a description;
-2. runs `search`;
-3. `expand`s a passage;
-4. saves a finding with a verified quote;
-5. saves a near-duplicate and answers the duplicate check;
-6. reads the page text page by page with `read_artifact` and the cursor;
-7. recovers from a quote that fails verification.
-
-Each step is judged from the store and the run's tool calls. The check covers:
-
-- `retrieval_events` rows and `promptStoreGaps`;
-- a replay of the paged reads, which checks that every passage was served whole;
-- tokens and cost from `agent_usage`.
-
-Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning`, `stakeholders`, `stakeholder-positions`, `user-persona`, `council`, `persona-panel` or `interview` (`--help` lists them and runs nothing), optionally followed by providers
-(`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
-and `BIF_SMOKE_OPENCODE_MODEL` (the council's second Claude member: `BIF_SMOKE_COUNCIL_SECOND_MODEL`, default `sonnet`; the persona panel's second seat: `BIF_SMOKE_PANEL_SECOND_MODEL`, default `sonnet`), the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
-smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).
-
-## Known limitations
-
-- **OpenCode is unverified end to end.** No live OpenCode run has succeeded yet. See
-  [docs/smoke-results.md](docs/smoke-results.md).
-- **OpenCode rate limits can hang a run until `limits.idleTimeoutMs`.** On the free tier OpenCode
-  retries 429s internally without printing anything to stdout (stderr output is not guaranteed), so
-  the idle watchdog ends the run (default 10 minutes), the run is marked failed (not rate-limit
-  retried) and the task's one retry applies. Rate-limit text that OpenCode does print on stderr is
-  detected, but it does not shorten the hang. Lower `idleTimeoutMs` if you use OpenCode's free tier.
-- **Offline runs need a provider that can run offline.** Codex refuses offline runs, so reads by own
-  stakeholders and former colleagues, learning runs for those personas, the run that combines a former
-  colleague's two layers and the user persona's learning run go to Claude or OpenCode; with neither
-  enabled they are skipped and a harness decision records why (see Stakeholder personas).
-  Own-stakeholder research itself is not offline and runs on any provider.
-- **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth.
-- **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
-  overrides are runtime-only and are not written into `bif.config.json` when you save settings.)
-- **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
-- **A council round that failed because a member was unavailable is not a review.** Re-running the
-  task from its escalation redoes the work; it does not only review the existing result again.
-- **"What changed" only compares screenshots that findings or confirmations cite.**
-- **User, scheduler and calibration decisions** are stored as orchestrator decisions with
-  `payload.actor` telling them apart. User decisions (weight changes, prompt patch approvals and
-  calibration reverts) record your `user.id` as the run id; approvals and reverts also record the
-  role's resulting prompt version (worker / synthesizer: the base worker prompt without task-type
-  extras; persona: the persona calibration appendix).
-- **Local only, no authentication.** The server rejects requests whose `Host` is not
-  `127.0.0.1`/`localhost` (DNS rebinding), requires JSON (or multipart uploads) on state-changing
-  requests and refuses non-local `Origin`s. Artifacts are served with `Content-Security-Policy:
-  sandbox` and `nosniff`; HTML/SVG snapshots download instead of rendering. PDFs (filings) are the
-  exception to the sandbox: browsers refuse to show a sandboxed PDF, so they open inline with
-  `nosniff` only. Any other program on your
-  machine can still call the API.
-- Review-gate history and open items per section: [docs/superpowers/verify-log.md](docs/superpowers/verify-log.md).
+- [docs/README.md](docs/README.md): the index of the technical documentation.
+- [docs/architecture.md](docs/architecture.md): how the parts fit together, with diagrams.
+- [docs/setup.md](docs/setup.md): installation, the research browser and running the server.
+- [docs/configuration.md](docs/configuration.md): every setting and its default.
+- [docs/known-limitations.md](docs/known-limitations.md): what does not work yet.
 
 Created in [T3 Code](https://t3.codes).

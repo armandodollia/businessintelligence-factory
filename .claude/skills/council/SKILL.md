@@ -233,7 +233,7 @@ what was fixed, what was disputed and how the member ruled, and the follow-ups.
 Inside the tool the same idea reviews research deliverables: claims against evidence and a task
 brief. There the harness is the orchestrator and the merge is code, not a model.
 
-- Members, rounds and rules: the `council` block in `bif.config.json` (README, "Review council").
+- Members, rounds and rules: the `council` block in `bif.config.json` (`docs/council.md`).
 - Member rules: `src/core/prompts/council_member.md`. Lenses (`evidence`, `brief`, `reasoning`,
   `privacy`, `value`, `rewrite`): `src/core/council/lenses.ts`.
 - The round and the merge: `src/core/council/round.ts`, `src/core/council/merge.ts`.

@@ -235,9 +235,9 @@ describe('the documented configurations', () => {
     expect(overview.stages).toEqual([]);
   });
 
-  it("the README's council block is a valid configuration that seats the two recommended stages", () => {
-    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
-    const block = /```jsonc\n(\s*"council": \{[\s\S]*?)```/.exec(readme)?.[1];
+  it("the council block in docs/council.md is a valid configuration that seats the two recommended stages", () => {
+    const doc = readFileSync(join(ROOT, 'docs', 'council.md'), 'utf8');
+    const block = /```jsonc\n(\s*"council": \{[\s\S]*?)```/.exec(doc)?.[1];
     expect(block).toBeDefined();
     const { council } = JSON.parse(`{${block!.replace(/\/\/[^\n]*/g, '')}}`) as { council: unknown };
     const cfg = withCouncil(council, { providers: { codex: { enabled: true, command: 'codex', models: ['gpt-6.1-sol'] } } });

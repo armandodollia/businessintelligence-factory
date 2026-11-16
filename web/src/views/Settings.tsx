@@ -42,7 +42,7 @@ function CouncilSettings({ council }: { council: CouncilOverview | null }) {
     return (
       <p className="muted">
         No council is configured: every task type is reviewed by its single reviewer. To have a stage reviewed by several
-        reviewers, add a <code>council</code> block (see the README).
+        reviewers, add a <code>council</code> block (see docs/council.md).
       </p>
     );
   }

@@ -192,9 +192,9 @@ describe('the documented configurations', () => {
     expect(panelSettings(loadConfig(path))).toBeUndefined();
   });
 
-  it("the README's personaPanel block is a valid configuration that shows every key", () => {
-    const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
-    const block = /```jsonc\n(\s*"personaPanel": \{[\s\S]*?)```/.exec(readme)?.[1];
+  it("the personaPanel block in docs/persona-panel.md is a valid configuration that shows every key", () => {
+    const doc = readFileSync(join(ROOT, 'docs', 'persona-panel.md'), 'utf8');
+    const block = /```jsonc\n(\s*"personaPanel": \{[\s\S]*?)```/.exec(doc)?.[1];
     expect(block).toBeDefined();
     const { personaPanel } = JSON.parse(`{${block!.replace(/\/\/[^\n]*/g, '')}}`) as { personaPanel: Record<string, unknown> };
     expect(Object.keys(personaPanel).sort()).toEqual(['baseline', 'onUnavailable', 'personas', 'rounds', 'seats']);
