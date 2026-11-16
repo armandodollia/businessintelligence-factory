@@ -70,3 +70,32 @@ export interface StakeholderRead {
   simulated: true;
   createdAt: string;
 }
+
+/** Kinds of row in a stakeholder's position history (positions design §4). `joined`: where the person was before the first recorded change. */
+export const POSITION_CHANGES = ['joined', 'moved', 'promoted', 'demoted', 'left', 'returned'] as const;
+
+/**
+ * One row of a stakeholder persona's position history (migration 28; design
+ * 2026-11-15-stakeholder-positions-design.md §4): the place the person is in from `effectiveOn` on.
+ * Append-only (the table refuses UPDATE and DELETE). `placeKind` `node`: a node of the tree
+ * (`workspaceId`); `competitor`: the competitor `competitorId`; `elsewhere`: a company that is no
+ * competitor (`companyName`, when the user gave one). No `effectiveOn`: the `joined` baseline. Id prefix `spo_`.
+ */
+export interface StakeholderPosition {
+  id: string;
+  rootWorkspaceId: string;
+  personaId: string;
+  change: (typeof POSITION_CHANGES)[number];
+  placeKind: 'node' | 'competitor' | 'elsewhere';
+  workspaceId?: string;
+  competitorId?: string;
+  companyName?: string;
+  stakeholderType?: StakeholderType;
+  title?: string;
+  relation?: string;
+  /** YYYY-MM-DD. */
+  effectiveOn?: string;
+  actor: string;
+  note?: string;
+  createdAt: string;
+}

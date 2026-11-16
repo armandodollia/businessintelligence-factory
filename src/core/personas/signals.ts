@@ -1,7 +1,9 @@
 /**
  * Persona signals (design 2026-11-15-persona-learning-design.md §5): the user's reactions to what a
  * persona said, computed on read from the persona's own workspace (feedback events and ratings);
- * nothing is stored for them.
+ * nothing is stored for them. A stakeholder persona may move to another node of its business tree
+ * (positions design §5.2) and its reactions are keyed by persona, so they are read from every node of
+ * that tree (never another tree): a reaction made at the old node still counts after the move.
  *
  * - `verdict_reaction`: the latest `flow_verdict_reaction` per verdict of the persona.
  * - `override`: each persona verdict recorded with a ruling that still stands (`flow_override`, action
@@ -31,6 +33,7 @@ import { stakeholderRepos } from '../stakeholders/store.js';
 import type { StakeholderStatement } from '../stakeholders/types.js';
 import type { Store } from '../store/db.js';
 import type { Rating } from '../types.js';
+import { descendants, rootOf } from '../workspace/tree.js';
 import type { PersonaLearningSettings } from './settings.js';
 import { personaLearningRepos } from './store.js';
 import type { PersonaSignal } from './types.js';
@@ -161,14 +164,25 @@ function overrides(store: Store, workspaceId: string, personaId: string, info: R
 
 const ratingAnswer = (r: Rating) => (r.verdict === 'agree' ? 'you agreed' : `you set ${String(r.userValue)}`);
 
-function ratings(store: Store, workspaceId: string, personaId: string): PersonaSignal[] {
-  const all = store.ratings.list({ workspaceId });
+/** Rows of several nodes as one log, oldest first (rows of one node keep their order). */
+function oldestFirst<T extends { createdAt: string }>(perNode: T[][]): T[] {
+  if (perNode.length === 1) return perNode[0]!;
+  return perNode.flat().map((x, i) => ({ x, i })).sort((a, b) => (a.x.createdAt < b.x.createdAt ? -1 : a.x.createdAt > b.x.createdAt ? 1 : a.i - b.i)).map(({ x }) => x);
+}
+
+function ratings(store: Store, nodes: string[], personaId: string): PersonaSignal[] {
+  const all = oldestFirst(nodes.map((workspaceId) => store.ratings.list({ workspaceId })));
   const out: PersonaSignal[] = [];
   const suffix = `:${personaId}`;
   const panel = all.filter((r) => r.targetType === 'persona_feedback' && r.targetId.endsWith(suffix) && FEEDBACK_CRITERIA.has(r.criterion));
-  const index = panel.length ? judgmentIndex(store, workspaceId) : undefined;
+  // A rating is stale by the judgments of its own node.
+  const indexes = new Map<string, ReturnType<typeof judgmentIndex>>();
+  const indexOf = (workspaceId: string) => {
+    if (!indexes.has(workspaceId)) indexes.set(workspaceId, judgmentIndex(store, workspaceId));
+    return indexes.get(workspaceId)!;
+  };
   for (const r of latestBy(panel, (x) => `${x.targetId}|${x.criterion}`)) {
-    if (isRatingStale(r, index!)) continue;
+    if (isRatingStale(r, indexOf(r.workspaceId))) continue;
     const recId = r.targetId.slice(0, -suffix.length);
     out.push({
       id: r.id, source: 'feedback_rating', personaId, polarity: r.verdict, itemKey: `rec:${recId}`, topic: `recommendation:${r.criterion}`,
@@ -185,8 +199,10 @@ function ratings(store: Store, workspaceId: string, personaId: string): PersonaS
   return out;
 }
 
-function include(store: Store, workspaceId: string, personaId: string): PersonaSignal[] {
-  const e: FeedbackEvent | undefined = listFeedback(store, { workspaceId, kind: 'include_override', targetType: 'persona', targetId: personaId }).at(-1);
+function include(store: Store, nodes: string[], personaId: string): PersonaSignal[] {
+  const e: FeedbackEvent | undefined = oldestFirst(
+    nodes.map((workspaceId) => listFeedback(store, { workspaceId, kind: 'include_override', targetType: 'persona', targetId: personaId })),
+  ).at(-1);
   const value = (e?.afterJson as { include?: unknown } | undefined)?.include;
   if (!e || typeof value !== 'boolean') return [];
   return [{
@@ -197,8 +213,8 @@ function include(store: Store, workspaceId: string, personaId: string): PersonaS
 
 type ReadReaction = { reaction?: unknown; personaId?: unknown; personaVersion?: unknown; recommendationId?: unknown; stance?: unknown };
 
-function readReactions(store: Store, workspaceId: string, personaId: string): PersonaSignal[] {
-  const events = listFeedback(store, { workspaceId, kind: 'stakeholder_read_reaction', targetType: 'stakeholder_read' })
+function readReactions(store: Store, nodes: string[], personaId: string): PersonaSignal[] {
+  const events = oldestFirst(nodes.map((workspaceId) => listFeedback(store, { workspaceId, kind: 'stakeholder_read_reaction', targetType: 'stakeholder_read' })))
     .filter((e) => (e.afterJson as ReadReaction | undefined)?.personaId === personaId);
   const out: PersonaSignal[] = [];
   for (const e of latestBy(events, (x) => x.targetId)) {
@@ -254,17 +270,22 @@ function decisionRecords(store: Store, personaId: string): PersonaSignal[] {
 /**
  * All signals of a persona, oldest first; `since` keeps those after it, `until` those at or before it.
  * The latest-per-item rules apply to the whole log, then the window. Empty for an unknown persona.
+ * A stakeholder persona's ratings, include override and read reactions are read from every node of its
+ * business tree (it may have moved); its flow verdicts, which only a segment persona gives, from its node.
  */
 export function collectPersonaSignals(store: Store, personaId: string, window: Window = {}): PersonaSignal[] {
   const persona = store.personas.get(personaId);
   if (!persona) return [];
   const ws = persona.workspaceId;
+  // A stakeholder persona may have moved: its reactions are read from every node of its business tree.
+  const root = persona.kind === 'stakeholder' ? rootOf(store, ws) : ws;
+  const nodes = persona.kind === 'stakeholder' ? [root, ...descendants(store, root).map((w) => w.id)] : [ws];
   const info = flowInfo(store);
   const reactions = verdictReactions(store, ws, personaId, info);
   const reactedTo = new Set(reactions.map((s) => s.refs[0]!));
   const all = [
-    ...reactions, ...overrides(store, ws, personaId, info, reactedTo), ...ratings(store, ws, personaId), ...include(store, ws, personaId),
-    ...readReactions(store, ws, personaId), ...decisionRecords(store, personaId),
+    ...reactions, ...overrides(store, ws, personaId, info, reactedTo), ...ratings(store, nodes, personaId), ...include(store, nodes, personaId),
+    ...readReactions(store, nodes, personaId), ...decisionRecords(store, personaId),
   ];
   return all
     .filter((s) => (window.since === undefined || s.at > window.since) && (window.until === undefined || s.at <= window.until))

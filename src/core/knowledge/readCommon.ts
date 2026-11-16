@@ -18,8 +18,9 @@ import { itemIsUploadDerived } from './provenance.js';
 import { activeIds, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { artifactVisible, canonicalArtifactId, capText } from './texts.js';
 import { FENCE_CLOSE, FENCE_OPEN } from './trust.js';
+import { holdsInternal } from '../stakeholders/kinds.js'; // stakeholder positions
 import { artifactWithheldSql } from '../stakeholders/withheld.js'; // stakeholder personas
-import type { Entity, EntityKind, Relation, RelationSourceKind, RelationType } from '../types.js';
+import type { Entity, EntityKind, Persona, Relation, RelationSourceKind, RelationType } from '../types.js';
 import { getEntity } from './entities.js';
 import { SOURCE_TABLES, sourceUsableSql, sourceVisibleSql } from './usable.js';
 
@@ -55,7 +56,18 @@ export type ReadEnv = {
   pointerBudget?: (need: number, tool: string) => number | undefined;
   /** Notes the dispatcher adds to every page of this request (role notes), first in `notes`; pages are measured with them. */
   pageNotes?: string[];
+  /**
+   * Stakeholder positions (layer separation): the reader is a run of a task that follows former
+   * colleagues on the web (`FOLLOW_TASK_TYPES`). A persona whose text is internal (`holdsInternal`) is
+   * served to it as a hidden stakeholder is: label and type, no profile field (`internalWithheld`).
+   */
+  withholdInternal?: boolean;
 };
+
+/** Whether `persona`'s text is withheld from this reader: internal knowledge, and a reader that works on the web with the persona's id in hand. */
+export function internalWithheld(env: Pick<ReadEnv, 'withholdInternal'>, persona: Pick<Persona, 'kind' | 'subjectKind' | 'leftAt'>): boolean {
+  return env.withholdInternal === true && holdsInternal(persona);
+}
 
 /**
  * How a cut item is recovered (`full`; paging rework, binding). In order of preference:

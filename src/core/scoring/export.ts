@@ -11,6 +11,7 @@ import { runIsUploadExposed } from '../knowledge/retrievalLog.js'; // KS-6
 import { knowledgeRepos } from '../store/repos.js'; // KS-6
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
 import { personaLearningRepos } from '../personas/store.js';
+import { holdsInternal } from '../stakeholders/kinds.js';
 import { isHidden } from '../stakeholders/personas.js';
 import { withholding, type Withholding } from '../stakeholders/withheld.js';
 import { stakeholderRepos } from '../stakeholders/store.js';
@@ -53,17 +54,31 @@ function isPersonaLearningRecord(d: Decision): boolean {
 }
 
 /**
+ * The save of a former colleague's public layer (`save_stakeholder` with `follow`, stakeholder positions
+ * design §7.1; stakeholders/personas.ts `saveFollowed`). A research decision about what public sources
+ * show, exported like any other, but no judgment of the persona: its payload names the person as
+ * `followedPersonaId`, so it has no primary subject, and although its refs hold the persona's id it
+ * joins only ratings of itself. A rating of the persona is a rating of the profile held from inside and
+ * must not leave with a public research line.
+ */
+function isFollowSave(d: Decision): boolean {
+  const p = (d.payload ?? {}) as { tool?: unknown; layer?: unknown };
+  return p.tool === 'save_stakeholder' && p.layer === 'public';
+}
+
+/**
  * Internal stakeholder records (stakeholder design §9, §11): the user's statements and what rests on
  * them follow the export rule for upload-derived text (left out unless `includeUploads`). Decisions:
  * every Decision of an `own_stakeholders` task (`isOwnResearch`), `note_stakeholder` (a statement),
  * `submit_stakeholder_read` (a read), the `submit_persona_learning`
  * of a run that was shown statements, and the user's `persona_learning` decision on an internal
- * proposal or adjustment.
+ * proposal or adjustment. Stakeholder positions (design §7.3): the record of a combine run
+ * (`isCombineRecord`), which was shown a former colleague's internal layer.
  */
 function isInternalRecord(store: Store, d: Decision): boolean {
   const p = (d.payload ?? {}) as { tool?: unknown; runId?: unknown; proposalId?: unknown; adjustmentId?: unknown };
   if (p.tool === 'note_stakeholder' || p.tool === 'submit_stakeholder_read') return true;
-  if (isOwnResearch(store, d)) return true;
+  if (isOwnResearch(store, d) || isCombineRecord(store, d)) return true;
   const repos = personaLearningRepos(store);
   if (p.tool === 'submit_persona_learning') return typeof p.runId === 'string' && (repos.runs.get(p.runId)?.shownStatementIds.length ?? 0) > 0;
   if (p.tool === 'persona_learning') {
@@ -73,6 +88,35 @@ function isInternalRecord(store: Store, d: Decision): boolean {
     );
   }
   return false;
+}
+
+/** A Decision that marks its agent run as a combine run: its `submit_combined_profile`, or a harness record `stakeholder_combine_…`. */
+function isCombineMark(d: Decision): boolean {
+  const p = (d.payload ?? {}) as { tool?: unknown; event?: unknown };
+  return p.tool === 'submit_combined_profile' || (p.tool === 'harness' && typeof p.event === 'string' && p.event.startsWith('stakeholder_combine_'));
+}
+
+/**
+ * The record of a combine run (stakeholders/combine.ts): the Decision of `submit_combined_profile`, the
+ * harness records about combining (a run that did not answer, former colleagues skipped for want of an
+ * offline provider, a failed step), and every other Decision of a combine run (a retro-role run that
+ * carries one of those marks), e.g. its `log_decision` calls.
+ */
+function isCombineRecord(store: Store, d: Decision): boolean {
+  if (isCombineMark(d)) return true;
+  return d.role === 'retro' && store.decisions.list({ agentRunId: d.agentRunId }).some(isCombineMark);
+}
+
+/**
+ * Whether `id` names a persona that holds internal knowledge (`holdsInternal`: every stakeholder persona
+ * but a competitor's stakeholder that never worked here). What the user says about such a persona, a
+ * rating of its profile or an include override with its reason, is said about what the business knows
+ * from inside. It is internal by its target, whatever Decision it would join (stakeholder positions
+ * design §7.3, §12): a rating joins no exported line and a feedback event is no line by default.
+ */
+function isInternalPersona(store: Store, id: string): boolean {
+  const p = store.personas.get(id);
+  return !!p && holdsInternal(p);
 }
 
 const OWN_RESEARCH = 'own_stakeholders';
@@ -97,15 +141,18 @@ function isOwnResearch(store: Store, d: Decision): boolean {
 
 /**
  * Feedback events that are internal (stakeholder design §9, §11): every stakeholder action, decisions on
- * internal proposals and adjustments, and feedback on own-stakeholder research (a target produced by
- * one of its runs, one of its Decisions, or the task itself).
+ * internal proposals and adjustments, feedback on own-stakeholder research (a target produced by
+ * one of its runs, one of its Decisions, or the task itself) and on a Decision of a combine run, and
+ * every event whose target is a persona that holds internal knowledge (`isInternalPersona`), e.g. an
+ * include override on a former colleague with the user's reason.
  */
 function isInternalFeedback(store: Store, e: FeedbackEvent): boolean {
   if (e.kind.startsWith('stakeholder_')) return true;
+  if (isInternalPersona(store, e.targetId)) return true;
   if (isOwnResearchRun(store, e.agentRunId)) return true;
   if (e.targetId.startsWith('dec_')) {
     const d = store.decisions.get(e.targetId);
-    if (d && isOwnResearch(store, d)) return true;
+    if (d && (isOwnResearch(store, d) || isCombineRecord(store, d))) return true;
   }
   if (e.targetId.startsWith('tsk_') && store.tasks.get(e.targetId)?.type === OWN_RESEARCH) return true;
   if (e.targetType === 'persona_proposal') return personaLearningRepos(store).proposals.get(e.targetId)?.internal === true;
@@ -239,7 +286,7 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  *   `personaId` in its payload) joins that subject's ratings made while it was the latest judgment
  *   of the subject (`judgmentFor`);
  * - a persona learning record (`isPersonaLearningRecord`) joins only ratings of itself, like a lesson
- *   decision;
+ *   decision; so does the save of a former colleague's public layer (`isFollowSave`);
  * - any other decision joins ratings of its refs.
  * Decisions referencing an internal upload — directly or via the evidence of a referenced item
  * (`expandedRefs`) — are excluded unless `includeUploads`. Flow ranking records (`isFlowRankingRecord`:
@@ -247,7 +294,10 @@ function judgmentFor(judgments: Map<string, Decision[]>, r: Rating): Decision | 
  * superseded (replaced in a later review round) are excluded. Reuse records (`isReuseRecord`) are
  * neither judgments nor lines: they only feed provenance filtering (via the task's decisions).
  * Internal stakeholder records (`isInternalRecord`, `isInternalFeedback`, `stakeholderLines`) are
- * excluded unless `includeUploads`, like upload-derived ones.
+ * excluded unless `includeUploads`, like upload-derived ones. So is, by its target, a rating of a persona
+ * that holds internal knowledge (`isInternalPersona`): unless `includeUploads` it joins no line, by none
+ * of the rules above, and when that kept it out of a line that is exported it is counted once among the
+ * other lines left out, under `internal`.
  */
 export function exportTrainingData(workspaceId: string, deps: { store: Store }, includeUploads = false): string {
   return exportTrainingDataWithSummary(workspaceId, deps, includeUploads).jsonl;
@@ -271,6 +321,9 @@ export function exportTrainingDataWithSummary(
   // KS-2: + materialized / resolved flags; KS-6: + upload-exposed runs and what they produced.
   const uploads = includeUploads ? undefined : exportExclusion(store);
   const tally = new ExclusionTally(includeUploads);
+  // Ratings that are internal by their target, and those of them kept out of a line that is exported.
+  const internalRatings = new Set(uploads ? ratings.filter((r) => isInternalPersona(store, r.targetId)).map((r) => r.id) : []);
+  const withheldRatings = new Set<string>();
 
   const judgments = new Map<string, Decision[]>();
   for (const d of decisions) {
@@ -316,9 +369,16 @@ export function exportTrainingDataWithSummary(
       const refs = new Set(decision.refs);
       joined = ratings.filter((r) => {
         if (self(r)) return true;
-        if (r.targetType === 'persona_feedback' || r.targetType === 'decision' || isPersonaLearningRecord(decision)) return false;
+        if (r.targetType === 'persona_feedback' || r.targetType === 'decision' || isPersonaLearningRecord(decision) || isFollowSave(decision)) return false;
         if (subject) return r.targetId === subject && judgmentFor(judgments, r)?.id === decision.id;
         return refs.has(r.targetId);
+      });
+    }
+    if (internalRatings.size) {
+      joined = joined.filter((r) => {
+        if (!internalRatings.has(r.id)) return true;
+        withheldRatings.add(r.id);
+        return false;
       });
     }
     const status = finalReviewStatus(store, decision);
@@ -326,6 +386,7 @@ export function exportTrainingDataWithSummary(
     const tags = decisionTags(store, decision.id);
     lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}), ...tags }));
   }
+  for (let i = 0; i < withheldRatings.size; i++) tally.other('internal');
   lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf, tally));
   lines.push(...knowledgeLines(store, workspaceId, uploads, tally, w)); // KS-6
   lines.push(...stakeholderLines(store, workspaceId, !!uploads, tally));
@@ -600,7 +661,11 @@ export type ExportSummary = {
   includeUploads: boolean;
   /** Judgments (decision lines) left out, by cause. */
   excludedJudgments: ExclusionCount;
-  /** Other lines left out (request answers, interview turns, feedback events, retrieval events, fact observations), by cause. */
+  /**
+   * Other lines left out (request answers, interview turns, feedback events, retrieval events, fact
+   * observations), by cause. Under `internal` also each rating of a persona that holds internal knowledge
+   * that was kept out of an exported decision line (it is no line of its own; counted once).
+   */
   excludedOtherLines: ExclusionCount;
   note: string;
 };

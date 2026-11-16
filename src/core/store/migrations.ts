@@ -1636,4 +1636,48 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE persona_learning_runs ADD COLUMN shown_statement_ids TEXT NOT NULL DEFAULT '[]';
   ALTER TABLE persona_proposals ADD COLUMN internal INTEGER NOT NULL DEFAULT 0;
   `,
+  // 28: stakeholder positions (design 2026-11-15-stakeholder-positions-design.md §4). `personas` gains
+  // the leaving date and the position held then, the current title, and the two layers of a former
+  // colleague (the internal snapshot taken at leaving, the public profile of follow research with its
+  // task and times, what research saw of the current position); `subject_kind` gains the value
+  // `former` (a former colleague who went somewhere that is no competitor), which needs no column.
+  // `stakeholder_positions` is the position history per stakeholder persona and business tree
+  // (`root_workspace_id`), append-only: no UPDATE and no DELETE, like feedback_events. JSON columns
+  // (named by the Repo field): left_from, internal_profile, public_profile, public_position.
+  // Repositories: `stakeholders/store.ts`.
+  `
+  ALTER TABLE personas ADD COLUMN left_at TEXT;
+  ALTER TABLE personas ADD COLUMN left_from TEXT;
+  ALTER TABLE personas ADD COLUMN position_title TEXT;
+  ALTER TABLE personas ADD COLUMN internal_profile TEXT;
+  ALTER TABLE personas ADD COLUMN public_profile TEXT;
+  ALTER TABLE personas ADD COLUMN public_task_id TEXT;
+  ALTER TABLE personas ADD COLUMN public_saved_at TEXT;
+  ALTER TABLE personas ADD COLUMN combined_at TEXT;
+  ALTER TABLE personas ADD COLUMN public_position TEXT;
+
+  CREATE TABLE stakeholder_positions (
+    id TEXT PRIMARY KEY,
+    root_workspace_id TEXT NOT NULL,
+    persona_id TEXT NOT NULL,
+    change TEXT NOT NULL,
+    place_kind TEXT NOT NULL,
+    workspace_id TEXT,
+    competitor_id TEXT,
+    company_name TEXT,
+    stakeholder_type TEXT,
+    title TEXT,
+    relation TEXT,
+    effective_on TEXT,
+    actor TEXT NOT NULL DEFAULT 'local-user',
+    note TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX stakeholder_positions_persona ON stakeholder_positions (persona_id);
+  CREATE INDEX stakeholder_positions_root ON stakeholder_positions (root_workspace_id);
+  CREATE TRIGGER stakeholder_positions_no_update BEFORE UPDATE ON stakeholder_positions
+    BEGIN SELECT RAISE(ABORT, 'stakeholder_positions is append-only'); END;
+  CREATE TRIGGER stakeholder_positions_no_delete BEFORE DELETE ON stakeholder_positions
+    BEGIN SELECT RAISE(ABORT, 'stakeholder_positions is append-only'); END;
+  `,
 ];

@@ -242,3 +242,119 @@ the combine run with a fake agent (evidence computed in code, refusals, offline,
 offline provider); export tests (internal records left out); route tests incl. another tree → 404;
 page tests; one smoke run on the cheapest Claude model: mark a stakeholder as left to a competitor,
 run the follow research and the combine run, check the two layers and the combined profile.
+
+## 12. As built (2026-11-15)
+
+What was built differs from the sections above in the points below. Where a point changes a section,
+this section holds.
+
+### 12.1 Changes to what the sections say
+
+1. **Moved on (§5.1).** §5.1 let only an own stakeholder leave, and a parked former colleague be given
+   a competitor. A former colleague who goes to another company could not be recorded. Now the same
+   action takes any former colleague, parked or at a competitor, with the same three destinations.
+   `leftAt`, `leftFrom` and both layers are kept; the history row has the change `moved` (also for the
+   "attach" of a parked one, which first wrote `left`); slug and agent.md follow the new place
+   (`stk-<competitor>-<label>` at a competitor, `stk-<label>` for one who leaves a competitor for
+   elsewhere, unchanged for a parked one). The place the person is at already is refused (400), so a
+   repeated request adds no row to a history that cannot be taken back. API: the body
+   `{ change: 'left', … }` sent for a former colleague. Page: "Moved to another company" on every
+   former colleague; it replaced "Attach to a competitor".
+2. **A competitor by a name the node already has (§5.1).** No second row is made. A live competitor
+   of that name is used as it is. A superseded one is used again and reset to what a new one is:
+   threat and directness 1, empty comparison, no evidence, its task cleared, status `unverified`. The
+   new competitor is created at the persona's node.
+3. **Refusals (§5).** A stakeholder whose research is not usable (pending, failed, superseded, or
+   unverified without the user's include) answers 409 for every action. In every action agent.md is
+   written last in the transaction. Text limits: label, company and competitor name 80 characters;
+   title and site 300; note 2,000. "Not in the future" is judged by the calendar day of the machine.
+4. **Returned (§5.3).** The relation becomes the title or empty, as when leaving. An optional new
+   label is taken, under the rules of a label on leaving (one line, at most 80 characters, the slug
+   derived from it). It is the way out when the slug is in use at the node (409, with the conflicting
+   label). The same holds for someone who moved on to another company (§12.1 point 1).
+5. **Who is followed (§7.1).** Left out: a former colleague the user excluded or whose status is not
+   usable, and one whose public layer another task of the same research run already saved. With
+   `maxFollowed: 0` a `follow` save is refused too; a layer saved earlier is still combined. A `follow`
+   save takes only a former colleague who is usable and not excluded (the filter of the list, without
+   its cap and its same-run rule); anyone else gets the answer of an unknown id. The combine run
+   leaves the same people out, so a layer saved before the user excluded someone is not combined.
+   A `follow` save whose evidence is an upload, or rests on one, is refused with the ids: the public
+   layer may rest only on public pages.
+6. **The follow save's Decision (§7.1, §7.3).** It names the person as `followedPersonaId`, not
+   `personaId`: it is no judgment of the persona. A rating of the persona never joins it in the
+   export, an earlier rating does not go stale by it, and it exports with the review status of its own
+   task. With `follow`, `relation` and `stakeholder_type` of the call are ignored too.
+7. **"Failed review" (§7.2).** In this code a task whose review never passes ends `unverified`; `failed`
+   is a task that could not finish. A layer saved by a `failed` task is stored and not used; one saved
+   by an `unverified` task is combined, as §7.2 says, and the page says so (§12.2 point 3).
+8. **The combine run (§7.2).** A basis that names a layer the field is not in is refused (`internal` or
+   `both` without the internal field, `public` or `both` without the public one). The prompt shows the
+   snapshot and the public layer only (no adjustment, no statement), each value cut at 1,200
+   characters. The Decision holds ids, the basis of each field, which fields have a conflict and the
+   confidences; no value. No prompt reads are logged for the run. A second answer of the same run
+   changes nothing.
+9. **Export (§7.3).** A follow task names the former colleague, so the evidence of that persona's
+   profile counts as the task's own. When the profile rests on an upload, every judgment of that follow
+   task stays out of the default export. This is the existing rule erring on the safe side; it is
+   wider than "the public layer's own research decisions export as those of any competitor
+   stakeholder".
+   What the user says about a persona for which `holdsInternal` is true is internal by its target,
+   whatever Decision it would join: a rating of the persona joins no line of the default export, and
+   a feedback event on it (an include override with the user's reason) is no line. Each such event,
+   and each such rating that was kept out of a line that is exported, counts once under `internal`
+   among the other lines left out. This holds for an own stakeholder as for a former colleague; a
+   competitor's stakeholder that never worked here is exported as before.
+10. **`GET /stakeholders` (§9).** `leftAt`, `leftFrom`, `publicPosition` and `hasPublicLayer` are served
+    on the views of former colleagues only, and `positionTitle` only when set, so a stakeholder that
+    never changed position is served as before.
+
+### 12.2 Additions
+
+1. **`publicPosition` (§4)** also stores the task whose save said it (`taskId`). The API serves the
+   text and the evidence.
+2. **API (§9).** `GET /stakeholders` also returns `places`: the competitors and the nodes of the tree
+   a person can go to. Each row of `GET …/positions` carries `placeName` (the node, the competitor, or
+   the company the user named). `GET …/positions` also returns, for a former colleague with a public
+   layer, `publicSavedAt`, `publicLayerUsed` (false when the task that saved the layer failed or is
+   gone) and `publicLayerStatus` (`verified`, `unverified`, `failed`, or `pending` while that task has
+   not ended), and `combinedAt` once the profile was combined. The body of `returned` takes `label`.
+3. **Page (§10).** Under "What is public" the page says "Not used: the research that found this
+   failed", "Used, although the research that found this was not verified" (the saving task ended
+   `unverified`) and "Not combined yet". The "Position" line of an own stakeholder says since when
+   by the newest row of the history. "Moved" is offered only when the tree has another node. The full
+   history is served by the route and not listed on the page. "Moved to another company" and
+   "Returned" have an optional "New name" (sent as `label`); a change the server refuses, such as a
+   name in use where the person goes (409), is shown in the form in the server's words. "Moved to
+   another company" never offers the competitor the person is at.
+4. **What follow research may read.** A run of a `competitor_stakeholders` task is served only the
+   label and type of any persona for which `holdsInternal` is true (`withheld: internal`), by `expand`,
+   by the entity cards and in its worker briefing. Its profile, relation, adjustments and layers are
+   withheld, as a hidden stakeholder's are.
+5. **What the reviewer of a follow task sees.** The public layers the task saved, with their
+   evidence, and what research saw of the position only when that task saved it. Nothing of the
+   internal profile.
+6. **The orchestrator** of the stakeholders phase is told how many former colleagues are still to
+   follow in this research run (a count; no id, no label).
+7. **Parked former colleagues.** No engine proposal to retire an adjustment; the opening line of
+   agent.md leaves the relation out.
+8. **After a move (§5.2),** reactions made at the old node still reach the next learning run: for a
+   stakeholder persona they are collected across the nodes of its business tree.
+9. **Smoke mode `stakeholder-positions`.** It follows the person from two public pages captured in
+   the store, not from the live web, so the run is repeatable and cheap.
+
+### 12.3 Known gaps
+
+1. **Files on disk.** A CLI run with web access works from a directory under the data directory and
+   can read files there, a former colleague's agent.md included. The tool and prompt paths are closed;
+   the file system is not. The hub design gives each run its own working directory on the runner,
+   which closes it.
+2. **Uploads and facts in the knowledge store.** Follow research is served nothing of a former
+   colleague's persona but its label and type. The documents the user uploaded, and the facts taken
+   from them, are served to it by the knowledge tools as to every research task. What keeps them out
+   of web requests is the prompt rule, as before. What keeps them out of the public layer is the
+   follow save, which refuses evidence that is upload-derived (§12.1 point 5).
+3. **A change of title at the same outside company** cannot be recorded as a position change (the
+   same place is refused); a note on the stakeholder can say it.
+4. **Time zones.** The page proposes today in the browser's time zone and the server compares with
+   its own day. On one machine they agree.
+5. **The page was not checked in a real browser** (tests in jsdom and the web build only).

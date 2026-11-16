@@ -17,6 +17,7 @@ import { flowRankingRunner, flowRoundToolHandlers } from '../core/flows/round.js
 import { flowToolHandlers } from '../core/flows/tools.js';
 import { personaPanelRunner } from '../core/market/panel.js';
 import { marketToolHandlers } from '../core/market/personas.js';
+import { submitCombinedProfileHandler } from '../core/stakeholders/combine.js';
 import { stakeholderToolHandlers } from '../core/stakeholders/personas.js';
 import { submitStakeholderReadHandler } from '../core/stakeholders/reads.js';
 import type { PhaseRunner, ResearchDeps } from '../core/research/deps.js';
@@ -132,6 +133,7 @@ export function createRuntime(opts: BootOptions = {}): Runtime {
       ...flowToolHandlers(), // flow records: worker tools
       ...stakeholderToolHandlers({ dataDir }), // stakeholder personas: save_stakeholder
       submit_stakeholder_read: submitStakeholderReadHandler, // stakeholder personas: reads in the panel
+      submit_combined_profile: submitCombinedProfileHandler, // stakeholder positions: the combine run of a former colleague
     },
   });
   const supervisorDeps: SupervisorDeps = {

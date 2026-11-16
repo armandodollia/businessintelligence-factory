@@ -1,7 +1,8 @@
 import type { PersonaAdjustment } from '../personas/types.js';
 import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, type PersonaField, type StakeholderField } from '../scoring/criteria.js';
+import { isParked } from '../stakeholders/kinds.js';
 import { OWN_STANCES, RIVAL_STANCES } from '../stakeholders/types.js';
-import type { Persona } from '../types.js';
+import type { Persona, PersonaProfileField } from '../types.js';
 
 /** Section heading in agent.md for each persona profile field (spec §8b). */
 export const AGENT_MD_HEADINGS: Record<PersonaField, string> = {
@@ -142,6 +143,16 @@ export type StakeholderMdOptions = {
 
 const stances = (xs: readonly string[]) => xs.map((x) => `\`${x}\``).join(', ');
 
+/** One line without a closing full stop (stored texts placed inside a sentence). */
+const inline = (s: string | undefined) => (s ?? '').replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+
+/** What a profile field of a former colleague rests on, in words (positions design §6). */
+function restsOn(basis: NonNullable<PersonaProfileField['basis']>, leftAt: string): string {
+  if (basis === 'internal') return `internal knowledge (as of ${leftAt})`;
+  if (basis === 'public') return 'public sources';
+  return basis === 'both' ? 'both' : 'a conclusion from both';
+}
+
 /**
  * Compiles a stakeholder persona (`kind: 'stakeholder'`) into its agent.md (stakeholder design §6):
  * frontmatter (`name`, `description`, `version`, `simulated: true`, `kind: stakeholder`,
@@ -149,13 +160,24 @@ const stances = (xs: readonly string[]) => xs.map((x) => `\`${x}\``).join(', ');
  * judging as someone who must approve, fund or supply; competitor: "at <competitor>, a rival of
  * <scope>", judging how they would respond), one section per `STAKEHOLDER_FIELDS` entry, the
  * corrections section of persona learning, then instructions to answer with `submit_stakeholder_read`.
+ *
+ * A former colleague (`leftAt`; positions design §6). At a competitor: frontmatter
+ * `former_colleague: true`; after the opening paragraph, that until that date they worked at the node
+ * in the position of `leftFrom` and know it as it was up to then and nothing later; and per section
+ * what it rests on (`basis`) and any recorded `conflict`. Parked (`isParked`): compiled as an own
+ * stakeholder, with a first line saying they left on that date and an opening line without the relation.
  */
 export function compileStakeholderMd(persona: Persona, opts: StakeholderMdOptions = {}): string {
   const scope = opts.scopeName?.trim() || 'the business';
   const rival = persona.subjectKind === 'competitor';
   const competitor = opts.competitorName?.trim() || 'a competitor';
   const label = persona.segment;
-  const relation = (persona.relation ?? '').replace(/\s+/g, ' ').trim().replace(/\.$/, '');
+  const relation = inline(persona.relation);
+  const leftAt = persona.leftAt || undefined;
+  const formerRival = rival && leftAt !== undefined;
+  const parked = leftAt !== undefined && isParked(persona);
+  // Where the person worked: the node's scope name when they left (the node may be renamed later).
+  const from = inline(persona.leftFrom?.scopeName) || scope;
   const description = rival
     ? `Simulated stakeholder persona of ${competitor}, a rival of ${scope}: ${label}`
     : `Simulated stakeholder persona of ${scope}: ${label}`;
@@ -169,16 +191,20 @@ export function compileStakeholderMd(persona: Persona, opts: StakeholderMdOption
     'kind: stakeholder',
     ...(persona.stakeholderType ? [`stakeholder_type: ${persona.stakeholderType}`] : []),
     `subject: ${rival ? 'competitor' : 'own'}`,
+    ...(formerRival ? ['former_colleague: true'] : []),
     '---',
     '',
     `# ${label}`,
     '',
+    ...(parked ? [`You left ${from} on ${leftAt}: what follows is who you were there until then.`, ''] : []),
     rival
       ? `You are ${label} at ${competitor}, a rival of ${scope}${relation ? `: ${relation}` : ''}. You judge proposals of ` +
         `${scope} as someone at ${competitor} who decides how ${competitor} responds to them: ignore them, watch them, ` +
         'copy them or counter them.'
-      : `You are ${label}, a stakeholder of ${scope}${relation ? `: ${relation}` : ''}. You judge proposals as someone who ` +
+      : // A parked persona's relation holds its title at the new company, not what the node needed from it.
+        `You are ${label}, a stakeholder of ${scope}${relation && !parked ? `: ${relation}` : ''}. You judge proposals as someone who ` +
         'must approve, fund or supply them.',
+    ...(formerRival ? ['', ...formerColleagueParagraphs(persona, from, leftAt)] : []),
     '',
     'You are a simulated stakeholder built from researched evidence. The profile below is who you are; ' +
       'confidence and evidence notes tell you how sure the research is about each part.',
@@ -194,6 +220,11 @@ export function compileStakeholderMd(persona: Persona, opts: StakeholderMdOption
     out.push(f.value.trim());
     const ev = f.evidence.length ? f.evidence.join(', ') : 'none';
     out.push('', `_Confidence: ${f.confidence} · Evidence: ${ev}_`);
+    if (formerRival) {
+      if (f.basis) out.push('', `_Rests on: ${restsOn(f.basis, leftAt)}_`);
+      const conflict = (f.conflict ?? '').replace(/\s+/g, ' ').trim();
+      if (conflict) out.push('', `_Conflict: ${conflict}_`);
+    }
   }
 
   out.push(...correctionsSection(opts.adjustments));
@@ -217,4 +248,23 @@ export function compileStakeholderMd(persona: Persona, opts: StakeholderMdOption
     '',
   );
   return out.join('\n');
+}
+
+/**
+ * The two paragraphs after the opening one in the agent.md of a former colleague at a competitor: where
+ * they worked until when and in which position, that their knowledge of it ends there, and how to read
+ * the "Rests on" line of each section.
+ */
+function formerColleagueParagraphs(persona: Persona, from: string, leftAt: string): string[] {
+  const held = persona.leftFrom;
+  const title = inline(held?.title);
+  const relation = inline(held?.relation);
+  const type = held?.stakeholderType ?? persona.stakeholderType ?? 'other';
+  return [
+    `Until ${leftAt} you worked at ${from}${title ? ` as ${title}` : ''}, one of its stakeholders (${type})${relation ? `: ${relation}` : ''}. ` +
+      `You know its plans, its people and its way of deciding as they were up to ${leftAt}, and nothing that changed there later.`,
+    '',
+    'Each section below says what it rests on: internal knowledge from your time there, public sources since you left, both, or a ' +
+      'conclusion from both. Where the two disagree, the section says so.',
+  ];
 }

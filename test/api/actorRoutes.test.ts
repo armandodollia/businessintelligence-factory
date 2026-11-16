@@ -124,6 +124,8 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/stakeholders/:personaId/notes': { test: 'test/api/stakeholderRoutes.test.ts' },
   'POST /api/workspaces/:id/recommendations/:recId/stakeholder-decisions': { test: 'test/api/stakeholderRoutes.test.ts' },
   'POST /api/workspaces/:id/stakeholder-reads/:readId/reaction': { test: 'test/api/stakeholderRoutes.test.ts' },
+  // stakeholder positions: left, moved, promoted, demoted, returned
+  'POST /api/workspaces/:id/stakeholders/:personaId/position': { test: 'test/api/stakeholderPositionRoutes.test.ts' },
 };
 
 /**

@@ -119,6 +119,10 @@ export const FEEDBACK_KINDS = [
   /** Agree / disagree with a stakeholder's simulated read (target type `stakeholder_read`). */
   'stakeholder_read_reaction',
   // --- end stakeholder personas ---
+  // --- stakeholder positions (design 2026-11-15-stakeholder-positions-design.md §5) ---
+  /** The user recorded that a stakeholder left, moved, was promoted or demoted, or returned (target type `stakeholder`). */
+  'stakeholder_position_change',
+  // --- end stakeholder positions ---
 ] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
@@ -157,7 +161,7 @@ export type FeedbackTargetType =
   // persona learning: a persona proposal (accept / reject), a persona adjustment (retire)
   | 'persona_proposal'
   | 'persona_adjustment'
-  // stakeholder personas: a stakeholder persona (answers, reveal, note, decision record), a stakeholder read (reaction)
+  // stakeholder personas: a stakeholder persona (answers, reveal, note, decision record, position change), a stakeholder read (reaction)
   | 'stakeholder'
   | 'stakeholder_read';
 

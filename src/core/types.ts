@@ -385,7 +385,18 @@ export interface PersonaProfileField {
   value: string;
   confidence: number;
   evidence: string[];
+  /**
+   * Stakeholder positions (migration 28; design 2026-11-15-stakeholder-positions-design.md §4): what the
+   * field of a former colleague rests on — what the company knew from inside, what research found on the
+   * public web after they left, both, or a conclusion drawn from both.
+   */
+  basis?: 'internal' | 'public' | 'both' | 'inferred';
+  /** Where the internal and the public layer disagree, in words (both are kept, never resolved silently). */
+  conflict?: string;
 }
+
+/** The position a former colleague held when leaving: node, its scope name then, type, title and relation. */
+export type LeftFrom = { workspaceId: string; scopeName: string; stakeholderType: StakeholderType; title?: string; relation?: string };
 
 export interface Persona {
   id: string;
@@ -414,13 +425,41 @@ export interface Persona {
    */
   kind?: PersonaKind;
   stakeholderType?: StakeholderType;
-  /** `own`: a stakeholder of the node itself; `competitor`: of the competitor `subjectId`. */
-  subjectKind?: 'own' | 'competitor';
+  /**
+   * `own`: a stakeholder of the node itself; `competitor`: of the competitor `subjectId`; `former`
+   * (migration 28): a former colleague who went somewhere that is no competitor of the tree (parked).
+   * `former` is never own: test for `'own'`, not for "not a competitor".
+   */
+  subjectKind?: 'own' | 'competitor' | 'former';
   subjectId?: string;
-  /** What the node needs from the stakeholder or what they decide (≤ 300 characters). */
+  /** What the node needs from the stakeholder or what they decide (≤ 300 characters); for a former colleague, their title where they are now, or empty. */
   relation?: string;
   /** DB default `open`; an own stakeholder stays `hidden` until its question round. */
   disclosure?: PersonaDisclosure;
+  /**
+   * Stakeholder positions (migration 28; design 2026-11-15-stakeholder-positions-design.md §4).
+   * `leftAt` (YYYY-MM-DD): the day the person left the own company; set ⇒ a former colleague.
+   */
+  leftAt?: string;
+  /** The position held when leaving. */
+  leftFrom?: LeftFrom;
+  /** Current title, when the user gave one. */
+  positionTitle?: string;
+  /** Internal layer: the profile as it was when the person left. */
+  internalProfile?: Record<string, PersonaProfileField>;
+  /** Public layer: the profile follow research found on the web after the person left. */
+  publicProfile?: Record<string, PersonaProfileField>;
+  /** The task whose run last saved the public layer. */
+  publicTaskId?: string;
+  /** When the public layer was last saved. */
+  publicSavedAt?: string;
+  /** When the combined profile (`profile`) was last written from both layers. */
+  combinedAt?: string;
+  /**
+   * What research saw of the person's current company and title, with the evidence of the save that
+   * said so and the task of that save (a later follow save without `now_at` keeps it as it is).
+   */
+  publicPosition?: { text: string; evidence: string[]; taskId?: string };
 }
 
 export type PersonaKind = 'segment' | 'stakeholder' | 'user';

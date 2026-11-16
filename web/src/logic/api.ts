@@ -403,6 +403,12 @@ export const stakeholdersApi = {
   /** The user's statements about a stakeholder, newest first. */
   statements: (wsId: string, personaId: string) => get<{ statements: Statement[] }>(`${ws(wsId)}/stakeholders/${enc(personaId)}/statements`),
   addNote: (wsId: string, personaId: string, text: string) => post<Statement>(`${ws(wsId)}/stakeholders/${enc(personaId)}/notes`, { text }),
+  /** The position history, newest first, and the two layers of a former colleague. */
+  positions: (wsId: string, personaId: string) =>
+    get<import('./types.js').StakeholderPositionsView>(`${ws(wsId)}/stakeholders/${enc(personaId)}/positions`),
+  /** Records that the person left, moved, was promoted or demoted, or returned. */
+  changePosition: (wsId: string, personaId: string, input: import('./types.js').StakeholderPositionInput) =>
+    post<SV>(`${ws(wsId)}/stakeholders/${enc(personaId)}/position`, input),
   reads: (wsId: string, recId: string) =>
     get<{ reads: import('./types.js').ServedStakeholderRead[] }>(`${ws(wsId)}/recommendations/${enc(recId)}/stakeholder-reads`),
   react: (wsId: string, readId: string, reaction: Reaction, reason?: string) =>

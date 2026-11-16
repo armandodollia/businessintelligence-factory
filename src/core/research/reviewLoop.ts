@@ -7,14 +7,14 @@ import { loadPrompt, promptVersion } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
 import { escalationRerunSection, ESCALATION_KIND } from '../escalation/context.js'; // WP-D
 import { policyDenialsSection } from '../policy/policyEvents.js'; // WP-D
-import type { Finding, Role, Task, TaskType } from '../types.js';
+import type { Finding, Persona, Role, Task, TaskType } from '../types.js';
 import { sameTree } from '../workspace/tree.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
 import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
 import { recordTaskEndOutcomes } from '../learning/outcomes.js';
 import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
-import { stakeholderTaskSection } from '../stakeholders/personas.js'; // stakeholder personas
+import { formerColleagues, stakeholderTaskSection } from '../stakeholders/personas.js'; // stakeholder personas
 import { defaultConfig } from '../config/schema.js'; // KS-2
 import { liveObservations, reviewFactContext, type ReviewFactContext } from '../knowledge/factReview.js'; // KS-2
 import type { ReviewSlice } from '../knowledge/readCommon.js'; // KS-4
@@ -75,7 +75,9 @@ export type ReviewContext = {
  * flows (with their steps and check answers; outputs of earlier rounds that were re-submitted or cited
  * by id in the deliverable included), the review mentions it saved, the findings cited by those
  * recommendations, and the evidence artifact ids reachable from all of these (step screenshots and
- * the mentions' stored copies included). Nothing else of the workspace is included.
+ * the mentions' stored copies included). For a `competitor_stakeholders` task also the public layers it
+ * saved for the former colleagues it follows (stakeholder positions), with their evidence. Nothing else
+ * of the workspace is included.
  */
 export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>, task: Task, role: Role = 'reviewer'): ReviewContext {
   const { store } = deps;
@@ -115,6 +117,11 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
   const stepsOf = new Map(flows.map((f) => [f.id, flowSteps(store, f.id)]));
   for (const steps of stepsOf.values()) for (const s of steps) if (s.artifactId) ids.add(s.artifactId);
   for (const m of mentions) ids.add(m.artifactId);
+  // Stakeholder positions (design §7.1): the public layers this task saved for former colleagues it
+  // follows. The persona is not the task's output (its profile and status are not the task's to
+  // change), so the layer is shown here, with its evidence, and nothing else of the persona.
+  const followed = task.type === 'competitor_stakeholders' ? formerColleagues(store, task.workspaceId).filter((p) => p.publicTaskId === task.id && p.publicProfile) : [];
+  for (const p of followed) for (const a of layerEvidence(p, task.id)) ids.add(a);
   if (task.result !== undefined) for (const m of JSON.stringify(task.result).matchAll(ARTIFACT_ID)) ids.add(m[0]);
 
   // --- KS-5: the outputs are a briefing: every text redacted, then cut, then fenced; fitted to the role's
@@ -144,6 +151,20 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
       .join('\n')}`,
     refs: record(p.id), upload: false,
   })));
+  add('Public profiles of former colleagues saved by this task (what public sources show since they left)', followed.map((p) => {
+    const evidence = layerEvidence(p, task.id);
+    // What an earlier task saw of the position is not this task's to be reviewed for.
+    const nowAt = positionSeenBy(p, task.id);
+    return {
+      text:
+        `- [${p.id}] ${line(p.segment, 120)}${nowAt ? `\n  now at: ${line(nowAt.text, 200)}` : ''}\n` +
+        Object.entries(p.publicProfile ?? {})
+          .map(([k, v]) => `  - ${k}: ${line(v.value, 400)} (confidence ${v.confidence}; evidence: ${v.evidence.join(', ')})`)
+          .join('\n'),
+      // The read is of the pages the layer rests on, not of the persona's record (its profile is not shown).
+      refs: evidence.map((id) => ({ id, kind: 'artifact' })), upload: evidence.some((id) => itemIsUploadDerived(store, id)),
+    };
+  }));
   add('Competitors saved by this task', competitors.map((c) => ({
     text:
       `- [${c.id}] ${line(c.name, 200)}${c.site ? ` (${line(c.site, 200)})` : ''}: threat ${c.threat}, directness ${c.directness}, ` +
@@ -200,6 +221,19 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
     ...(knowledge.results.length ? { knowledge } : {}),
     ...(outputsRead ? { outputsRead } : {}),
   };
+}
+
+/** What research saw of a former colleague's position, when the task `taskId` is the one that saved it. */
+function positionSeenBy(p: Pick<Persona, 'publicPosition'>, taskId: string): Persona['publicPosition'] {
+  return p.publicPosition?.taskId === taskId ? p.publicPosition : undefined;
+}
+
+/**
+ * The artifacts the public layer the task `taskId` saved for a former colleague rests on: the evidence
+ * of its fields and, when that task also said where the person works now, of that.
+ */
+function layerEvidence(p: Pick<Persona, 'publicProfile' | 'publicPosition'>, taskId: string): string[] {
+  return [...new Set([...Object.values(p.publicProfile ?? {}).flatMap((f) => f.evidence), ...(positionSeenBy(p, taskId)?.evidence ?? [])])];
 }
 
 /** Longest step field (action, observation, error) shown to a reviewer (chars, after redaction). */
@@ -335,7 +369,7 @@ function taskBriefings(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<Research
   if (task.phase === 'synthesis') out.push(synthesisBriefing(env, { workspaceId: task.workspaceId, role, provider }));
   const recheck = taskRecheckFactIds(deps.store, task);
   const worker = workerBriefing(env, {
-    workspaceId: task.workspaceId, role, provider, recheckFactIds: recheck,
+    workspaceId: task.workspaceId, role, provider, recheckFactIds: recheck, taskType: task.type,
     ...(task.subject && task.phase !== 'synthesis' ? { subject: task.subject } : {}),
   });
   if (worker) out.push(worker);

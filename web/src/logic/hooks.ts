@@ -9,7 +9,19 @@ import { exportSummaryView } from './exportSummary.js';
 import { asPersonaLearningView, pendingProposals } from './personaLearning.js';
 import { subscribe } from './sse.js';
 import { asUserPersonaView } from './userPersona.js';
-import { answersToSend, asStakeholdersView, isHiddenView, isOpenView } from './stakeholders.js';
+import {
+  answersToSend,
+  asStakeholdersView,
+  isFormerColleague,
+  isHiddenView,
+  isOpenView,
+  newPositionDraft,
+  placesOf,
+  positionInput,
+  publicLayerNotes,
+  withChange,
+  type PositionDraft,
+} from './stakeholders.js';
 import {
   COMPETITOR_CRITERIA,
   FINDING_CRITERIA,
@@ -36,7 +48,9 @@ import type {
   PersonaAdjustment,
   PersonaProposal,
   PersonaSignal,
+  OpenStakeholderView,
   RealDecision,
+  StakeholderPlaces,
   StakeholderQuestionGroup,
   BusEvent,
   CreateWorkspaceInput,
@@ -167,7 +181,9 @@ function useAction() {
       setBusy(false);
     }
   }, []);
-  return { busy, error, run };
+  /** Forgets the error of the last action (a form that is opened again starts without it). */
+  const clearError = useCallback(() => setError(null), []);
+  return { busy, error, run, clearError };
 }
 
 // ---------------------------------------------------------------------------
@@ -1816,7 +1832,11 @@ export function useUserPersona(wsId: string | null | undefined) {
 // ---------------------------------------------------------------------------
 // stakeholder personas: the Stakeholders page and the reads on a recommendation
 
-/** The node's stakeholders (`view` null until loaded); `ownOpen`: own stakeholders that are open (who can record a real decision). */
+/**
+ * The node's stakeholders (`view` null until loaded); `ownOpen`: own stakeholders that are open (who can
+ * record a real decision). `own` holds only those that have not left: a former colleague is in its
+ * competitor's group or, parked, under `former`. `places`: the competitors and nodes of the tree.
+ */
 export function useStakeholderList(wsId: string | null | undefined) {
   const res = useResource(`stakeholders:${wsId ?? ''}`, wsId ? () => stakeholdersApi.list(wsId) : null);
   useTaskStatusRefresh(wsId, res.reload);
@@ -1826,6 +1846,8 @@ export function useStakeholderList(wsId: string | null | undefined) {
     own: view?.own ?? [],
     ownOpen: (view?.own ?? []).filter(isOpenView),
     competitors: view?.competitors ?? [],
+    former: (view?.former ?? []).filter(isOpenView),
+    places: placesOf(view),
     loading: res.loading,
     error: res.error,
     reload: res.reload,
@@ -1851,16 +1873,19 @@ export function useStakeholders(wsId: string | null | undefined, onChange?: () =
   const listReload = list.reload;
   const qsReload = qs.reload;
 
+  /** After a change (also one made elsewhere on the page: a position change): both lists again, then `onChange`. */
+  const reload = useCallback(async () => {
+    await Promise.all([listReload(), qsReload()]);
+    onChangeRef.current?.();
+  }, [listReload, qsReload]);
+
   const change = useCallback(
     async (fn: () => Promise<unknown>) => {
       const ok = (await action.run(async () => (await fn(), true))) === true;
-      if (ok) {
-        await Promise.all([listReload(), qsReload()]);
-        onChangeRef.current?.();
-      }
+      if (ok) await reload();
       return ok;
     },
-    [action.run, listReload, qsReload],
+    [action.run, reload],
   );
 
   const send = async () => {
@@ -1876,6 +1901,10 @@ export function useStakeholders(wsId: string | null | undefined, onChange?: () =
     hidden: list.own.filter(isHiddenView),
     open: list.ownOpen,
     competitors: list.competitors,
+    /** Parked former colleagues (open ones: a stakeholder cannot leave while hidden). */
+    former: list.former,
+    places: list.places,
+    reload,
     hasHidden: list.own.some(isHiddenView),
     draft: (questionId: string) => drafts[questionId] ?? '',
     setDraft: (questionId: string, v: string) => setDrafts((d) => ({ ...d, [questionId]: v })),
@@ -1917,6 +1946,71 @@ export function useStakeholderStatements(wsId: string | null | undefined, person
     busy: action.busy,
     actionError: action.error,
     loading: res.loading,
+    error: res.error,
+  };
+}
+
+/**
+ * The position of one open stakeholder (positions design §10): its history and, for a former colleague,
+ * the two layers ("What we knew", "What is public"); and the form of a change (`draft`, null while
+ * closed). The form of a former colleague who moved on offers every competitor but the one it is at
+ * (`atCompetitorId`: the competitor whose group the page lists it in, so the form does not wait for the
+ * history to know it; the server refuses the place a person is at already).
+ * Nothing is loaded for a competitor's stakeholder that never worked here: it has no history.
+ * A saved change closes the form, loads the history again and calls `onChanged` (the page's lists); a
+ * refused one keeps the form and shows why (`actionError`, the server's message).
+ */
+export function useStakeholderPosition(
+  wsId: string | null | undefined,
+  v: OpenStakeholderView,
+  places: StakeholderPlaces,
+  onChanged: () => Promise<void> | void,
+  atCompetitorId?: string,
+) {
+  const tracked = v.subjectKind !== 'competitor' || isFormerColleague(v);
+  const res = useResource(`stakeholderPositions:${wsId ?? ''}:${v.id}`, wsId && tracked ? () => stakeholdersApi.positions(wsId, v.id) : null);
+  const action = useAction();
+  const [draft, setDraft] = useState<PositionDraft | null>(null);
+  const otherNodes = places.nodes.filter((n) => n.workspaceId !== wsId);
+  const input = draft ? positionInput(draft) : null;
+  const positions = Array.isArray(res.data?.positions) ? res.data.positions : [];
+  /** Where a person can go: every competitor of the tree, but for a former colleague never the one it is at. */
+  const competitorsFor = (form: PositionDraft['form']) =>
+    form === 'movedOn' ? places.competitors.filter((c) => c.competitorId !== atCompetitorId) : places.competitors;
+
+  const save = async () => {
+    if (!wsId || !input) return false;
+    const ok = (await action.run(async () => (await stakeholdersApi.changePosition(wsId, v.id, input), true))) === true;
+    if (ok) {
+      setDraft(null);
+      await Promise.all([res.reload(), onChanged()]);
+    }
+    return ok;
+  };
+
+  return {
+    positions,
+    internalProfile: res.data?.internalProfile,
+    publicProfile: res.data?.publicProfile,
+    /** What to say about the public layer: not used, used although not verified, not combined yet. */
+    publicNotes: res.data ? publicLayerNotes(res.data) : [],
+    /** The competitors the open form offers. */
+    competitors: draft ? competitorsFor(draft.form) : places.competitors,
+    /** The history and the layers have been loaded. */
+    loaded: Array.isArray(res.data?.positions),
+    otherNodes,
+    draft,
+    open: (form: PositionDraft['form']) => {
+      action.clearError();
+      setDraft(newPositionDraft(form, v, wsId ?? '', { ...places, competitors: competitorsFor(form) }));
+    },
+    close: () => setDraft(null),
+    set: (patch: Partial<Omit<PositionDraft, 'form' | 'change' | 'currentType'>>) => setDraft((d) => (d ? { ...d, ...patch } : d)),
+    setChange: (change: PositionDraft['change']) => setDraft((d) => (d ? withChange(d, change, otherNodes) : d)),
+    canSave: input !== null,
+    save,
+    busy: action.busy,
+    actionError: action.error,
     error: res.error,
   };
 }

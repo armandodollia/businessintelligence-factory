@@ -24,7 +24,7 @@ import { entityNames, getEntity } from './entities.js';
 import { factFreshness } from './facts.js';
 import { entityIsUploadOnly, itemIsUploadDerived } from './provenance.js';
 import {
-  aroundVisible, artifactVisibleSql, day, factVisibleSql, isCrossNodeCausal, recordVisibleSql, relationSourceNode, visParams, type ReadEnv, type Recover,
+  aroundVisible, artifactVisibleSql, day, factVisibleSql, internalWithheld, isCrossNodeCausal, recordVisibleSql, relationSourceNode, visParams, type ReadEnv, type Recover,
 } from './readCommon.js';
 import { neighbours, type Edge } from './relations.js';
 import type { KnowledgeScope, ScopeMode } from './scope.js';
@@ -143,8 +143,9 @@ function typedLines(env: ReadEnv, view: KnowledgeScope, mode: ScopeMode, group: 
   }
   for (const id of ids('personas', outputUsableSql('r'))) {
     const per = store.personas.get(id)!;
-    // A hidden stakeholder (stakeholder design §7): no profile field on the card.
-    const top = isHidden(per) ? [] : Object.entries(per.profile ?? {})
+    // A hidden stakeholder (stakeholder design §7): no profile field on the card. Nor, for a run that
+    // follows former colleagues on the web, of a persona whose text is internal (stakeholder positions).
+    const top = isHidden(per) || internalWithheld(env, per) ? [] : Object.entries(per.profile ?? {})
       .sort((a, b) => (b[1]?.confidence ?? 0) - (a[1]?.confidence ?? 0))
       .slice(0, 3)
       .map(([k, v]) => `${k}: ${servedLine(store, ws, v?.value ?? '', 80)}`);

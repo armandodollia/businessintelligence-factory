@@ -2,12 +2,15 @@
  * Stakeholder reads (stakeholder design §7, §10): in the `persona_panel` phase, after the segment
  * personas, each open, usable stakeholder persona of the node reads each usable recommendation of the
  * node — own stakeholders first, then competitors' (each by slug) — in at most `maxReadsPerPanel` runs.
+ * A former colleague at a competitor reads as that competitor's stakeholder (a rival read); a parked
+ * former colleague (`subjectKind: 'former'`) reads nothing (positions design §6).
  *
  * A read is one ordinary `persona` run (no browser) whose system prompt is the persona's agent.md and
- * whose user prompt is `stakeholder_read.md`. A read by an own stakeholder (`subjectKind: 'own'`) is
- * offline (its agent.md holds internal content), on the persona model or, when that model cannot run
- * offline, on one that can (`offlineModel`); when no enabled provider can, its reads are skipped and one
- * harness Decision says why. A read by a competitor's stakeholder is not offline (final review item 5). The persona answers
+ * whose user prompt is `stakeholder_read.md`. A read by a persona whose agent.md holds internal content
+ * (`holdsInternal`: an own stakeholder, and a former colleague at a competitor) is offline, on the
+ * persona model or, when that model cannot run offline, on one that can (`offlineModel`); when no
+ * enabled provider can, its reads are skipped and one harness Decision says why. A read by a
+ * competitor's stakeholder that never worked here is not offline (final review item 5). The persona answers
  * with `submit_stakeholder_read`; the handler refuses a stance outside the persona's set (`OWN_STANCES`
  * or `RIVAL_STANCES`) and a read of another recommendation than the one asked. The dispatcher records
  * the call as a `persona_feedback` Decision (as for `submit_persona_feedback`), which the runner stamps
@@ -32,6 +35,7 @@ import { newId } from '../store/repos.js';
 import type { Decision, Persona, Recommendation } from '../types.js';
 import { rootOf, scopeOf } from '../workspace/tree.js';
 import { isHidden, stakeholderPersonas } from './personas.js';
+import { holdsInternal, isParked } from './kinds.js';
 import { stakeholdersSettings } from './settings.js';
 import { StakeholderError } from './statements.js';
 import { stakeholderRepos } from './store.js';
@@ -54,10 +58,13 @@ export type ReadsReport = {
 
 const fail = (error: string): ToolResult => ({ ok: false, error });
 
-/** An own stakeholder (its agent.md holds internal content): its runs are offline. */
-const isOwn = (p: Pick<Persona, 'subjectKind'>) => p.subjectKind !== 'competitor';
+/** Reads as a rival: a competitor's stakeholder, whether or not they once worked here. */
+const isRival = (p: Pick<Persona, 'subjectKind'>) => p.subjectKind === 'competitor';
 
-const stancesOf = (p: Pick<Persona, 'subjectKind'>): readonly string[] => (p.subjectKind === 'competitor' ? RIVAL_STANCES : OWN_STANCES);
+/** Reads as an own stakeholder (an approval read): neither a competitor's stakeholder nor parked (`isParked` takes part in no read). */
+const readsAsOwn = (p: Pick<Persona, 'kind' | 'subjectKind'>) => !isRival(p) && !isParked(p);
+
+const stancesOf = (p: Pick<Persona, 'subjectKind'>): readonly string[] => (isRival(p) ? RIVAL_STANCES : OWN_STANCES);
 
 /** What each running read was asked, by agent run id (set when the run starts, removed when it ends). */
 const asked = new Map<string, { personaId: string; recommendationId: string; stances: readonly string[] }>();
@@ -79,16 +86,16 @@ export const submitStakeholderReadHandler: ExtraToolHandler = async (ctx, raw) =
   return { ok: true, data: { recommendationId: read.recommendationId, simulated: true } };
 };
 
-/** The open, usable stakeholder personas of the node: own first, then competitors', each by slug. */
+/** The open, usable stakeholder personas of the node that read: own first, then competitors', each by slug; never a parked former colleague. */
 function readers(store: Store, workspaceId: string): Persona[] {
   const open = stakeholderPersonas(store, workspaceId).filter((p) => isOutputUsable(p) && !isHidden(p));
   const bySlug = (a: Persona, b: Persona) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
-  return [...open.filter((p) => p.subjectKind !== 'competitor').sort(bySlug), ...open.filter((p) => p.subjectKind === 'competitor').sort(bySlug)];
+  return [...open.filter(readsAsOwn).sort(bySlug), ...open.filter(isRival).sort(bySlug)];
 }
 
 /** The read prompt: the recommendation fenced as untrusted data, and the question for an own or a competitor's stakeholder. */
 function readPrompt(store: Store, template: string, rec: Recommendation, persona: Persona, scope: string): string {
-  const rival = persona.subjectKind === 'competitor';
+  const rival = isRival(persona);
   const text = redactServed(store, rec.workspaceId, `Title: ${rec.title}\n\n${rec.summary}`);
   return renderTemplate(template, {
     scope,
@@ -162,12 +169,12 @@ export async function runStakeholderReads(workspaceId: string, deps: ResearchDep
   const settings = stakeholdersSettings(config);
   if (!settings.enabled) return report;
   const model = config.roles.persona;
-  const ownModel = offlineModel(config, model);
+  const internalModel = offlineModel(config, model);
   const recs = store.recommendations.list({ workspaceId }).filter(isOutputUsable);
   let personas = readers(store, workspaceId);
-  const unreadable = ownModel ? [] : personas.filter(isOwn);
+  const unreadable = internalModel ? [] : personas.filter(holdsInternal);
   if (unreadable.length && recs.length) {
-    personas = personas.filter((p) => !isOwn(p));
+    personas = personas.filter((p) => !holdsInternal(p));
     recordHarnessDecision(
       store,
       { agentRunId: READS_ACTOR, workspaceId, role: 'persona', model, promptVersion: 'n/a' },
@@ -202,8 +209,9 @@ export async function runStakeholderReads(workspaceId: string, deps: ResearchDep
 
   const one = async (rec: Recommendation, persona: Persona, systemPrompt: string): Promise<void> => {
     const prompt = readPrompt(store, template.text, rec, persona, scope);
-    const own = isOwn(persona);
-    const runModel = own ? ownModel! : model;
+    // Positions design §6: an agent.md holding internal content never reaches a run with web access.
+    const offline = holdsInternal(persona);
+    const runModel = offline ? internalModel! : model;
     const version = recordPromptVersion(store, 'persona', `${systemPrompt}\n${template.text}`);
     let reason = 'no submit_stakeholder_read call';
     for (let attempt = 1; attempt <= READ_ATTEMPTS; attempt++) {
@@ -217,7 +225,7 @@ export async function runStakeholderReads(workspaceId: string, deps: ResearchDep
       try {
         const outcome = await runAgent(deps, {
           kind: 'work', role: 'persona', workspaceId, round: 1, attempt, prompt, systemPrompt, model: runModel, needsBrowser: false, promptVersion: version,
-          ...(own ? { offline: true } : {}),
+          ...(offline ? { offline: true } : {}),
           onStart: (ctx) => {
             runId = ctx.agentRunId;
             asked.set(ctx.agentRunId, { personaId: persona.id, recommendationId: rec.id, stances: stancesOf(persona) });
@@ -266,12 +274,13 @@ export type ReadWithReaction = StakeholderRead & { reaction?: 'agree' | 'disagre
 
 /**
  * The stored reads of a recommendation of the caller's tree, by open stakeholders only (a hidden one's
- * read is never returned, §7): own first, then competitors', each by slug. Each carries the user's
- * latest reaction to it (and its reason), unless a newer run has replaced the read since.
+ * read is never returned, §7): own first, then competitors', then the reads a parked former colleague
+ * made before leaving, each by slug. Each carries the user's latest reaction to it (and its reason),
+ * unless a newer run has replaced the read since.
  */
 export function readsOf(store: Store, workspaceId: string, recommendationId: string): ReadWithReaction[] {
   const root = rootOf(store, workspaceId);
-  const rank = (p: Persona) => `${p.subjectKind === 'competitor' ? 1 : 0}:${p.slug}`;
+  const rank = (p: Persona) => `${isParked(p) ? 2 : isRival(p) ? 1 : 0}:${p.slug}`;
   return stakeholderRepos(store)
     .reads.list({ recommendationId, rootWorkspaceId: root })
     .flatMap((r) => {

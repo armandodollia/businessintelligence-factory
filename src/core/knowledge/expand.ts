@@ -43,7 +43,7 @@ import { factFreshness, isFactUsable, lineageVersions } from './facts.js';
 import { assemblePage, boundedText, laterPageNeed, type PageItem } from './paging.js';
 import { itemIsUploadDerived } from './provenance.js';
 import {
-  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, outsideScopeNote, readableById,
+  aroundVisible, artifactInNodeScope, entityVisibleIn, factInNodeScope, inSlice, internalWithheld, outsideScopeNote, readableById,
   sourceLabel, usableOnly, type ReadEnv, type ReadOutput, type Recover,
 } from './readCommon.js';
 import { narrowTo, notFound, type ScopeMode } from './scope.js';
@@ -517,6 +517,12 @@ function expandRecord(env: ReadEnv, id: string, type: string): Built {
       // A hidden stakeholder (stakeholder design §7): its label and type only, never what research found.
       if (isHidden(p)) {
         fields.push(['segment', red(p.segment)], ['stakeholder_type', p.stakeholderType ?? 'other'], ['disclosure', 'hidden']);
+        break;
+      }
+      // Stakeholder positions (layer separation): a run that follows former colleagues on the web is
+      // served no internal text of an own stakeholder or a former colleague, as for a hidden one.
+      if (internalWithheld(env, p)) {
+        fields.push(['segment', red(p.segment)], ['stakeholder_type', p.stakeholderType ?? 'other'], ['withheld', 'internal']);
         break;
       }
       fields.push(['segment', red(p.segment)], ['audience', p.audience ?? 'external'], ['entity_id', p.entityId]);

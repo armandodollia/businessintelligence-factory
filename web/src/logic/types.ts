@@ -619,21 +619,69 @@ export interface HiddenStakeholderView {
 /** An open stakeholder: what research found, its review status and how many statements the user made. */
 export type OpenStakeholderView = Omit<HiddenStakeholderView, 'disclosure'> & {
   disclosure: 'open';
-  subjectKind: 'own' | 'competitor';
+  /** `former`: a parked former colleague, who left for somewhere that is no competitor. */
+  subjectKind: 'own' | 'competitor' | 'former';
   relation: string;
-  profile: Record<string, import('../../../src/core/types.js').PersonaProfileField>;
+  /** For a former colleague: the combined profile, each field with what it rests on (`basis`, `conflict`). */
+  profile: Record<string, PersonaProfileField>;
   version: number;
   status: string;
   includeOverride?: boolean;
   statements: number;
+  /** The current title, when the user gave one. */
+  positionTitle?: string;
+  /** Former colleagues only: the day the person left (YYYY-MM-DD) and the position held then. */
+  leftAt?: string;
+  leftFrom?: import('../../../src/core/types.js').LeftFrom;
+  /** Former colleagues only: what research last saw of the person's company and title. */
+  publicPosition?: { text: string; evidence: string[] };
+  /** Former colleagues only: whether research has stored a public layer. */
+  hasPublicLayer?: boolean;
 };
 export type StakeholderView = HiddenStakeholderView | OpenStakeholderView;
-/** `GET .../stakeholders`. */
+type PersonaProfileField = import('../../../src/core/types.js').PersonaProfileField;
+/** Where a person can go: the competitors and the nodes of the business tree. */
+export interface StakeholderPlaces {
+  competitors: Array<{ competitorId: string; name: string }>;
+  nodes: Array<{ workspaceId: string; name: string }>;
+}
+/** `GET .../stakeholders`. `own`: own stakeholders that have not left; `former`: parked former colleagues. */
 export interface StakeholdersView {
   enabled: boolean;
   own: StakeholderView[];
   competitors: Array<{ competitorId: string; name: string; stakeholders: StakeholderView[] }>;
+  /** Absent from a server older than stakeholder positions, like `places`. */
+  former?: StakeholderView[];
+  places?: StakeholderPlaces;
 }
+/** `GET .../stakeholders/:personaId/positions`: the history, newest first, and the two layers of a former colleague. */
+export interface StakeholderPositionsView {
+  positions: Array<import('../../../src/core/stakeholders/types.js').StakeholderPosition & { placeName?: string }>;
+  /** What we knew: the profile as it was when the person left. */
+  internalProfile?: Record<string, PersonaProfileField>;
+  /** What is public: what research found on the web since. */
+  publicProfile?: Record<string, PersonaProfileField>;
+  /** With a public layer: when research saved it. */
+  publicSavedAt?: string;
+  /** With a public layer: false when the research that saved it failed (stored, not used). */
+  publicLayerUsed?: boolean;
+  /** With a public layer: how the research that saved it ended (`pending`: not yet). `unverified` research is used. */
+  publicLayerStatus?: 'verified' | 'unverified' | 'failed' | 'pending';
+  /** When the combined profile was last written from both layers. */
+  combinedAt?: string;
+}
+/** `POST .../stakeholders/:personaId/position`. `left` for a former colleague: they moved on to another company. */
+export type StakeholderPositionInput =
+  | {
+      change: 'left';
+      date: string;
+      to: { competitorId: string } | { newCompetitor: { name: string; site?: string } } | { elsewhere: { companyName?: string } };
+      label?: string;
+      title?: string;
+      note?: string;
+    }
+  | { change: 'moved' | 'promoted' | 'demoted'; date: string; toWorkspaceId?: string; stakeholderType?: CoreStakeholderType; title?: string; note?: string }
+  | { change: 'returned'; date: string; toWorkspaceId: string; label?: string; stakeholderType?: CoreStakeholderType; title?: string; note?: string };
 /** One group of `GET .../stakeholder-questions`; no `persona`: the node-wide questions. */
 export interface StakeholderQuestionGroup {
   persona?: { id: string; label: string; stakeholderType: CoreStakeholderType };
@@ -652,6 +700,7 @@ export type ServedStakeholderRead = import('../../../src/core/stakeholders/types
   reactionReason?: string;
   label: string;
   stakeholderType: CoreStakeholderType;
-  subjectKind: 'own' | 'competitor';
+  /** `former`: an old read of a stakeholder who has since left for somewhere that is no competitor. */
+  subjectKind: 'own' | 'competitor' | 'former';
 };
 export type RealDecision = NonNullable<import('../../../src/core/stakeholders/types.js').StakeholderStatement['decision']>;

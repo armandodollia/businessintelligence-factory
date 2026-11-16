@@ -135,7 +135,8 @@ export const PHASE_GOALS: Record<Phase, string> = {
     'Build the stakeholder personas of {{scope}}: the people, teams and systems whose approval, budget, data or ' +
     'work it depends on (own_stakeholders, from what the store already holds and the public web; set needs_browser ' +
     'when it should browse), and the leaders, owners and investors of its most important competitors from public sources (competitor_stakeholders; ' +
-    'only when the business tree has competitors).',
+    'only when the business tree has competitors). The same competitor_stakeholders task also follows, on the public web, the former ' +
+    'colleagues of this node (people who left it): propose it when your prompt says there are former colleagues to follow, also without competitors.',
   synthesis:
     'Link the interview symptoms of {{scope}} to research findings (symptom hypotheses) and synthesize ' +
     'evidence-backed recommendations, each referencing the findings that support it. Use verified findings only.',

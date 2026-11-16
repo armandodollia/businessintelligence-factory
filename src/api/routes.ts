@@ -749,7 +749,7 @@ export function createApp(deps: AppDeps): Hono {
   mountPersonaLearningRoutes(app, { store, config }, workspace);
   // --- end persona learning --------------------------------------------------------------------
   // --- stakeholder personas: question round, statements, reads (hidden personas never served) ------
-  mountStakeholderRoutes(app, { store, config }, workspace);
+  mountStakeholderRoutes(app, { store, config, dataDir: artifacts.dataDir }, workspace);
   // --- end stakeholder personas ----------------------------------------------------------------
   // --- user persona: the You page (accept / reject / retire use the persona learning routes) ------
   mountUserPersonaRoutes(app, { store, config }, workspace);

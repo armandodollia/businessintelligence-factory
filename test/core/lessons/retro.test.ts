@@ -129,7 +129,7 @@ describe('weekly retro', () => {
     // The lessons engine ran first: its add proposal is pending too.
     expect(lessonRepos(t.store).proposals.list({ rootWorkspaceId: t.a.id, source: 'engine' })).toHaveLength(1);
     // Retro role sees only its own tools; the run's prompt resolves in the prompt store.
-    expect(ROLE_TOOLS.retro).toEqual(['log_decision', 'submit_retro', 'submit_persona_learning']);
+    expect(ROLE_TOOLS.retro).toEqual(['log_decision', 'submit_retro', 'submit_persona_learning', 'submit_combined_profile']);
     expect(promptStoreGaps(t.store)).toEqual([]);
   });
 

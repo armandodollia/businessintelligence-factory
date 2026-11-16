@@ -2,9 +2,10 @@
  * Statements (stakeholder design §9): everything the user says about a stakeholder, append-only.
  *
  * - `addNote`: "Add a note" on a stakeholder (or node-wide, about someone not yet known). Allowed on a
- *   hidden stakeholder (the user may tell the tool things before answering); it reveals nothing.
+ *   hidden stakeholder (the user may tell the tool things before answering); it reveals nothing. Allowed
+ *   on a former colleague too, at a competitor or parked (positions design §6).
  * - `recordDecision`: "Record the real decision" on a recommendation, by an own stakeholder of the
- *   recommendation's node; refused (409) while that stakeholder is hidden.
+ *   recommendation's node that has not left; refused (409) while that stakeholder is hidden.
  * - `noteStakeholderHandler`: the interviewer's `note_stakeholder` tool; the quote must be text the
  *   user typed in this node's interview.
  *
@@ -25,7 +26,7 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Decision, Persona } from '../types.js';
 import { rootOf, sameTree } from '../workspace/tree.js';
-import { isHidden } from './personas.js';
+import { isCurrentOwn, isHidden } from './personas.js';
 import { stakeholderRepos } from './store.js';
 import { REAL_DECISIONS, type StakeholderStatement } from './types.js';
 
@@ -49,7 +50,7 @@ export function statementText(store: Store, workspaceId: string, text: string): 
   return redacted.length > STATEMENT_TEXT_MAX ? capText(redacted, STATEMENT_TEXT_MAX - 1) : redacted;
 }
 
-/** A stakeholder persona of the caller's business tree; 404 (as for an unknown id) otherwise. */
+/** A stakeholder persona of the caller's business tree (own, a competitor's or a former colleague); 404 (as for an unknown id) otherwise. */
 export function ownStakeholder(store: Store, workspaceId: string, personaId: unknown): Persona {
   const p = typeof personaId === 'string' ? store.personas.get(personaId) : undefined;
   if (!p || p.kind !== 'stakeholder' || !sameTree(store, workspaceId, p.workspaceId)) {
@@ -71,7 +72,7 @@ export function insertStatement(
   });
 }
 
-/** "Add a note": a statement on a stakeholder of the tree (hidden ones too, revealing nothing), or node-wide without `personaId`. */
+/** "Add a note": a statement on a stakeholder of the tree (hidden ones and former colleagues too, revealing nothing), or node-wide without `personaId`. */
 export function addNote(store: Store, actor: string, workspaceId: string, input: { personaId?: string; text: string; field?: string }): StakeholderStatement {
   if (!store.workspaces.get(workspaceId)) throw new StakeholderError(`workspace '${workspaceId}' not found`, 404);
   if (typeof input.text !== 'string') throw new StakeholderError('text must be a text', 400);
@@ -104,7 +105,7 @@ export function addNote(store: Store, actor: string, workspaceId: string, input:
 }
 
 /**
- * "Record the real decision" of an own stakeholder of the recommendation's node: a `decision_record`
+ * "Record the real decision" of an own stakeholder of the recommendation's node (never a former colleague's): a `decision_record`
  * statement whose text is the reasoning (cleaned like reasons: at most 2,000 characters). 404 for an
  * unknown or foreign recommendation or persona, 409 while the stakeholder is hidden, 400 otherwise.
  */
@@ -120,7 +121,7 @@ export function recordDecision(
   const rec = typeof input.recommendationId === 'string' ? store.recommendations.get(input.recommendationId) : undefined;
   if (!rec || !sameTree(store, workspaceId, rec.workspaceId)) throw new StakeholderError(`recommendation '${input.recommendationId}' not found`, 404);
   const persona = ownStakeholder(store, workspaceId, input.personaId);
-  if (persona.subjectKind !== 'own' || persona.workspaceId !== rec.workspaceId) {
+  if (!isCurrentOwn(persona) || persona.workspaceId !== rec.workspaceId) {
     throw new StakeholderError(`stakeholder '${persona.id}' is not an own stakeholder of the recommendation's node`, 400);
   }
   if (isHidden(persona)) throw new StakeholderError(`stakeholder '${persona.id}' is hidden: answer or skip its questions first`, 409);

@@ -21,7 +21,7 @@ import { anyUploadDerived } from '../knowledge/readCommon.js'; // KS-5
 import { servedLine } from '../knowledge/texts.js'; // KS-5
 import type { RetrievalResultRef } from '../types.js'; // KS-5
 import { noteStakeholderHandler } from '../stakeholders/statements.js'; // stakeholder personas
-import { stakeholderPersonas } from '../stakeholders/personas.js'; // stakeholder personas
+import { isCurrentOwn, stakeholderPersonas } from '../stakeholders/personas.js'; // stakeholder personas
 import { fenceEvidence } from '../knowledge/trust.js'; // stakeholder personas
 
 export const INTERVIEW_TOPICS = ['basics', 'revenue_model', 'customers', 'going_well', 'going_badly'] as const;
@@ -139,10 +139,11 @@ export function buildInterviewPromptWithReads(ws: Workspace, store: Store, dataD
 /**
  * The node's own stakeholders (stakeholder design §9), so the interviewer can pass `persona_id` to
  * `note_stakeholder`: id, label and type only (hidden ones too; never the relation or the profile), the
- * labels fenced as untrusted data. Empty when the node has none.
+ * labels fenced as untrusted data. A former colleague, at a competitor or parked, is not listed
+ * (positions design §6). Empty when the node has none.
  */
 function stakeholderSection(store: Store, workspaceId: string): string[] {
-  const own = stakeholderPersonas(store, workspaceId).filter((p) => p.subjectKind === 'own' && p.status !== 'superseded');
+  const own = stakeholderPersonas(store, workspaceId).filter((p) => isCurrentOwn(p) && p.status !== 'superseded');
   if (!own.length) return [];
   const lines = own.map((p) => `- ${p.id} — ${servedLine(store, workspaceId, p.segment.replace(/\s+/g, ' ').trim(), 120)} (${p.stakeholderType ?? 'other'})`);
   return [

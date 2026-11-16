@@ -24,7 +24,8 @@ import { estimateTokens } from '../knowledge/budget.js'; // KS-5
 import { anyUploadDerived } from '../knowledge/readCommon.js'; // KS-5
 import { recordHarnessDecision, runAgent, throwIfAborted, type ResearchDeps } from './deps.js';
 import { orderPhases, PHASE_TASK_TYPES, phaseGoal, ALL_PHASES, RUNNER_PHASES } from './phases.js';
-import { treeCompetitors } from '../stakeholders/personas.js'; // stakeholder personas
+import { runCombine } from '../stakeholders/combine.js'; // stakeholder positions
+import { colleaguesToFollow, treeCompetitors } from '../stakeholders/personas.js'; // stakeholder personas
 import { ensureQuestions } from '../stakeholders/questions.js'; // stakeholder personas
 import { stakeholdersSettings } from '../stakeholders/settings.js'; // stakeholder personas
 import { PipelineBusyError, tryLockPipeline } from './lock.js';
@@ -133,9 +134,12 @@ export const proposeTasksHandler: ExtraToolHandler = async (ctx, rawInput, deps)
         reason = `duplicate of task ${dupOf} already in this phase run (same type, subject and brief)`;
       } else if (remaining <= 0) {
         reason = `exceeds limits.maxTasksPerRun (${config.limits.maxTasksPerRun}) for this phase run`;
-      } else if (t.type === 'competitor_stakeholders' && !treeCompetitors(store, ctx.workspaceId).length) {
-        // Stakeholder personas (design §6): nothing to research without competitors.
-        reason = 'the business tree has no competitors yet: competitor_stakeholders has nothing to research';
+      } else if (
+        t.type === 'competitor_stakeholders' && !treeCompetitors(store, ctx.workspaceId).length && !colleaguesToFollow(store, config, ctx.workspaceId, { runId: rr.id }).length
+      ) {
+        // Stakeholder personas (design §6), positions (design §7.1): nothing to research without
+        // competitors and without former colleagues to follow.
+        reason = 'the business tree has no competitors yet and this node has no former colleagues to follow: competitor_stakeholders has nothing to research';
       } else {
         reason = recheckProblem(store, ctx.workspaceId, t.recheck_fact_ids); // KS-5
       }
@@ -341,6 +345,8 @@ export function orchestratorPromptWithReads(store: Store, config: BifConfig, rr:
       .join('\n') || '- (no task types in this phase)'}`,
     `## Task budget\n${remaining} more task(s) may be proposed in this phase run (limits.maxTasksPerRun = ${config.limits.maxTasksPerRun}).`,
   ];
+  const following = rr.phase === 'stakeholders' ? followNote(store, config, rr) : '';
+  if (following) parts.push(following);
   const results: RetrievalResultRef[] = [];
   let resultTokens = 0;
   const problems = previousPhaseProblemsWithRefs(store, rr);
@@ -367,6 +373,20 @@ export function orchestratorPromptWithReads(store: Store, config: BifConfig, rr:
     reads.push({ query: `task results ${rr.id}`, scope: 'node', results: unique, tokensReturned: resultTokens, uploadDerived: anyUploadDerived(store, unique) });
   }
   return { prompt: parts.join('\n\n'), reads };
+}
+
+/**
+ * Stakeholder positions (design §7.1): what the orchestrator of the stakeholders phase is told about
+ * former colleagues — how many are followed, so that it plans the task that follows them. A count only:
+ * who they are is in that task's prompt. '' when nobody is followed.
+ */
+function followNote(store: Store, config: BifConfig, rr: ResearchRun): string {
+  const n = colleaguesToFollow(store, config, rr.workspaceId, { runId: rr.id }).length;
+  if (!n) return '';
+  return (
+    `## Former colleagues to follow\n${n} former colleague(s) of this node are followed on the public web: propose one ` +
+    'competitor_stakeholders task for them (its prompt lists them), also when the business tree has no competitors.'
+  );
 }
 
 // --- knowledge store KS-5: recurring runs ---------------------------------------------------------
@@ -536,12 +556,12 @@ async function executePhase(deps: ResearchDeps, rr: ResearchRun): Promise<Resear
         await drainTasks(deps, rr);
       }
     }
-    afterPhase(deps, rr);
+    await afterPhase(deps, rr);
     return store.researchRuns.update(rr.id, { status: 'done', endedAt: new Date().toISOString() });
   } catch (err) {
     if (isAbort(err) || deps.signal?.aborted) throw err;
     console.error(`[bif] research run ${rr.id} (${rr.phase}) failed: ${(err as Error).message}`);
-    afterPhase(deps, rr);
+    await afterPhase(deps, rr);
     return store.researchRuns.update(rr.id, { status: 'failed', endedAt: new Date().toISOString(), failureReason: (err as Error).message });
   }
 }
@@ -566,31 +586,38 @@ function phaseSwitchedOff(deps: ResearchDeps, rr: ResearchRun): boolean {
 }
 
 /**
- * Work that follows a phase, done or failed (not cancelled), and never fails it: the stakeholder
- * question round when the `stakeholders` phase ends (stakeholder design §8; stakeholders its tasks made
- * usable get their questions even when a later step of the phase failed). An error is logged and
- * recorded as a harness Decision.
+ * Work that follows a phase, done or failed (not cancelled), and never fails it. When the
+ * `stakeholders` phase ends: the stakeholder question round (stakeholder design §8; stakeholders its
+ * tasks made usable get their questions even when a later step of the phase failed), then the combine
+ * run of the former colleagues whose follow task has ended (positions design §7.2; `runCombine` runs
+ * nothing when nothing needs it, so a resumed phase may call it again). An error of either step is
+ * logged and recorded as a harness Decision; a cancellation is passed on.
  */
-function afterPhase(deps: ResearchDeps, rr: ResearchRun): void {
+async function afterPhase(deps: ResearchDeps, rr: ResearchRun): Promise<void> {
   if (rr.phase !== 'stakeholders') return;
   const { store, config } = deps;
-  try {
-    ensureQuestions(store, rr.workspaceId);
-  } catch (err) {
-    const message = (err as Error).message;
-    console.error(`[bif] stakeholder questions after research run ${rr.id} failed: ${message}`);
+  const step = async (event: string, what: string, run: () => unknown): Promise<void> => {
     try {
-      recordHarnessDecision(
-        store,
-        { agentRunId: `stakeholders:${rr.id}`, workspaceId: rr.workspaceId, role: 'orchestrator', model: config.roles.orchestrator, promptVersion: 'n/a' },
-        'decision',
-        { event: 'stakeholder_questions_failed', researchRunId: rr.id, error: message },
-        [rr.id],
-      );
-    } catch {
-      // The log line above is the record when the store itself is failing.
+      await run();
+    } catch (err) {
+      if (isAbort(err) || deps.signal?.aborted) throw err;
+      const message = (err as Error).message;
+      console.error(`[bif] ${what} after research run ${rr.id} failed: ${message}`);
+      try {
+        recordHarnessDecision(
+          store,
+          { agentRunId: `stakeholders:${rr.id}`, workspaceId: rr.workspaceId, role: 'orchestrator', model: config.roles.orchestrator, promptVersion: 'n/a' },
+          'decision',
+          { event, researchRunId: rr.id, error: message },
+          [rr.id],
+        );
+      } catch {
+        // The log line above is the record when the store itself is failing.
+      }
     }
-  }
+  };
+  await step('stakeholder_questions_failed', 'stakeholder questions', () => ensureQuestions(store, rr.workspaceId));
+  await step('stakeholder_combine_failed', 'combining the layers of former colleagues', () => runCombine(rr.workspaceId, deps));
 }
 
 /**

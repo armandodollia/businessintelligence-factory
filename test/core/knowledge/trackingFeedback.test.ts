@@ -68,6 +68,7 @@ const EXCLUDED: Record<string, string> = {
   stakeholder_note: 'stakeholder note; covered in test/core/stakeholders/statements.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 3)',
   stakeholder_decision_record: 'stakeholder decision record; covered in test/core/stakeholders/statements.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 3)',
   stakeholder_read_reaction: 'stakeholder read reaction; covered in test/core/stakeholders/reads.test.ts and test/api/stakeholderRoutes.test.ts (stakeholder personas task 4)',
+  stakeholder_position_change: 'stakeholder left, moved, changed position or returned; covered in test/core/stakeholders/positions.test.ts (stakeholder positions task 1)',
 };
 
 describe('human knowledge actions write feedback events with the configured actor (KS-6)', () => {

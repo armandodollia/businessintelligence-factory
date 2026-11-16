@@ -4,7 +4,8 @@
  * answers are the user's own.
  *
  * - `ensureQuestions` (when the `stakeholders` phase ends): four questions for every hidden, usable own
- *   stakeholder of the node that has none, plus the two node-wide questions once per batch.
+ *   stakeholder of the node that has none, plus the two node-wide questions once per batch. A former
+ *   colleague (at a competitor or parked) is never asked about (positions design §6).
  * - `answerQuestions`: a stakeholder is touched when one of its questions gets a non-empty answer, it is
  *   in `skip`, or `skipAll`; a touched stakeholder opens and its still-open questions become `skipped`.
  *   A non-empty answer becomes a `question_answer` statement (a blank one counts as not sent). When a
@@ -21,7 +22,7 @@ import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Persona } from '../types.js';
 import { rootOf } from '../workspace/tree.js';
-import { isHidden, stakeholderPersonas } from './personas.js';
+import { isCurrentOwn, isHidden, stakeholderPersonas } from './personas.js';
 import { insertStatement, ownStakeholder, StakeholderError, statementText } from './statements.js';
 import { stakeholderRepos } from './store.js';
 import type { StakeholderQuestion, StakeholderStatement, StakeholderType } from './types.js';
@@ -70,7 +71,7 @@ export function ensureQuestions(store: Store, workspaceId: string): StakeholderQ
   const repo = stakeholderRepos(store).questions;
   return store.transaction(() => {
     const due = stakeholderPersonas(store, workspaceId).filter(
-      (p) => isHidden(p) && p.subjectKind === 'own' && askable(p) && repo.list({ personaId: p.id }).length === 0,
+      (p) => isHidden(p) && isCurrentOwn(p) && askable(p) && repo.list({ personaId: p.id }).length === 0,
     );
     if (!due.length) return [];
     const root = rootOf(store, workspaceId);

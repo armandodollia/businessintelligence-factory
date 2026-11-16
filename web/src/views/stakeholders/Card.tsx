@@ -1,15 +1,20 @@
-import { formatValue, shortDate } from '../../logic/format.js';
-import { useStakeholderStatements, type usePersonaLearning } from '../../logic/hooks.js';
-import { words } from '../../logic/stakeholders.js';
-import type { OpenStakeholderView } from '../../logic/types.js';
-import { EvidenceList } from '../EvidenceList.js';
+import { shortDate } from '../../logic/format.js';
+import { useStakeholderPosition, useStakeholderStatements, type usePersonaLearning } from '../../logic/hooks.js';
+import { formerLine, isFormerColleague, words } from '../../logic/stakeholders.js';
+import type { OpenStakeholderView, StakeholderPlaces } from '../../logic/types.js';
 import { Learning } from '../personas/Learning.js';
+import { Position } from './Position.js';
+import { Layers, ProfileTable } from './Profile.js';
 
 /**
  * An open stakeholder (design §15): label, type, relation, review status, the "Use for reads and
  * learning" box while not verified, the profile fields with confidence and evidence, what the user has
  * told the tool (newest first) with "Add a note", and the "What the tool has learned" block. Every
  * text is rendered as text.
+ *
+ * Positions (positions design §10): the position line with its change form; a former colleague says so
+ * with the day it left, and shows three profiles: "Combined" (each field with what it rests on), "What
+ * we knew" and "What is public".
  */
 export function Card({
   wsId,
@@ -17,13 +22,24 @@ export function Card({
   learning,
   saving,
   setInclude,
+  places,
+  onChanged,
+  atCompetitorId,
 }: {
   wsId: string;
   v: OpenStakeholderView;
   learning: ReturnType<typeof usePersonaLearning>;
   saving: boolean;
   setInclude: (personaId: string, include: boolean | null) => void;
+  /** The competitors and nodes of the tree a person can go to. */
+  places: StakeholderPlaces;
+  /** Called after a position change was saved: the page loads its lists again. */
+  onChanged: () => Promise<void> | void;
+  /** The competitor whose group the card is in: where a former colleague is now. */
+  atCompetitorId?: string;
 }) {
+  const position = useStakeholderPosition(wsId, v, places, onChanged, atCompetitorId);
+  const former = isFormerColleague(v);
   return (
     <section className="card" aria-label={`stakeholder ${v.label}`}>
       <div>
@@ -32,7 +48,10 @@ export function Card({
         <span className={`status ${v.status}`}>{v.status}</span>
         <span className="muted"> v{v.version}</span>
       </div>
-      {v.relation && <p>{v.relation}</p>}
+      {former && <p className="small">{formerLine(v)}</p>}
+      {/* A former colleague's relation is its title at the new company: said once, in the position line. */}
+      {v.relation && v.relation !== v.positionTitle && <p>{v.relation}</p>}
+      <Position v={v} p={position} places={places} />
       {v.status !== 'verified' && (
         <div className="small">
           <label className="muted">
@@ -52,32 +71,16 @@ export function Card({
           )}
         </div>
       )}
-      {Object.keys(v.profile).length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Field</th>
-              <th>Value</th>
-              <th>Confidence</th>
-              <th>Evidence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(v.profile).map(([field, f]) => (
-              <tr key={field}>
-                <td>{words(field)}</td>
-                <td>{f.value}</td>
-                <td>{formatValue(f.confidence)}</td>
-                <td>
-                  <details>
-                    <summary>{f.evidence.length}</summary>
-                    <EvidenceList ids={f.evidence} />
-                  </details>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {former ? (
+        <>
+          <section aria-label={`combined profile of ${v.id}`}>
+            <h4>Combined</h4>
+            <ProfileTable profile={v.profile} basis />
+          </section>
+          <Layers v={v} p={position} />
+        </>
+      ) : (
+        <ProfileTable profile={v.profile} />
       )}
       <Statements wsId={wsId} personaId={v.id} />
       <Learning personaId={v.id} l={learning} />

@@ -9,7 +9,9 @@
  *   npx tsx scripts/smoke.ts flows [providers]     # flow records and ranking, per provider
  *   npx tsx scripts/smoke.ts persona-learning [providers] # persona learning in the retro (default: claude)
  *   npx tsx scripts/smoke.ts stakeholders [providers]     # own-stakeholder research (default: claude)
+ *   npx tsx scripts/smoke.ts stakeholder-positions [providers] # a stakeholder leaves: follow research and the combine run (default: claude)
  *   npx tsx scripts/smoke.ts user-persona [providers]     # the user persona's learning run in the retro (default: claude)
+ *   npx tsx scripts/smoke.ts --help                       # lists the modes; runs nothing
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
  *            spawns one real worker run through the Supervisor. The agent must call
@@ -53,6 +55,19 @@
  *            task's research withheld while they are hidden. Whether the worker actually browsed is not required.
  *            Providers are enabled as in the default config (plus those named), so the reviewer is picked as
  *            on a default install.
+ * stakeholder-positions: people who leave (design 2026-11-15-stakeholder-positions-design.md §11). Per provider, seeds a
+ *            node of a fictional company with one competitor, an open own stakeholder whose profile rests on an internal
+ *            note (an upload), and two public pages about the person captured earlier. The stakeholder is marked as left
+ *            for the competitor (`markLeft`); one `competitor_stakeholders` task then runs through the real review loop
+ *            (no browser asked: it follows the person from the two captured pages) and the phase-end combine run
+ *            (`runCombine`) writes one profile from both layers, with that provider as the model of the combine run.
+ *            Judged from the store and the runs' files: the internal layer set at leaving; the public layer saved by the
+ *            task (`publicProfile`, every field citing a page and none the internal note) with the persona's profile,
+ *            status and version untouched; no prompt of the follow research holding a phrase that only the internal
+ *            profile holds; exactly one combine run, offline (for a Claude run the CLI offered only `mcp__bif__*` tools),
+ *            with one successful `submit_combined_profile` call; `combinedAt` set, the version one up, every combined
+ *            field with a basis and the evidence its basis gives it, and both layers still stored as they were.
+ *            Providers are enabled as in the default config (plus those named), as in the stakeholders mode.
  * user-persona: a persona of the user (design 2026-11-15-user-persona-design.md §15). Per provider, seeds a node of a
  *            fictional company with six verified competitors and twelve actions of the configured person through the real
  *            action functions (each competitor excluded with a reason, its threat rated down), then runs the real retro
@@ -71,7 +86,7 @@
  * temp dir (data dir with bif.db and each run's events.jsonl) for inspection.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -97,7 +112,7 @@ import { nodeRanking } from '../src/core/flows/rankings.js';
 import { flowRepos } from '../src/core/flows/repos.js';
 import { runFlowRanking } from '../src/core/flows/round.js';
 import { linkCompetitor } from '../src/core/knowledge/entityLinks.js';
-import { PERSONA_FIELDS } from '../src/core/scoring/criteria.js';
+import { PERSONA_FIELDS, STAKEHOLDER_FIELDS } from '../src/core/scoring/criteria.js';
 import { reactToVerdict } from '../src/core/flows/feedback.js';
 import { recordVerdicts } from '../src/core/flows/verdicts.js';
 import { runRetro } from '../src/core/learning/lessons/retro.js';
@@ -107,7 +122,10 @@ import { runDirOf } from '../src/core/harness/paths.js';
 import { TOOL_NAMES } from '../src/core/harness/tools/registry.js';
 import { uploadInternal } from '../src/core/internal/uploads.js';
 import { runTaskWithReview } from '../src/core/research/reviewLoop.js';
-import { isHidden, stakeholderPersonas } from '../src/core/stakeholders/personas.js';
+import { agentMdPath, writeAgentMd } from '../src/core/market/personas.js';
+import { runCombine } from '../src/core/stakeholders/combine.js';
+import { isHidden, stakeholderPersonas, stakeholderSlug } from '../src/core/stakeholders/personas.js';
+import { markLeft, positionsOf } from '../src/core/stakeholders/positions.js';
 import { ensureQuestions, NODE_QUESTIONS, PEOPLE_TEMPLATES, questionText, SYSTEM_TEMPLATES } from '../src/core/stakeholders/questions.js';
 import { stakeholdersSettings } from '../src/core/stakeholders/settings.js';
 import { stakeholderRepos } from '../src/core/stakeholders/store.js';
@@ -1212,6 +1230,230 @@ async function stakeholdersSmoke(provider: ProviderId, booted: Booted): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// stakeholder positions smoke (positions design 2026-11-15 §11)
+
+const SP_COMPANY = 'Larkspur Freight';
+const SP_RIVAL = 'Pinecrest Haulage';
+const SP_LABEL = 'Head of sales';
+/**
+ * A phrase only the persona's internal profile and relation hold: no prompt of the follow research may
+ * contain it. The uploaded note does not hold it (a worker may read uploads from the store, as always).
+ */
+const SP_INTERNAL_MARK = 'margin floor of 18 percent';
+/** What the fictional company knew about its head of sales from inside (an upload the internal profile cites). */
+const SP_NOTE =
+  `${SP_COMPANY} sales notes. The head of sales approves a discount only when the account keeps its margin and asks for a paid pilot before any ` +
+  'multi-year deal. They turned down the cold-chain expansion twice as too capital-heavy, and push back on anything that lengthens the sales cycle.';
+/** The internal profile, field by field; fields not listed say that little was known. */
+const SP_KNOWN: Record<string, string> = {
+  role_mandate: 'Ran sales for every product line and signed each contract above 50,000 EUR.',
+  goals_incentives: 'Measured on gross margin per account, not on revenue.',
+  decision_criteria: `Approved a discount only above a ${SP_INTERNAL_MARK}; asked for a paid pilot before any multi-year deal.`,
+  constraints: 'Could not commit delivery windows without the operations team.',
+  risk_tolerance: 'Low: turned down the cold-chain expansion twice as too capital-heavy.',
+  known_positions: 'Refused the cold-chain expansion twice; refused a volume discount for the largest account.',
+  objections: 'Pushed back on anything that lengthens the sales cycle.',
+};
+/** Two public pages about the person since they left, captured earlier (fictional sources; no name, as in the pages' own wording). */
+const SP_PAGES: Array<{ title: string; url: string; text: string }> = [
+  {
+    title: `${SP_RIVAL} newsroom: new vice president of sales`,
+    url: 'https://pinecrest-haulage.example/news/vice-president-sales',
+    text:
+      `${SP_RIVAL} newsroom. ${SP_RIVAL} has appointed a new Vice President of Sales, who joins from ${SP_COMPANY}, where they were head of sales. ` +
+      'They will lead enterprise accounts and the launch of cold-chain routes in the first half of next year, and report to the chief executive. ' +
+      '"We will win the mid-market on service levels and three-year contracts, not on price," the new vice president said.',
+  },
+  {
+    title: 'Freight Weekly interview with the vice president of sales',
+    url: 'https://freight-weekly.example/interviews/pinecrest-vice-president-sales',
+    text:
+      `Freight Weekly interview. Asked what changes at ${SP_RIVAL}, its Vice President of Sales said the company will invest in cold-chain capacity this year, ` +
+      'that discounts are "the last tool, not the first", and that they want customers on multi-year contracts from the first day. ' +
+      'They said they need the operations team to commit to delivery windows before they sign a large account.',
+  },
+];
+
+/** The prompts a run was given (`prompt.md` and one file per later attempt in its run directory); undefined when none was written. */
+function runPrompts(dataDir: string, wsId: string, agentRunId: string): string | undefined {
+  const dir = runDirOf(dataDir, wsId, agentRunId);
+  if (!existsSync(join(dir, 'prompt.md'))) return undefined;
+  return readdirSync(dir)
+    .filter((f) => /^prompt(\.attempt\d+)?\.md$/.test(f))
+    .map((f) => readFileSync(join(dir, f), 'utf8'))
+    .join('\n');
+}
+
+async function stakeholderPositionsSmoke(provider: ProviderId, booted: Booted): Promise<FlResult> {
+  const { store, artifacts, config, events, research, dataDir } = booted.runtime;
+  const name = `stakeholder-positions/${provider} (${MODELS[provider]})`;
+  const startedAt = Date.now();
+  const model = { provider, model: MODELS[provider] };
+  const short = (s: string, n = 140) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS * 4);
+  const wsId = `ws_smoke_positions_${provider}`;
+  const actor = actorOf(config);
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  let runIds: string[] = [];
+  let toolCalls = 0;
+  try {
+    // --- seed: the node, its competitor, an open own stakeholder known from an internal note, two public pages ---
+    const now = new Date().toISOString();
+    store.workspaces.insert({
+      id: wsId, name: SP_COMPANY, sector: 'logistics', createdAt: now, scope: { level: 'company', name: SP_COMPANY, description: 'a fictional freight company' },
+    });
+    const rival = store.competitors.insert({
+      id: newId('cmp'), workspaceId: wsId, name: SP_RIVAL, site: 'pinecrest-haulage.example', threat: 4, directness: 4,
+      comparison: { pricing: 3, onboarding: 3, ux: 3, features: 3 }, evidence: [], createdAt: now, updatedAt: now, status: 'verified',
+    });
+    linkCompetitor(store, rival);
+    const note = uploadInternal(wsId, { name: 'sales-notes.txt', bytes: new TextEncoder().encode(SP_NOTE), mime: 'text/plain' }, { store, artifacts, config }).id;
+    const slug = stakeholderSlug(SP_LABEL);
+    const own = store.personas.insert({
+      id: newId('per'), workspaceId: wsId, slug, segment: SP_LABEL, version: 1, status: 'verified', agentMdPath: agentMdPath(dataDir, wsId, slug), kind: 'stakeholder',
+      stakeholderType: 'leader', subjectKind: 'own', relation: `approves every discount (${SP_INTERNAL_MARK})`, disclosure: 'open', positionTitle: 'Head of Sales',
+      profile: Object.fromEntries(STAKEHOLDER_FIELDS.map((f) => [f, { value: SP_KNOWN[f] ?? 'Little was known about this from inside.', confidence: 0.7, evidence: [note] }])),
+    });
+    writeAgentMd(store, own);
+
+    // --- P1: the user records that the person left for the competitor -------------------------------
+    const day = new Date(Date.now() - 30 * 86_400_000);
+    const leftOn = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    const gone = markLeft({ store, dataDir }, actor, wsId, own.id, { date: leftOn, to: { competitorId: rival.id }, title: 'Vice President of Sales' });
+    const history = positionsOf(store, gone.id).map((h) => h.change);
+    const internalFields = STAKEHOLDER_FIELDS.filter((f) => gone.internalProfile?.[f]?.basis === 'internal');
+    steps.push({
+      step: 'P1 marked as left: the internal layer', calls: 0,
+      pass: gone.subjectKind === 'competitor' && gone.subjectId === rival.id && gone.leftAt === leftOn && internalFields.length === STAKEHOLDER_FIELDS.length &&
+        same(history, ['left', 'joined']) && gone.publicProfile === undefined,
+      did: `subject=${gone.subjectKind} leftAt=${gone.leftAt} slug=${gone.slug} internal fields=${internalFields.length}/${STAKEHOLDER_FIELDS.length} history=${history.join(',')}`,
+    });
+
+    // --- the follow research: one competitor_stakeholders task through the real review loop -----------
+    const rr = store.researchRuns.insert({ id: newId('rrun'), workspaceId: wsId, phase: 'stakeholders', status: 'running', startedAt: now });
+    const pages = SP_PAGES.map((p) => artifacts.save({ workspaceId: wsId, kind: 'text', mime: 'text/plain', bytes: p.text, title: p.title, sourceUrl: p.url }).id);
+    const task = store.tasks.insert({
+      id: newId('tsk'), workspaceId: wsId, runId: rr.id, phase: 'stakeholders', type: 'competitor_stakeholders', round: 1, createdAt: now,
+      model, needsBrowser: false, status: 'queued',
+      acceptanceCriteria: ['every field of the public profile cites one of the two captured pages', '`now_at` names the company and title the pages show'],
+      brief:
+        `Smoke test. Follow the former colleague of ${SP_COMPANY} your prompt lists. Two public pages about them were captured earlier and are in the store: ` +
+        `${pages.join(', ')}. Read both with \`read_artifact\` (mode "text") and build their public profile from these two pages only: do not browse and do ` +
+        `not save new artifacts. Save it with \`save_stakeholder\` and \`follow\`, with \`now_at\`. Do not research other stakeholders of ${SP_RIVAL} in this task.`,
+    });
+    for (const artifactId of pages) knowledgeRepos(store).artifactCaptures.insert({ id: newId('cap'), artifactId, workspaceId: wsId, taskId: task.id, capturedAt: now });
+    const bus: ToolCallLog[] = [];
+    const off = events.on((e) => {
+      if (e.type === 'tool_call' && e.workspaceId === wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+    });
+    let final: Awaited<ReturnType<typeof runTaskWithReview>>;
+    let combined: Awaited<ReturnType<typeof runCombine>>;
+    let followed: NonNullable<ReturnType<typeof store.personas.get>>;
+    try {
+      final = await runTaskWithReview(task, { ...research, signal: abort.signal });
+      followed = store.personas.get(gone.id)!;
+      // The phase-end step of the `stakeholders` phase (orchestrator `afterPhase`), with the provider under test as the model of the combine run.
+      const cfg: BifConfig = { ...config, personaLearning: { ...(config.personaLearning ?? {}), model } };
+      combined = await runCombine(wsId, { ...research, config: cfg, signal: abort.signal });
+    } finally {
+      off();
+    }
+    store.researchRuns.update(rr.id, { status: 'done', endedAt: new Date().toISOString() });
+    toolCalls = bus.length;
+    const taskRuns = store.agentRuns.list({ workspaceId: wsId }).filter((r) => r.taskId === task.id);
+    const combineRuns = store.agentRuns.list({ workspaceId: wsId }).filter((r) => r.role === 'retro');
+    runIds = [...taskRuns, ...combineRuns].map((r) => r.id);
+
+    // --- P2: the public layer, and nothing else of the persona changed ------------------------------
+    const uploads = new Set(store.artifacts.list({ workspaceId: wsId, kind: 'upload' }).map((a) => a.id));
+    const publicFields = STAKEHOLDER_FIELDS.filter((f) => {
+      const v = followed.publicProfile?.[f];
+      return !!v && v.value.trim() !== '' && v.basis === 'public' && v.evidence.length > 0 && v.evidence.every((id) => !uploads.has(id));
+    });
+    const citesPages = STAKEHOLDER_FIELDS.filter((f) => (followed.publicProfile?.[f]?.evidence ?? []).some((id) => pages.includes(id))).length;
+    const untouched = followed.version === gone.version && followed.status === gone.status && followed.taskId === gone.taskId && same(followed.profile, gone.profile) &&
+      same(followed.internalProfile, gone.internalProfile);
+    const follows = bus.filter((c) => c.tool === 'save_stakeholder');
+    steps.push({
+      step: 'P2 follow research: the public layer is saved and the persona is untouched', calls: follows.length,
+      pass: final.status !== 'failed' && publicFields.length === STAKEHOLDER_FIELDS.length && followed.publicTaskId === task.id && !!followed.publicSavedAt && untouched &&
+        follows.some((c) => c.ok),
+      did: `task ${final.status} (round ${final.round}); public fields=${publicFields.length}/${STAKEHOLDER_FIELDS.length} (citing a captured page: ${citesPages}); ` +
+        `saved by this task=${followed.publicTaskId === task.id}; profile, status, version untouched=${untouched}; now_at="${short(followed.publicPosition?.text ?? '', 120)}"`,
+    });
+
+    // --- P3: the follow research was told who to follow and nothing known from inside ---------------
+    const prompts = taskRuns.map((r) => ({ r, text: runPrompts(dataDir, wsId, r.id) }));
+    const leaked = prompts.filter((x) => x.text?.includes(SP_INTERNAL_MARK));
+    const worker = prompts.find((x) => x.r.role === 'worker');
+    steps.push({
+      step: 'P3 no prompt of the follow research holds internal knowledge', calls: 0,
+      pass: prompts.length > 0 && prompts.every((x) => x.text !== undefined) && leaked.length === 0 && !!worker?.text?.includes(gone.id),
+      did: `prompts read=${prompts.filter((x) => x.text !== undefined).length}/${prompts.length} (${prompts.map((x) => x.r.role).join(',')}); ` +
+        `holding the internal phrase=${leaked.length}; the worker's prompt lists the person=${!!worker?.text?.includes(gone.id)}`,
+    });
+
+    // --- P4: the combine run: one, offline, one answer ----------------------------------------------
+    const harness = new Set<string>(TOOL_NAMES);
+    const combineRun = combineRuns[0];
+    const offered = combineRun ? offeredTools(dataDir, wsId, combineRun.id) : undefined;
+    const builtInOffered = offered?.filter((t) => !t.startsWith('mcp__bif__')) ?? [];
+    const called = combineRun ? calledTools(dataDir, wsId, combineRun.id) : [];
+    const builtInCalled = called.filter((t) => !harness.has(t));
+    const submits = bus.filter((c) => c.tool === 'submit_combined_profile');
+    const shownBoth = combineRun ? (runPrompts(dataDir, wsId, combineRun.id)?.includes(SP_INTERNAL_MARK) ?? false) : false;
+    steps.push({
+      step: 'P4 combine run: one offline run shown both layers, one submit_combined_profile', calls: submits.length,
+      pass: combined.combined === 1 && combineRuns.length === 1 && combineRun!.status === 'done' && builtInCalled.length === 0 && shownBoth &&
+        (combineRun!.model.provider !== 'claude' || (offered !== undefined && builtInOffered.length === 0)) && submits.filter((c) => c.ok).length === 1,
+      did: combineRun
+        ? `${combineRun.model.provider}/${combineRun.model.model} ${combineRun.status}: offered=${offered ? `${offered.length} (${builtInOffered.length} built-in${builtInOffered.length ? `: ${builtInOffered.join(',')}` : ''})` : 'unknown'}; ` +
+          `called=${called.join(',') || 'none'}; shown the internal layer=${shownBoth}; submit ok=${submits.filter((c) => c.ok).length} ` +
+          `refused=${submits.filter((c) => !c.ok).map((c) => short(c.error ?? '', 160)).join(' | ') || 0}`
+        : `no combine run: ${JSON.stringify(combined)}${final.status === 'failed' ? ' (the follow task failed, so its layer is not used)' : ''}`,
+    });
+
+    // --- P5: the combined profile: every field with what it rests on, the layers kept apart ----------
+    const after = store.personas.get(gone.id)!;
+    const BASES = ['internal', 'public', 'both', 'inferred'];
+    const expected = (f: string, basis: string | undefined): string[] => {
+      const inside = basis === 'public' ? [] : (after.internalProfile?.[f]?.evidence ?? []);
+      const outside = basis === 'internal' ? [] : (after.publicProfile?.[f]?.evidence ?? []);
+      return [...new Set([...inside, ...outside])];
+    };
+    const sound = STAKEHOLDER_FIELDS.filter((f) => {
+      const v = after.profile[f];
+      return !!v && v.value.trim() !== '' && BASES.includes(v.basis ?? '') && same(v.evidence, expected(f, v.basis));
+    });
+    const basisCount = BASES.map((b) => `${b}=${STAKEHOLDER_FIELDS.filter((f) => after.profile[f]?.basis === b).length}`).join(' ');
+    const conflicts = STAKEHOLDER_FIELDS.filter((f) => !!after.profile[f]?.conflict);
+    const layersKept = same(after.internalProfile, gone.internalProfile) && same(after.publicProfile, followed.publicProfile);
+    const md = existsSync(after.agentMdPath) ? readFileSync(after.agentMdPath, 'utf8') : '';
+    steps.push({
+      step: 'P5 combined profile: every field has a basis and the evidence of its layers; both layers kept', calls: 0,
+      pass: !!after.combinedAt && after.combinedAt >= (after.publicSavedAt ?? '') && after.version === gone.version + 1 && sound.length === STAKEHOLDER_FIELDS.length &&
+        layersKept && md.includes('former_colleague: true') && md.includes('_Rests on: '),
+      did: `combinedAt=${after.combinedAt ?? 'none'} version=${after.version} (was ${gone.version}); fields with basis and computed evidence=${sound.length}/${STAKEHOLDER_FIELDS.length} ` +
+        `(${basisCount}); conflicts noted=${conflicts.length}${conflicts.length ? ` (${conflicts.join(',')}: "${short(after.profile[conflicts[0]!]!.conflict ?? '', 160)}")` : ''}; layers kept=${layersKept}; ` +
+        `agent.md says what each section rests on=${md.includes('_Rests on: ')}`,
+    });
+
+    for (const c of bus.filter((x) => !x.ok)) confusion.push(`${c.tool} failed: ${short(c.error ?? '', 160)}`);
+    return {
+      name, pass: steps.every((x) => x.pass), seconds: (Date.now() - startedAt) / 1000, steps, usage: usageOf(booted, runIds), toolCalls, confusion,
+      detail: `task=${final.status}; runs=${[...taskRuns, ...combineRuns].map((r) => `${r.role}:${r.status}`).join(',')}; combine=${JSON.stringify(combined)}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - startedAt) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls, confusion };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // user persona smoke (user persona design 2026-11-15 §15)
 
 const UP_COMPANY = 'Larkspur Tiles';
@@ -1338,9 +1580,25 @@ async function userPersonaSmoke(provider: ProviderId, booted: Booted): Promise<F
   }
 }
 
+/** The parts that can be run alone (first argument); with none, the default set runs. */
+const MODES = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'stakeholder-positions', 'user-persona'];
+
 async function main() {
   const args = process.argv.slice(2);
-  const mode = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'user-persona'].includes(args[0] ?? '') ? args.shift()! : 'all';
+  // Before anything else: asking for help must never start a run (runs cost real model usage).
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(
+      [
+        'Usage: npx tsx scripts/smoke.ts [mode] [providers]',
+        `Modes: ${MODES.join(', ')}`,
+        `Providers: ${PROVIDERS.join(', ')}`,
+        'Without a mode: worker, browser, knowledge, flows and interview. The other modes run only when named.',
+        'Every mode spawns real CLIs and spends real model usage. See the comment at the top of this file.',
+      ].join('\n'),
+    );
+    return;
+  }
+  const mode = MODES.includes(args[0] ?? '') ? args.shift()! : 'all';
   const only = args.filter((a): a is ProviderId => (PROVIDERS as string[]).includes(a));
   const providers = only.length ? only : PROVIDERS;
   const results: Result[] = [];
@@ -1424,6 +1682,22 @@ async function main() {
       for (const p of shProviders) {
         console.log(`[smoke] stakeholders ${p} (${MODELS[p]}) …`);
         const r = await stakeholdersSmoke(p, booted);
+        printKnowledge(r);
+        results.push(r);
+      }
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'stakeholder-positions') {
+    const spProviders = only.length ? only : (['claude'] as ProviderId[]);
+    const { booted, dir } = await startServer('stakeholder-positions', { defaultEnabled: true, providers: spProviders });
+    try {
+      for (const p of spProviders) {
+        console.log(`[smoke] stakeholder-positions ${p} (${MODELS[p]}) …`);
+        const r = await stakeholderPositionsSmoke(p, booted);
         printKnowledge(r);
         results.push(r);
       }

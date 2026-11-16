@@ -450,6 +450,8 @@ export const stakeholdersConfigSchema = z.strictObject({
   maxPerCompetitor: z.number().int().min(1).optional(),
   /** Stakeholder read runs per persona panel (default 40). */
   maxReadsPerPanel: z.number().int().min(1).optional(),
+  /** Former colleagues followed on the web per competitor-stakeholder task (default 5; 0 turns following off). */
+  maxFollowed: z.number().int().min(0).optional(),
 });
 // --- end stakeholders config -----------------------------------------------------------------------
 

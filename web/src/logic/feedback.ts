@@ -57,6 +57,8 @@ export const FEEDBACK_KIND_LABELS: Record<FeedbackKind, string> = {
   stakeholder_note: 'stakeholder note added',
   stakeholder_decision_record: 'real decision recorded',
   stakeholder_read_reaction: 'stakeholder read reaction',
+  // stakeholder positions
+  stakeholder_position_change: 'stakeholder position changed',
 };
 
 const short = (v: unknown, max = 80): string => {

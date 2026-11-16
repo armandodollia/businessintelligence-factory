@@ -126,6 +126,8 @@ export const STANCE_BY_KIND: Record<FeedbackKind, Stance | ((e: FeedbackEvent) =
   stakeholder_note: 'neutral',
   stakeholder_decision_record: 'neutral',
   stakeholder_read_reaction: byReaction,
+  // Recording that someone left, moved or returned is information about the world, not a judgment.
+  stakeholder_position_change: 'neutral',
 };
 
 /** Fields of `afterJson` shown in a detail line, when their value is an enum, a number or a boolean. */

@@ -5,7 +5,7 @@
  * 1. The gate (`personaGate`) over the open signals of every usable persona of the tree (segment
  *    personas and open stakeholder personas; a hidden stakeholder is skipped and its statements wait).
  *    A stakeholder persona also qualifies with one open statement (stakeholder design §11).
- * 2. Engine step, no agent: an active adjustment with at least `minEffectSignals` signals since it last
+ * 2. Engine step, no agent (never for a parked former colleague): an active adjustment with at least `minEffectSignals` signals since it last
  *    changed (reactions to output of an older persona version left out, `signalsSinceChange`), whose disagreement rate since is not lower than the rate recorded when it was proposed,
  *    gets a pending `retire` proposal (source `engine`), once only: not while a retire is pending for it,
  *    nor when the user rejected an engine retire made since the adjustment last changed.
@@ -32,8 +32,11 @@
  * run shown statements makes `internal` proposals (and adjustments). An `add` / `replace` citing a
  * statement it was shown needs no further evidence. A run that ends `proposed` or `no_change` consumes
  * the statements it was shown (`consumedByRunId`); a run shown statements but no signal consumes no signal.
- * The run of an own stakeholder is offline, on the learning model or one that can run offline
+ * The run of a stakeholder whose text is internal (`holdsInternal`: an own stakeholder and a former
+ * colleague, at a competitor or parked) is offline, on the learning model or one that can run offline
  * (`offlineModel`); with no such model it is skipped and one harness Decision lists the skipped ones.
+ * A parked former colleague reads nothing any more: it learns from the user's statements only, never
+ * from reactions (positions design §6).
  */
 import type { BifConfig } from '../config/schema.js';
 import { NO_OFFLINE_MODEL, offlineModel } from '../harness/offline.js';
@@ -53,6 +56,7 @@ import { calibrationScope } from '../scoring/calibration.js';
 import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, USER_FIELDS } from '../scoring/criteria.js';
 import type { Store } from '../store/db.js';
 import { isHidden, segmentPersonas, stakeholderPersonas } from '../stakeholders/personas.js';
+import { holdsInternal, isFormerColleague, isParked } from '../stakeholders/kinds.js';
 import { openStatements } from '../stakeholders/statements.js';
 import { stakeholderRepos } from '../stakeholders/store.js';
 import type { StakeholderStatement } from '../stakeholders/types.js';
@@ -149,6 +153,13 @@ export function rejectedProposals(store: Store, personaId: string): PersonaPropo
  */
 type Shown = { prompt: string; shown: string[]; through?: string; textRefs: string[]; shownStatements: string[] };
 
+/** The `subject` line of a stakeholder's header: own, a competitor's, and whether (and when) the person left the company. */
+function subjectLine(persona: Persona): string {
+  const left = isFormerColleague(persona) ? `a former colleague (left on ${persona.leftAt})` : '';
+  if (persona.subjectKind === 'competitor') return `a competitor's stakeholder${left ? `, ${left}` : ''}`;
+  return left || (isParked(persona) ? 'a former colleague' : 'own');
+}
+
 /** Field values are never cut shorter than this to fit the header. */
 const MIN_FIELD_CHARS = 40;
 
@@ -180,7 +191,7 @@ function buildPrompt(store: Store, config: BifConfig, persona: Persona, signals:
           `- id: ${persona.id}`,
           `- label: ${personaBlocked ? WITHHELD : line(persona.segment)}`,
           `- type: ${persona.stakeholderType ?? 'other'}`,
-          `- subject: ${persona.subjectKind === 'competitor' ? "a competitor's stakeholder" : 'own'}`,
+          `- subject: ${subjectLine(persona)}`,
           `- relation: ${personaBlocked ? WITHHELD : persona.relation ? line(persona.relation) : '(none)'}`,
           ...fieldLines(cap),
         ]
@@ -356,11 +367,15 @@ export async function runPersonaLearning(deps: ResearchDeps, rootWorkspaceId: st
 
   const evaluated: Array<{ persona: Persona; signals: PersonaSignal[]; gate: GateResult; statements: StakeholderStatement[] }> = [];
   for (const persona of treePersonas(store, root)) {
-    const signals = openSignals(store, settings, persona.id, now);
+    // Positions design §6: a parked former colleague learns from notes only; the reactions to the reads
+    // it made before leaving are not shown to its run and do not qualify it.
+    const parked = isParked(persona);
+    const signals = parked ? [] : openSignals(store, settings, persona.id, now);
     const gate = personaGate(signals, settings);
     const statements = persona.kind === 'stakeholder' ? openStatements(store, persona.id) : [];
     evaluated.push({ persona, signals, gate, statements });
-    report.personaProposals += proposeRetirements(store, config, root, persona, gateNumbers(gate), now.toISOString());
+    // Nor does the engine judge its adjustments by them: a parked persona gets no retire proposal.
+    if (!parked) report.personaProposals += proposeRetirements(store, config, root, persona, gateNumbers(gate), now.toISOString());
   }
   report.personasEvaluated = evaluated.length;
   // A stakeholder persona also qualifies with one open statement (stakeholder design §11).
@@ -375,13 +390,14 @@ export async function runPersonaLearning(deps: ResearchDeps, rootWorkspaceId: st
 
   const scope = calibrationScope(store, config, root);
   const system = loadPrompt('persona_learning', scope).text;
-  // Final review item 5: an own stakeholder's agent.md and statements are internal, so its learning
-  // run is offline, on the learning model or one that can run offline; skipped when no provider can.
-  const ownModel = offlineModel(config, settings.model);
+  // Final review item 5, positions design §6: the profile and statements of a stakeholder that holds
+  // internal knowledge (own, or a former colleague) are internal, so its learning run is offline, on
+  // the learning model or one that can run offline; skipped when no provider can.
+  const internalModel = offlineModel(config, settings.model);
   const skipped: string[] = [];
   for (const { persona, signals, gate, statements } of chosen) {
-    const own = persona.kind === 'stakeholder' && persona.subjectKind !== 'competitor';
-    if (own && !ownModel) {
+    const internal = holdsInternal(persona);
+    if (internal && !internalModel) {
       skipped.push(persona.id);
       continue;
     }
@@ -401,8 +417,8 @@ export async function runPersonaLearning(deps: ResearchDeps, rootWorkspaceId: st
     try {
       const res = await runAgent(deps, {
         kind: 'retro', role: 'retro', workspaceId: persona.workspaceId, round: 1, attempt: 1, prompt, systemPrompt: system,
-        model: own ? ownModel! : settings.model, needsBrowser: false, promptVersion: promptVersion(system), promptReads: [read],
-        ...(own ? { offline: true } : {}),
+        model: internal ? internalModel! : settings.model, needsBrowser: false, promptVersion: promptVersion(system), promptReads: [read],
+        ...(internal ? { offline: true } : {}),
       });
       if (runs.get(run.id)!.status === 'running') {
         runs.update(run.id, {
@@ -427,7 +443,7 @@ export async function runPersonaLearning(deps: ResearchDeps, rootWorkspaceId: st
   return report;
 }
 
-/** Agent run id of the harness Decision recording own stakeholders whose learning run was skipped (no agent run). */
+/** Agent run id of the harness Decision recording the stakeholders with internal knowledge whose learning run was skipped (no agent run). */
 export const LEARNING_ACTOR = 'persona_learning';
 
 // ---------------------------------------------------------------------------

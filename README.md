@@ -547,8 +547,9 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
     per competitor, counting those not failed or superseded), with review and status as for personas.
     Only runs of these two task types may save a stakeholder; a label is one line of at most 80
     characters (newlines and tabs become spaces, as in the relation). `competitor_stakeholders` uses the
-    browser, public sources only, and never searches for a person not named in public evidence; it is
-    planned only when the tree has competitors. `own_stakeholders` works from what the store already
+    browser, public sources only, and never searches for a person not named in public evidence (except
+    the former colleagues it is told to follow, see below); it is planned only when the tree has
+    competitors or the node has former colleagues to follow. `own_stakeholders` works from what the store already
     holds (captured public pages, internal uploads, the interview, the business tree: parent and
     sibling nodes are offered as `team` or `system` stakeholders, and your statements not yet tied to
     a stakeholder) and from the public web (the company's leadership, board, ownership and investor
@@ -605,6 +606,45 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
     An own stakeholder's read runs offline (its agent.md is internal) on the persona model, or on a
     model that can run offline when that one cannot; with none, its reads are skipped and a harness
     decision says why. A competitor's stakeholder reads as before.
+  - *People who leave, move or change position.* People change jobs; you record it, the tool never
+    does by itself. On the **Stakeholders** page each open own stakeholder has a "Position" line and
+    "Change position":
+    - **Left the company.** Give the date and where they went: a competitor of the business, "A
+      company not listed" (it is added as a competitor, marked as not researched yet) or "Elsewhere".
+      From then on the person is a *former colleague* and no longer one of your stakeholders: no
+      question round, no approval read, no real decisions, no place under `maxOwn`. At a competitor
+      they read your recommendations as a rival (`ignore`, `watch`, `copy`, `counter`) who knows your
+      plans and people as they were the day they left, and nothing later. Elsewhere, they are kept under
+      "Former stakeholders" and read nothing.
+    - **Moved to another team or division**, **Promoted**, **Demoted.** The stakeholder goes to the
+      other node, or gets a new type and title; its open questions go with it.
+    - **Moved to another company** (for someone who already left) and **Returned** (they work here
+      again, with the profile as it stands). Both take an optional new name, for when the name is
+      already in use where the person goes; the page then shows why the change was refused.
+    Dates are days, not in the future. Every change is kept in a history that cannot be edited or
+    deleted; a stakeholder that is still hidden must be opened first.
+  - *Two layers for someone who left.* What you knew and what the web shows are stored apart:
+    - **What we knew**: the profile as it was the day they left.
+    - **What is public**: what research finds about them on the public web since. The `stakeholders`
+      phase follows at most `maxFollowed` former colleagues per task, those not looked at for longest
+      first. It also notes where they work now ("What research last saw"); you decide whether to
+      record that as a move.
+    - **Combined**: after the research, one run without web access writes a single profile from both.
+      Each field says what it rests on (from what we knew, from public sources, from both, or
+      concluded from both) and says so where the two disagree. Public sources flatter their subject,
+      so what you knew stays the base for how the person decides.
+    Only research that failed (it could not finish) is "Not used": what it found is kept and shown
+    under that note, and the combined profile stays as it was. Research that finished without being
+    verified is still combined; the page then says "Used, although the research that found this was
+    not verified". The person stays usable either way.
+  - *What stays internal.* What you knew about a former colleague never goes into a web request. The
+    research is told only who to follow: the label, the position held here, until when, and where they
+    went. Reads, learning and the combining run for these personas run without web access (skipped,
+    with a note in the decision log, when no enabled provider can). Position changes, your notes and
+    the record of the combining run stay out of the default export; what the research found in public
+    is exported like any competitor research. One limit: a run with web access works in a folder under
+    the data directory and could read files there, a former colleague's agent.md included (see
+    *Isolation* below).
   - *What the retro does.* Only the weekly retro changes a stakeholder, through persona learning
     (above). A stakeholder goes to a learning run when the gate qualifies or it has a statement no run
     has consumed; the run is shown its open statements (fenced, with ids) besides its reactions:
@@ -619,21 +659,31 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   - *Export.* An adjustment that rests on a statement is internal. Internal proposals, adjustments and
     their decisions, every decision of an `own_stakeholders` task (worker, reviewer, harness) and
     feedback on it, and all stakeholder statements, questions, reads and stakeholder feedback events
-    stay out of the default training export (exclusion reason `internal`); `?includeUploads=1`
-    includes them.
+    (position changes among them), and the record of a combine run, stay out of the default training
+    export (exclusion reason `internal`); `?includeUploads=1` includes them. So do your ratings of, and
+    your include overrides on, an own stakeholder or a former colleague, whatever decision they belong
+    to; those of a competitor's stakeholder who never worked for you are exported as before.
   - *Isolation.* Stakeholders, questions, statements and reads are keyed by business tree; an id of
     another tree answers 404. Hiding applies to what BIF serves: an agent with shell access on the
     machine can read files under the data directory (agent.md files, run logs), as was already true
     for uploads.
   - *Settings* (`stakeholders`, all optional): `enabled` (true), `maxOwn` (8), `maxCompetitors` (3),
-    `maxPerCompetitor` (3), `maxReadsPerPanel` (40).
+    `maxPerCompetitor` (3), `maxReadsPerPanel` (40), `maxFollowed` (5: how many former colleagues one
+    research task follows on the web; 0 turns following off).
   - API (under `/api/workspaces/:id`): `GET …/stakeholders`, `GET …/stakeholder-questions`,
     `POST …/stakeholder-questions/answers` (`{answers: [{questionId, text}], skip?: [personaId], skipAll?}`),
     `POST …/stakeholders/:personaId/reveal`, `POST …/stakeholders/:personaId/notes` (`{text, field?}`),
     `GET …/stakeholders/:personaId/statements`, `POST …/recommendations/:recId/stakeholder-decisions`
     (`{personaId, decision, reasoning}`), `GET …/recommendations/:recId/stakeholder-reads` and
     `POST …/stakeholder-reads/:readId/reaction` (`{reaction, reason?}`). The persona learning routes
-    serve open stakeholders too, never hidden ones.
+    serve open stakeholders too, never hidden ones. Positions: `GET …/stakeholders/:personaId/positions`
+    (the history, newest first, and for a former colleague both layers, whether the public one is used
+    and when the profile was last combined) and `POST …/stakeholders/:personaId/position`:
+    `{change: 'left', date, to: {competitorId} | {newCompetitor: {name, site?}} | {elsewhere: {companyName?}}, label?, title?, note?}`
+    (for someone who already left: moved on to that company),
+    `{change: 'moved' | 'promoted' | 'demoted', date, toWorkspaceId?, stakeholderType?, title?, note?}` or
+    `{change: 'returned', date, toWorkspaceId, stakeholderType?, title?, note?}`. `GET …/stakeholders` lists
+    former colleagues at a competitor in that competitor's group and the others under `former`.
 - **A persona of you.** BIF keeps a short picture of the person it works for, learned from what you do
   in the tool, and gives it to the agents that decide what to work on and how to present it. You see
   it, and decide every line of it, on the **You** page.
@@ -763,6 +813,13 @@ of that business tree — another company's prompts never see them. Nothing is w
   phase-end question round; it checks that the worker run is not offline (a Claude worker's CLI was
   offered built-in tools; browsing is not required), that at least one hidden own stakeholder cites the notes, that each has its four template questions (and
   the node its two), and that the task's research is withheld.
+- the **stakeholder positions smoke** (`stakeholder-positions`, default claude, only when named): an
+  own stakeholder of a fictional company is marked as left for a competitor; one
+  `competitor_stakeholders` task follows the person from two captured public pages through the real
+  review loop, then the real combine run writes one profile from both layers. It checks the public
+  layer (and that the persona's own profile, status and version did not change), that no prompt of
+  the research held what was known from inside, one offline combine run with one
+  `submit_combined_profile` call, and that every combined field says what it rests on.
 - the **user persona smoke** (`user-persona`, default claude, only when named): twelve actions of the
   configured person on six fictional competitors through the real action functions, then the real
   retro with that provider as the learning model; it checks one offline learning run (only harness
@@ -789,7 +846,7 @@ Each step is judged from the store and the run's tool calls. The check covers:
 - a replay of the paged reads, which checks that every passage was served whole;
 - tokens and cost from `agent_usage`.
 
-Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning`, `stakeholders`, `user-persona` or `interview`, optionally followed by providers
+Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning`, `stakeholders`, `stakeholder-positions`, `user-persona` or `interview` (`--help` lists them and runs nothing), optionally followed by providers
 (`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
 and `BIF_SMOKE_OPENCODE_MODEL`, the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
 smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).
@@ -804,9 +861,10 @@ smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md
   retried) and the task's one retry applies. Rate-limit text that OpenCode does print on stderr is
   detected, but it does not shorten the hang. Lower `idleTimeoutMs` if you use OpenCode's free tier.
 - **Offline runs need a provider that can run offline.** Codex refuses offline runs, so reads by own
-  stakeholders, learning runs for own stakeholder personas and the user persona's learning run go to
-  Claude or OpenCode; with neither enabled they are skipped and a harness decision records why (see
-  Stakeholder personas). Own-stakeholder research itself is not offline and runs on any provider.
+  stakeholders and former colleagues, learning runs for those personas, the run that combines a former
+  colleague's two layers and the user persona's learning run go to Claude or OpenCode; with neither
+  enabled they are skipped and a harness decision records why (see Stakeholder personas).
+  Own-stakeholder research itself is not offline and runs on any provider.
 - **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth.
 - **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
   overrides are runtime-only and are not written into `bif.config.json` when you save settings.)

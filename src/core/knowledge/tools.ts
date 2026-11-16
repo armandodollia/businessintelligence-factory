@@ -31,6 +31,7 @@ import { recordRetrieval } from './retrievalLog.js';
 import { factScope } from './facts.js';
 import { KnowledgeNotFoundError, narrowTo, notFound, type KnowledgeScope, type ScopeMode } from './scope.js';
 import { runSearch, type SearchKind } from './search.js';
+import { FOLLOW_TASK_TYPES } from '../stakeholders/kinds.js'; // stakeholder positions
 
 /**
  * Smallest response budget of any knowledge read (tokens): every tool's floor (`READ_FLOOR_TOKENS`) is at
@@ -111,6 +112,12 @@ function inOtherTree(store: Store, scope: KnowledgeScope, id: string): boolean {
   return ws !== undefined && !scope.treeIds.includes(ws);
 }
 
+/** Whether the reading run belongs to a task that follows former colleagues on the web (`FOLLOW_TASK_TYPES`). */
+function readerFollows(store: Store, taskId: string | undefined): boolean {
+  const task = taskId ? store.tasks.get(taskId) : undefined;
+  return !!task && FOLLOW_TASK_TYPES.has(task.type);
+}
+
 /** The ids a request names (for the slice check and blocked-attempt events). */
 function namedIds(tool: KnowledgeReadTool, input: KnowledgeReadInput): string[] {
   switch (tool) {
@@ -165,6 +172,8 @@ export function knowledgeRead(deps: KnowledgeReadDeps, caller: ReadCaller, tool:
     ...(caller.model ? { provider: caller.model.provider } : {}),
     ...(deps.slice ? { slice: deps.slice } : {}),
     mode: input.scope ?? 'node',
+    // Stakeholder positions: a run of a task that follows former colleagues on the web is served no internal persona text.
+    ...(readerFollows(store, caller.taskId) ? { withholdInternal: true } : {}),
   };
   const floor = (t: string) => READ_FLOOR_TOKENS[t as KnowledgeReadTool] ?? MIN_RESPONSE_TOKENS;
   const budget = Math.max(floor(tool), budgetFor(deps.config, caller.role, caller.model?.provider, BUDGET_KIND[tool]!, input.max_tokens));

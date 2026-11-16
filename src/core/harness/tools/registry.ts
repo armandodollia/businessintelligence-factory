@@ -61,6 +61,8 @@ export const TOOL_NAMES = [
   'note_stakeholder',
   // Stakeholder personas: a stakeholder persona's simulated read of a recommendation
   'submit_stakeholder_read',
+  // Stakeholder positions: the combine run's one profile of a former colleague, written from both layers
+  'submit_combined_profile',
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -118,6 +120,8 @@ ROLE_TOOLS.worker.push('save_stakeholder');
 ROLE_TOOLS.interviewer.push('note_stakeholder');
 // Stakeholder personas (design 2026-11-15 §10): a stakeholder persona reads a recommendation in the panel.
 ROLE_TOOLS.persona.push('submit_stakeholder_read');
+// Stakeholder positions (design 2026-11-15 §7.2): the combine run is a retro-role run, as persona learning is.
+ROLE_TOOLS.retro.push('submit_combined_profile');
 
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
 export type IssueClass = (typeof ISSUE_CLASSES)[number];
@@ -138,6 +142,22 @@ const personaProfileShape = Object.fromEntries(PERSONA_FIELDS.map((f) => [f, per
 /** Stakeholder profile: every `STAKEHOLDER_FIELDS` entry, each like a persona field (stakeholder design §5). */
 const stakeholderProfileShape = Object.fromEntries(STAKEHOLDER_FIELDS.map((f) => [f, personaField])) as {
   [K in StakeholderField]: typeof personaField;
+};
+/**
+ * A field of a former colleague's combined profile (stakeholder positions design §7.2): what the
+ * combine run writes. It names no evidence: the handler computes it from the two layers.
+ */
+const combinedField = z.object({
+  value: z.string().trim().min(1).max(4000),
+  confidence: z.number().min(0).max(1),
+  basis: z
+    .enum(['internal', 'public', 'both', 'inferred'])
+    .describe('What the field rests on: internal knowledge, public sources, both, or (inferred) a conclusion you drew from both'),
+  // `null` and '' are accepted and mean no conflict: models send them for "none" instead of leaving the key out.
+  conflict: z.string().max(600).nullish().describe('Where the two layers disagree, in words (keep both sides); omit when they do not'),
+});
+const combinedProfileShape = Object.fromEntries(STAKEHOLDER_FIELDS.map((f) => [f, combinedField])) as {
+  [K in StakeholderField]: typeof combinedField;
 };
 
 // --- knowledge store KS-3: entity references (design §7.4, §9) ---
@@ -465,6 +485,19 @@ export const toolInputSchemas = {
     subject: z.string().min(1).describe("'own' (a stakeholder of this node) or the id of a competitor of this business tree"),
     relation: z.string().min(1).max(300).describe('What this node needs from them or what they decide, on one line ("approves pricing changes")'),
     profile: z.object(stakeholderProfileShape).describe('Every stakeholder field, each with value, confidence 0–1 and evidence'),
+    // Stakeholder positions (design 2026-11-15 §7.1): the public layer of a former colleague.
+    follow: id
+      .optional()
+      .describe(
+        'The id of a former colleague listed in your prompt (competitor_stakeholders tasks only): the profile is stored as what public ' +
+          'sources show about them since they left; label, stakeholder_type, subject and relation are then ignored',
+      ),
+    now_at: z.string().max(200).optional().describe('With follow: the company and title a source shows for them now, on one line (at most 200 characters)'),
+  }),
+  // Stakeholder positions (design 2026-11-15 §7.2): one profile of a former colleague from both layers.
+  submit_combined_profile: z.object({
+    persona_id: id.describe('The persona id given in your prompt'),
+    profile: z.strictObject(combinedProfileShape).describe('Every stakeholder field, each with value, confidence 0–1, basis and, where the layers disagree, conflict'),
   }),
   // Stakeholder personas (design 2026-11-15 §9): a statement quoted from the user's interview messages.
   note_stakeholder: z.object({
@@ -774,7 +807,11 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   submit_persona_feedback: 'Submit your in-character feedback on a recommendation (simulated persona).',
   save_stakeholder:
     'Save or update an evidence-backed stakeholder persona: a person, team or system this node (subject "own") or a competitor ' +
-    '(subject: its id) depends on. Same label and subject = update.',
+    '(subject: its id) depends on. Same label and subject = update. With `follow` (the id of a former colleague listed in your ' +
+    'prompt): store what public sources show about them since they left, apart from what is known from inside.',
+  submit_combined_profile:
+    'Submit the one profile of a former colleague written from the internal and the public layer: every field with its value, ' +
+    'confidence, what it rests on (basis) and any conflict between the layers. Call once.',
   submit_stakeholder_read:
     'Submit your in-character read of a recommendation as a stakeholder: your stance, conditions, concerns, reasoning and ' +
     'what would change your mind (simulated stakeholder).',

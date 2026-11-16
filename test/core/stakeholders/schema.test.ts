@@ -150,9 +150,9 @@ describe('migration 25: stakeholder tables', () => {
 
 describe('stakeholder settings and config', () => {
   it('stakeholdersSettings applies every default', () => {
-    expect(stakeholdersSettings({})).toEqual({ enabled: true, maxOwn: 8, maxCompetitors: 3, maxPerCompetitor: 3, maxReadsPerPanel: 40 });
+    expect(stakeholdersSettings({})).toEqual({ enabled: true, maxOwn: 8, maxCompetitors: 3, maxPerCompetitor: 3, maxReadsPerPanel: 40, maxFollowed: 5 });
     expect(stakeholdersSettings({ stakeholders: { enabled: false, maxOwn: 2 } })).toEqual({
-      enabled: false, maxOwn: 2, maxCompetitors: 3, maxPerCompetitor: 3, maxReadsPerPanel: 40,
+      enabled: false, maxOwn: 2, maxCompetitors: 3, maxPerCompetitor: 3, maxReadsPerPanel: 40, maxFollowed: 5,
     });
   });
 

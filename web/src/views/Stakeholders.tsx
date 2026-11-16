@@ -1,5 +1,6 @@
 import { usePersonaLearning, useStakeholders } from '../logic/hooks.js';
 import { isOpenView, KEPT_OUT_NOTE } from '../logic/stakeholders.js';
+import type { OpenStakeholderView } from '../logic/types.js';
 import { Card } from './stakeholders/Card.js';
 import { HiddenWhileOff, Questions } from './stakeholders/Questions.js';
 
@@ -8,6 +9,9 @@ import { HiddenWhileOff, Questions } from './stakeholders/Questions.js';
  * open own stakeholders as cards, then competitor stakeholders under their company. A hidden
  * stakeholder appears only in the question round (label, type, questions); while stakeholder personas
  * are off, only with "Show what the tool found".
+ *
+ * Positions (positions design §10): a former colleague who went to a competitor is shown in that
+ * competitor's group; those who went elsewhere are listed last, under "Former stakeholders".
  */
 export function Stakeholders({ wsId }: { wsId: string }) {
   const learning = usePersonaLearning(wsId);
@@ -18,6 +22,19 @@ export function Stakeholders({ wsId }: { wsId: string }) {
   const round = enabled && (s.groups.length > 0 || s.hidden.length > 0);
   // A competitor section only when it has an open stakeholder to show.
   const competitors = s.competitors.map((c) => ({ ...c, open: c.stakeholders.filter(isOpenView) })).filter((c) => c.open.length > 0);
+  const card = (v: OpenStakeholderView, atCompetitorId?: string) => (
+    <Card
+      key={v.id}
+      wsId={wsId}
+      v={v}
+      learning={learning}
+      saving={s.busy}
+      setInclude={setInclude}
+      places={s.places}
+      onChanged={s.reload}
+      {...(atCompetitorId ? { atCompetitorId } : {})}
+    />
+  );
   return (
     <div>
       <h2>Stakeholders</h2>
@@ -34,18 +51,22 @@ export function Stakeholders({ wsId }: { wsId: string }) {
       {s.loading && !s.view && <div className="muted">loading…</div>}
       {round && <Questions s={s} />}
       {!enabled && s.hidden.length > 0 && <HiddenWhileOff s={s} />}
-      {s.view && !round && s.hidden.length === 0 && s.open.length === 0 && competitors.length === 0 && <p className="muted">No stakeholders yet — run research.</p>}
-      {s.open.map((v) => (
-        <Card key={v.id} wsId={wsId} v={v} learning={learning} saving={s.busy} setInclude={setInclude} />
-      ))}
+      {s.view && !round && s.hidden.length === 0 && s.open.length === 0 && competitors.length === 0 && s.former.length === 0 && (
+        <p className="muted">No stakeholders yet — run research.</p>
+      )}
+      {s.open.map((v) => card(v))}
       {competitors.map((c) => (
         <section key={c.competitorId} aria-label={`stakeholders of ${c.name}`}>
           <h3>{c.name}</h3>
-          {c.open.map((v) => (
-            <Card key={v.id} wsId={wsId} v={v} learning={learning} saving={s.busy} setInclude={setInclude} />
-          ))}
+          {c.open.map((v) => card(v, c.competitorId))}
         </section>
       ))}
+      {s.former.length > 0 && (
+        <section aria-label="former stakeholders">
+          <h3>Former stakeholders</h3>
+          {s.former.map((v) => card(v))}
+        </section>
+      )}
     </div>
   );
 }

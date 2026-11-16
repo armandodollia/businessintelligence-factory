@@ -430,6 +430,23 @@ So the OpenCode success path is still verified only against the handcrafted fixt
 (`test/fixtures/opencode-stream.jsonl`). To retry with a working model:
 `BIF_SMOKE_OPENCODE_MODEL=<provider/model> npx tsx scripts/smoke.ts worker opencode`.
 
+## Stakeholder positions (2026-11-15)
+
+`npx tsx scripts/smoke.ts stakeholder-positions claude`, Claude haiku, real CLI. Two runs.
+
+| Run | Result | Time | Cost | Notes |
+|---|---|---|---|---|
+| 1 (before the final fixes) | PASS 5/5 | 64.4 s | $0.0760 | The combine run's first `submit_combined_profile` was refused because the model sent `conflict: null`; its second call was accepted. `null` is now read as "no conflict". |
+| 2 (merged state) | PASS 5/5 | 68.1 s | $0.0605 | One `submit_combined_profile`, accepted. |
+
+Checked: marking a stakeholder as left to a competitor keeps the internal layer (11 of 11 fields);
+the follow research saves the public layer (11 fields, each citing a captured page) and leaves the
+persona's profile, status and version untouched; neither the worker's nor the reviewer's prompt holds
+the internal phrase; the combine run is offline, is shown both layers and answers once; every combined
+field has a basis and the evidence of its layers (run 2: 4 public, 7 both, 6 noted conflicts). In both
+runs the follow worker's attempt to `expand` the persona was answered "not found", as intended.
+Not run on Codex or OpenCode.
+
 ## Notes
 
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without

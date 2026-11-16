@@ -323,6 +323,9 @@ export const specs = {
       entityId: 'text', // KS-0 (migration 18)
       // stakeholder personas (migration 25)
       kind: 'text', stakeholderType: 'text', subjectKind: 'text', subjectId: 'text', relation: 'text', disclosure: 'text',
+      // stakeholder positions (migration 28)
+      leftAt: 'text', leftFrom: 'json', positionTitle: 'text', internalProfile: 'json', publicProfile: 'json', publicTaskId: 'text',
+      publicSavedAt: 'text', combinedAt: 'text', publicPosition: 'json',
     },
   } satisfies TableSpec<Persona>,
   symptoms: {

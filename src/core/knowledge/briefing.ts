@@ -24,7 +24,8 @@
 import type { BifConfig, ProviderId } from '../config/schema.js';
 import { titleKey } from '../harness/tools/idempotency.js';
 import type { Store } from '../store/db.js';
-import type { Entity, Finding, Phase, RetrievalResultRef, Role } from '../types.js';
+import { FOLLOW_TASK_TYPES } from '../stakeholders/kinds.js'; // stakeholder positions
+import type { Entity, Finding, Phase, RetrievalResultRef, Role, TaskType } from '../types.js';
 import { scopeOf } from '../workspace/tree.js';
 import { budgetFor, estimateTokens, fitToBudget } from './budget.js';
 import { entityCard } from './cards.js';
@@ -555,9 +556,15 @@ function treeUsableCount(r: ReadEnv): number {
 /**
  * Worker briefing (design §11 "Worker"): the facts the task is asked to re-check (with their claims)
  * and the card of the entity its subject names (node scope). '' when there is nothing to show.
+ * `taskType`: the type of the task the briefing is for (what its card may show of a persona).
  */
-export function workerBriefing(env: BriefingEnv, opts: { workspaceId: string; role: Role; provider?: ProviderId; subject?: string; recheckFactIds?: readonly string[] }): Briefing | undefined {
-  const r = briefingReadEnv(env, opts.role, opts.workspaceId, opts.provider);
+export function workerBriefing(
+  env: BriefingEnv,
+  opts: { workspaceId: string; role: Role; provider?: ProviderId; subject?: string; recheckFactIds?: readonly string[]; taskType?: TaskType },
+): Briefing | undefined {
+  const base = briefingReadEnv(env, opts.role, opts.workspaceId, opts.provider);
+  // Stakeholder positions: the subject card of a task that follows former colleagues on the web shows no internal persona text.
+  const r: ReadEnv = opts.taskType && FOLLOW_TASK_TYPES.has(opts.taskType) ? { ...base, withholdInternal: true } : base;
   const recheck: BriefLine[] = [];
   for (const id of opts.recheckFactIds ?? []) {
     const f = env.store.findings.get(id);
