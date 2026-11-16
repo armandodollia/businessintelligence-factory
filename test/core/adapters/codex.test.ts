@@ -52,6 +52,16 @@ describe('CodexAdapter', () => {
     expect(files).toEqual([]);
   });
 
+  it('effort: -c model_reasoning_effort="<level>" when the run has one; the same command as before when it has none', () => {
+    const plain = new CodexAdapter().buildCommand(spec).args;
+    expect(plain.some((a) => a.startsWith('model_reasoning_effort'))).toBe(false);
+    const args = new CodexAdapter().buildCommand({ ...spec, effort: 'high' }).args;
+    const at = args.indexOf('model_reasoning_effort="high"');
+    expect(args[at - 1]).toBe('-c');
+    expect(args.at(-1)).toBe(plain.at(-1)); // the prompt stays the last argument
+    expect(args.filter((_, i) => i !== at && i !== at - 1)).toEqual(plain);
+  });
+
   it('bearer endpoint keeps the run token out of argv (env var instead)', () => {
     const { args, env } = new CodexAdapter().buildCommand({
       ...spec, mcpBearer: { url: 'http://127.0.0.1:4317/mcp', token: 'tok_abc' },

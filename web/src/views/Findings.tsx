@@ -52,7 +52,7 @@ export function Findings({ wsId }: { wsId: string }) {
               reset to default
             </button>
           )}
-          {x.status !== 'verified' && x.lastReview && <LastReviewNote review={x.lastReview} />}
+          {x.status !== 'verified' && x.lastReview && <LastReviewNote review={x.lastReview} wsId={wsId} />}
           <CriteriaRatings workspaceId={wsId} targetType="finding" targetId={x.id} criteria={x.criteria} only={findingCriteriaKeys(x.criteria)} />
           <EvidenceList ids={x.evidence} />
         </div>

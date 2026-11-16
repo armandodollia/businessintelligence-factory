@@ -126,6 +126,14 @@ ROLE_TOOLS.retro.push('submit_combined_profile');
 export const ISSUE_CLASSES = ['blocking', 'substantive', 'nit', 'scope_expansion'] as const;
 export type IssueClass = (typeof ISSUE_CLASSES)[number];
 
+/**
+ * Review council (design §5.5): what a reviewer proposes for an issue. `fix` (the default when omitted):
+ * correct it; `delete`: remove the named output as useless; `rewrite`: discard the named outputs and
+ * redo them another way.
+ */
+export const ISSUE_ACTIONS = ['fix', 'delete', 'rewrite'] as const;
+export type IssueAction = (typeof ISSUE_ACTIONS)[number];
+
 const id = z.string().min(1);
 const criteria = z.record(z.string(), z.union([z.number(), z.string()]));
 const score15 = z.number().min(1).max(5);
@@ -421,7 +429,13 @@ export const toolInputSchemas = {
     .record(z.string(), z.unknown())
     .describe('The task deliverable as one JSON object (shape set by the task brief)'),
   submit_review: z.object({
-    score: z.number().min(0).max(10).describe('0–10; pass threshold is set by the harness'),
+    // `null` (review council design §5.5): a council member cannot score and says why in `summary`; it
+    // then counts as not having reviewed. The handler accepts it from a council member run only: from
+    // any other reviewer it is refused like a missing score, as before there were councils. The handler
+    // also asks a member for the `summary`: were that a rule of this schema, it would be checked before
+    // the handler knows whose run it is, and a single reviewer would be told to explain a null score it
+    // may not send at all.
+    score: z.number().min(0).max(10).nullable().describe('0–10; pass threshold is set by the harness. null is accepted only from a review council member that cannot score, with the reason in summary'),
     issues: z
       .array(
         z.object({
@@ -429,10 +443,15 @@ export const toolInputSchemas = {
           class: z.enum(ISSUE_CLASSES),
           description: z.string().min(1),
           evidence: z.array(id).optional(),
+          // Review council (design §5.5). Optional; a single reviewer may send them too.
+          action: z.enum(ISSUE_ACTIONS).optional().describe('fix (default) | delete: remove the output as useless | rewrite: discard the outputs and redo them another way'),
+          where: z.array(id).optional().describe('Ids of the outputs of this task the issue is about (a finding, a recommendation, ...)'),
         }),
       )
       .default([]),
     summary: z.string().optional(),
+    questions: z.array(z.string().min(1)).optional().describe('Short texts: suspicions you cannot show with an output or evidence'),
+    follow_ups: z.array(z.string().min(1)).optional().describe('Short texts: real problems outside the brief, for later work'),
   }),
   respond_to_review: z.object({
     issue_id: z.string().min(1),

@@ -46,6 +46,11 @@ the agent CLIs call into, and a small React web app. Design spec:
      (3), `mentionWindowDays` (365), `minAttributionConfidence` (0.6), `maxFocusedComparisons` (20 per
      round), `lowConfidence` (0.5), `maxFlowsPerSitting` (8, 2–20), `generalCoverage` (0.3) and
      `model` (verdict runs; default `roles.persona`).
+   - optional `council` (review council; it reviews nothing until you name a stage): `members` (each
+     with `name`, `provider`, `model`, `lens`, and optionally `effort` and `blocking`), `rounds` (3),
+     `passScore` (9), `blockOn` (`any`), `onUnavailable` (`fail`) and `stages` (the task types a
+     council reviews). The example file defines four members and seats them in no stage. See
+     *Review council* under [Concepts](#concepts).
 
    Without a `bif.config.json` the built-in defaults are used. The Settings page edits the same file.
 3. **Log in to each enabled CLI** once in a terminal, so agent runs can use your existing auth:
@@ -194,6 +199,134 @@ then records "what changed") and runs scheduled jobs (missed runs execute once o
   `fixed`, `pushed_back`, `upheld` (reasserted after a pushback) or `withdrawn` (dropped after a
   pushback). The next reviewer sees the issues the worker pushed back on, with the worker's reason,
   and must accept or reassert each; after `loop.maxReasserts` reasserts the worker is told to fix it.
+- **Review council.** A task type can be reviewed by a council instead of one reviewer: several
+  reviewer runs started in parallel, each alone, each through one lens, on the CLIs and models you
+  name. Their reviews are merged into one review per round by fixed rules in code; no model merges,
+  ranks or rules. It is opt-in per task type: with no `council` block, and for every task type you do
+  not name under `council.stages`, the review loop above is exactly what it was.
+
+  *Where it is worth its cost.* A council of N members costs N reviewer runs per round, each with its
+  own tokens, logs and budget use. So seat one where a wrong pass is expensive and the tasks are few:
+  `synthesize_recommendations` (few tasks; its recommendations and their scores are what you act on)
+  and `symptom_hypotheses` (causal claims that steer later research). One reviewer is enough for bulk
+  evidence gathering, which has many tasks per run and is sampled by the reviewer audit. The persona
+  panel, stakeholder reads, learning runs, the combine run and escalation are not review steps and
+  never get a council.
+
+  *Configuration.*
+
+  ```jsonc
+  "council": {
+    "rounds": 3,              // most review rounds of a council stage (default 3)
+    "passScore": 9,           // every blocking member must score this or more (default 9)
+    "blockOn": "any",         // any | majority | all: blocking members needed to uphold an issue (default any)
+    "onUnavailable": "fail",  // fail | report: what a missing blocking member does (default fail)
+    "members": [
+      { "name": "evidence",  "provider": "claude", "model": "opus",        "lens": "evidence" },
+      { "name": "second",    "provider": "codex",  "model": "gpt-6.1-sol", "lens": "evidence", "effort": "high" },
+      { "name": "reasoning", "provider": "claude", "model": "sonnet",      "lens": "reasoning" },
+      { "name": "redo",      "provider": "claude", "model": "opus",        "lens": "rewrite", "blocking": false }
+    ],
+    "stages": {
+      "synthesize_recommendations": { "members": ["evidence", "second", "reasoning"], "rounds": 4 },
+      "symptom_hypotheses": {}
+    }
+  }
+  ```
+
+  - `members[].name`: unique; stages seat members by it and the council table shows it.
+  - `members[].provider`: `claude`, `codex` or `opencode` (`cli` is accepted as another spelling; give
+    one of the two). Any other name is a configuration error that lists these three.
+  - `members[].model`: a model of that provider.
+  - `members[].lens`: exactly one of `evidence` (each claim against the copy it cites), `brief` (each
+    acceptance criterion and each thing the brief asks), `reasoning` (the step from evidence to
+    conclusion), `privacy` (upload-derived or interview text where it must not be, data of another
+    business tree, stored secrets), `value` (useless findings: ones whose removal would change no
+    recommendation, hypothesis or answer) and `rewrite` (a better way to do the same task). Every
+    member also reports a useless finding or a rewrite when it sees one.
+  - `members[].effort` (optional): the reasoning effort in the CLI's own words (e.g. `high`), passed
+    as Claude Code `--effort`, Codex `-c model_reasoning_effort=` or OpenCode `--variant`.
+  - `members[].blocking` (default `true`): a non-blocking member's score is never counted, its issues
+    alone uphold nothing, and a round does not wait for it: it is started after the blocking members,
+    and one still running (or not started yet) when they have ended is cancelled and shown as "not
+    waited for".
+  - `rounds`, `passScore`: for a council stage they replace `loop.maxRounds` and `loop.passThreshold`
+    (and their per-task-type overrides).
+  - `blockOn`: an issue is upheld when one blocking member raised it (`any`), more than half of the
+    blocking members with a score (`majority`), or all of them (`all`). Other issues are shown to the
+    worker as advice.
+  - `onUnavailable`: see below.
+  - `stages`: the task types a council reviews. `stages.<type>.members` seats some members by name
+    (omitted: the whole council); `stages.<type>.rounds` and `.passScore` override the council's. A
+    stage must seat at least one blocking member.
+
+  *A round.* Each member is started with what the single reviewer is started with (same tools, same
+  review slice) plus the council rules and its lens, and never sees another member's review. The
+  rules every member is told: nothing under review is precious (it may propose discarding the
+  deliverable and redoing it another way, within the same task); no nits (style and preference never
+  block and never lower a score); no scope creep (a real problem outside the brief is a follow-up);
+  evidence or nothing (an issue that names neither an output nor an evidence copy is a question); a
+  score below the pass score needs a blocking or substantive issue. Blocking members are started
+  first, so a non-blocking member never holds a worker slot one of them waits for. Only blocking
+  members decide: what a non-blocking member raises is attached to the issue blocking members
+  raised about the same thing (its name, its evidence, its words) or shown as advice, and never
+  changes whether an issue is upheld or whether the round passes. The merge then:
+  turns each member's issue that names neither an output nor evidence into that member's question,
+  before anything is joined (such an issue is no vote for what another member showed);
+  joins issues of different members about the same thing, keeping every member's name and wording
+  (the text the worker reads is the first wording, then "Also raised by <name>: ..." for each other
+  one that is not a near-repeat; the same
+  thing: both reuse the id of an earlier issue they were shown, or they name a common output in
+  loosely similar words, or their words alone are close); drops nits and scope issues (scope issues
+  are kept as follow-ups); takes off each issue the ids that are not outputs of the task or not in
+  its review slice (an issue left with neither is a question too); lets an
+  issue the worker pushed back on block again only when a blocking member that raises it again says
+  something new (the earlier words repeated do not block);
+  from the second review of a deliverable treats a substantive issue no member raised before as
+  advice, so the task does not grow with every round (a new blocking issue still blocks; the first
+  review of work that was done again after an escalation is a first review, whatever its round
+  number); applies `blockOn`; and lets an upheld
+  rewrite replace every other issue about the outputs it discards. A score below the pass score
+  stands only when its member raised an upheld issue. The round passes when every counted score is at
+  or above the pass score and no upheld issue stands; otherwise the worker answers the upheld issues
+  and is shown the advice and the questions. At the round limit the task ends *unverified* and goes
+  to you through the escalation, like any other.
+
+  *When a member is unavailable.* A member is unavailable when its provider is disabled, its model
+  is not in that provider's `models`, its CLI cannot be started, or its run ends without a valid
+  review. This is never a configuration error, so one configuration works on machines with different
+  CLIs: the server prints a warning at start-up naming the member, and the council table shows it.
+  No other model ever takes a member's place. With `onUnavailable: "fail"`, a missing blocking member
+  ends the task *unverified*, with the member, provider, model and cause as the reason, and no
+  revision is made on a partial council: before any member runs when the configuration cannot start
+  it, and once the round's blocking members have ended when its run fails or gives no review (the
+  other members' reviews are kept on the round's record). With `"report"` the round goes on without it; with no
+  blocking member left it fails all the same. A non-blocking member never ends a task: it is shown
+  as unavailable and the round runs with the others, under both settings. A round that failed
+  because a member was unavailable is treated as "no review took place": its score is 0, nothing is
+  put to the worker, and the last review shown on the task's results says that the round did not
+  count. Known limit:
+  when you then re-run the task from the escalation, the work is redone, not only reviewed again.
+
+  *What you see.* Where a result shows its last review (Findings, Strategy, Personas, Competitors),
+  a council review says so and "Show the council" opens the table: members down, rounds across,
+  each cell `7/10`, "no score", "unavailable" or "not waited for"; below it the open issues with who
+  raised each, the advice, the questions and the follow-ups. On the Research page every task a
+  council reviewed has "Show the council" in its row, also a task that passed, and in the list of
+  review rounds a member's own review is labelled "council member: <name> (<lens>)". The table is
+  served by `GET /api/workspaces/:id/tasks/:taskId/council` (a task of another business tree answers
+  like an unknown one; private own-stakeholder research is withheld there as everywhere). Settings
+  lists the configured council read-only, each member available or not and why (`GET /api/council`:
+  the configuration only, nothing of any task). Everything else reads a
+  council round as one review: the issue history, outcomes, the review queue ("Council review
+  score"; a member's own review stays ratable, marked with its name), experiments and the export.
+  The reviewer audit skips tasks whose final review was a council. Runs, usage and cost stay per
+  member run.
+
+  For BIF's own development the same idea is a skill, `.claude/skills/council/SKILL.md`: members
+  review a feature branch against its plan and spec. Both are adapted from the council skill of
+  tstack (https://github.com/t3dotgg/tstack/blob/main/skills/council/SKILL.md). Design:
+  [docs/superpowers/specs/2026-11-16-review-council-design.md](docs/superpowers/specs/2026-11-16-review-council-design.md).
 - **Decision outcomes.** Agent decisions get labels after the fact (`decision_outcomes`): `confirmed`
   (task verified), `over-scoped` / `missed-evidence` / `weak-review` (task unverified),
   `run-failed`, `missed-evidence` (output superseded by a later round), `stale` (a scheduled
@@ -827,6 +960,15 @@ of that business tree — another company's prompts never see them. Nothing is w
   evidence among the actions shown, no identifier of the person), and that no line or brief exists
   before the user decides.
 
+- the **review council smoke** (`council`, only when named): one small task of a council stage with
+  two Claude members on the two cheapest models (lenses `evidence` and `brief`), and one member of
+  another CLI when `BIF_SMOKE_COUNCIL_EXTRA` is `codex` or `opencode`. It checks that every member ran
+  as its own reviewer run on its own model and that the runs overlapped, that each prompt holds its
+  lens and no other member's, one `council_review` decision per round, that the task's final status
+  follows the council's last round, and that the council route serves the rounds. A second task then
+  seats a member whose model does not exist under `onUnavailable: "fail"`: it must end *unverified*
+  naming that member, with no reviewer run on any other model.
+
 It then does an interview round-trip over HTTP with the claude CLI as interviewer.
 
 The knowledge flow uses the real worker system prompt, a real task and a verified fact seeded
@@ -846,9 +988,9 @@ Each step is judged from the store and the run's tool calls. The check covers:
 - a replay of the paged reads, which checks that every passage was served whole;
 - tokens and cost from `agent_usage`.
 
-Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning`, `stakeholders`, `stakeholder-positions`, `user-persona` or `interview` (`--help` lists them and runs nothing), optionally followed by providers
+Run one part with `worker`, `browser`, `knowledge`, `flows`, `persona-learning`, `stakeholders`, `stakeholder-positions`, `user-persona`, `council` or `interview` (`--help` lists them and runs nothing), optionally followed by providers
 (`claude`, `codex`, `opencode`). Set models with `BIF_SMOKE_CLAUDE_MODEL`, `BIF_SMOKE_CODEX_MODEL`
-and `BIF_SMOKE_OPENCODE_MODEL`, the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
+and `BIF_SMOKE_OPENCODE_MODEL` (the council's second Claude member: `BIF_SMOKE_COUNCIL_SECOND_MODEL`, default `sonnet`), the per-run limit with `BIF_SMOKE_TIMEOUT_MS`, and keep the knowledge
 smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md](docs/smoke-results.md).
 
 ## Known limitations
@@ -869,6 +1011,8 @@ smoke's temp dir with `BIF_SMOKE_KEEP=1`. Latest results: [docs/smoke-results.md
 - **Config changes** to worker/browser limits and the port need a restart. (`BIF_DATA_DIR`/`PORT`
   overrides are runtime-only and are not written into `bif.config.json` when you save settings.)
 - **Rate-limit back-off holds the worker slot** while waiting (up to 15 minutes).
+- **A council round that failed because a member was unavailable is not a review.** Re-running the
+  task from its escalation redoes the work; it does not only review the existing result again.
 - **"What changed" only compares screenshots that findings or confirmations cite.**
 - **User, scheduler and calibration decisions** are stored as orchestrator decisions with
   `payload.actor` telling them apart. User decisions (weight changes, prompt patch approvals and

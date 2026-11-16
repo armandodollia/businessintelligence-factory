@@ -22,6 +22,19 @@
       "synthesize_recommendations": { "maxRounds": 4, "passThreshold": 9 }
     }
   },
+  "council": {
+    "rounds": 3,
+    "passScore": 9,
+    "blockOn": "any",
+    "onUnavailable": "fail",
+    "members": [
+      { "name": "evidence", "provider": "claude", "model": "opus", "lens": "evidence" },
+      { "name": "second", "provider": "codex", "model": "gpt-6.1-sol", "effort": "high", "lens": "evidence" },
+      { "name": "reasoning", "provider": "claude", "model": "sonnet", "lens": "reasoning" },
+      { "name": "redo", "provider": "claude", "model": "opus", "lens": "rewrite", "blocking": false }
+    ],
+    "stages": {}
+  },
   "limits": {
     "maxParallelWorkers": 3,
     "maxBrowserRuns": 2,

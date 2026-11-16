@@ -286,9 +286,16 @@ export interface LastReview {
   issues: Array<{ id?: string; class?: string; description?: string; evidence?: string[] }>;
   decisionId: string;
   at: string;
-  /** Harness-recorded score 0 because the reviewer run failed or returned no valid review. */
+  /** Harness-recorded score 0 because the reviewer run failed or returned no valid review (or the council round did not count). */
   synthetic?: boolean;
+  /** Review council: the review is a council round of this task. */
+  council?: { taskId: string };
 }
+
+// --- review council: the council table of a task, the configured council (`src/api/councilRoutes.ts`) ---
+export type { CouncilRound, CouncilView, WithheldCouncilRound } from '../../../src/core/council/store.js';
+export type { CouncilOverview } from '../../../src/core/council/settings.js';
+export type { CouncilResult, MergedIssue } from '../../../src/core/council/merge.js';
 
 export type FindingView = Finding & { lastReview?: LastReview };
 

@@ -1680,4 +1680,14 @@ export const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER stakeholder_positions_no_delete BEFORE DELETE ON stakeholder_positions
     BEGIN SELECT RAISE(ABORT, 'stakeholder_positions is append-only'); END;
   `,
+  // 29: review council (design 2026-11-16-review-council-design.md §8). A council member's reviewer run
+  // carries the id of its council round (`council_round_id`; the round's `council_review` Decision has
+  // that id as its `agent_run_id`) and the member's name. Unlike `audit_id`, the tag takes the run out
+  // of nothing that counts runs, usage or cost: it only says that the run's review is one member's, so
+  // that the round's Decision, and not this run, is read as the task's review. Read by `council/store.ts`.
+  `
+  ALTER TABLE agent_runs ADD COLUMN council_round_id TEXT;
+  ALTER TABLE agent_runs ADD COLUMN council_member TEXT;
+  CREATE INDEX agent_runs_council ON agent_runs (council_round_id) WHERE council_round_id IS NOT NULL;
+  `,
 ];

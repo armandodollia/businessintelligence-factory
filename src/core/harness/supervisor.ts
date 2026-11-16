@@ -59,6 +59,11 @@ export type RunOptions = {
    * enforce it fails the run before start. Offline runs get no extra MCP servers.
    */
   offline?: boolean;
+  /**
+   * Review council (design §4): the reasoning effort of a member, passed to the adapter
+   * (`SpawnSpec.effort`), which sets it through its CLI's own setting. Omitted: the CLI's default.
+   */
+  effort?: string;
   /** Run in-process with this script instead of spawning the provider CLI. */
   fake?: FakeScript;
   /**
@@ -466,6 +471,7 @@ export class Supervisor {
       cwd,
       stateDir: join(this.dataDir, 'cli-state'),
       ...(opts.offline ? { offline: true } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
     };
     const built = adapter.buildCommand(spec);
     for (const f of built.files) {

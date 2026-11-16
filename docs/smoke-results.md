@@ -447,6 +447,27 @@ field has a basis and the evidence of its layers (run 2: 4 public, 7 both, 6 not
 runs the follow worker's attempt to `expand` the persona was answered "not found", as intended.
 Not run on Codex or OpenCode.
 
+## Review council (2026-11-16)
+
+`npx tsx scripts/smoke.ts council claude`, two members (Claude haiku with lens `evidence`, Claude
+sonnet with lens `brief`), real CLI. Two runs, before and after the fixes of the branch's own council
+review.
+
+| Run | Result | Time | Cost |
+|---|---|---|---|
+| 1 | PASS 6/6 | 41.3 s | $0.0902 |
+| 2 (merged state) | PASS 6/6 | 35.1 s | $0.0899 |
+
+Checked: each member ran as its own reviewer run on its own model, in parallel; each member's prompt
+holds its lens and no other; one council review per round; the task's status follows the council's
+result; the council route serves the rounds; a member whose model does not exist ends the task
+unverified, named, with no other model started in its place. Not run: Codex or OpenCode members in
+the tool (`BIF_SMOKE_COUNCIL_EXTRA`), and a round that fails and goes to revision on a real CLI.
+
+The branch itself was reviewed with the development council skill: correctness (Claude fable),
+acceptance (Codex CLI, gpt-6-astra, read-only), test-value (Claude sonnet). Round 1: 7, 7, 8.
+Round 2: 9, 9, 9.
+
 ## Notes
 
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without

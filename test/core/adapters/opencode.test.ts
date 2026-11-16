@@ -25,6 +25,16 @@ const parseAll = (lines: string[]): RunEvent[] => {
 };
 
 describe('OpenCodeAdapter', () => {
+  it('effort: --variant <level> when the run has one; the same command as before when it has none', () => {
+    const plain = new OpenCodeAdapter().buildCommand(spec).args;
+    expect(plain).not.toContain('--variant');
+    const args = new OpenCodeAdapter().buildCommand({ ...spec, effort: 'high' }).args;
+    const at = args.indexOf('--variant');
+    expect(args.slice(at, at + 2)).toEqual(['--variant', 'high']);
+    expect(args.at(-1)).toBe(plain.at(-1)); // the prompt stays the last argument
+    expect(args.filter((_, i) => i !== at && i !== at + 1)).toEqual(plain);
+  });
+
   it('command shape and generated config file', () => {
     const { cmd, args, files, env } = new OpenCodeAdapter().buildCommand(spec);
     expect(cmd).toBe('opencode');

@@ -45,7 +45,7 @@ export function Strategy({ wsId }: { wsId: string }) {
             <div key={r.id} className="card">
               <b>{r.title}</b> <span className={`status ${r.status}`}>{r.status}</span>
               <p>{r.summary}</p>
-              {r.lastReview && <LastReviewNote review={r.lastReview} />}
+              {r.lastReview && <LastReviewNote review={r.lastReview} wsId={wsId} />}
               <PanelToggle
                 rec={r}
                 used={recs.usedInPanel(r)}
@@ -73,7 +73,7 @@ export function Strategy({ wsId }: { wsId: string }) {
               <td>
                 <b>{r.title}</b> {r.status && <span className={`status ${r.status}`}>{r.status}</span>}
                 <p>{r.summary}</p>
-                {recs.needsReviewFlag(r) && r.lastReview && <LastReviewNote review={r.lastReview} />}
+                {recs.needsReviewFlag(r) && r.lastReview && <LastReviewNote review={r.lastReview} wsId={wsId} />}
                 <PanelToggle
                   rec={r}
                   used={recs.usedInPanel(r)}

@@ -118,6 +118,47 @@ describe('runTaskWithReview', () => {
     expect(s.requests.find((r) => r.kind === 'review')!.systemPrompt).toContain('adversarial reviewer');
   });
 
+  it('a single reviewer cannot send `score: null`: the tool refuses it like a missing score, and a run that then sends a number is a valid review', async () => {
+    const refused: unknown[] = [];
+    const s = researchSetup(opened, {
+      pick: (r) => {
+        if (r.kind === 'work') return submitWork();
+        if (r.kind === 'revise') return revise('fix')(r);
+        return async (t) => {
+          await t.call('submit_review', { score: null, issues: [], summary: 'I could not open the evidence' }).catch((e: unknown) => refused.push((e as Error).message));
+          await t.call('submit_review', { score: 9, issues: [], summary: 'checked after all' });
+        };
+      },
+    });
+    const task = addTask(s.store);
+    const out = await runTaskWithReview(task, s.deps);
+    expect(out).toMatchObject({ status: 'verified', round: 1 });
+    expect(refused).toEqual(['invalid input for submit_review: score: Invalid input: expected number, received null']);
+    const reviews = s.store.decisions.list({ kind: 'review' }).map((d) => d.payload);
+    expect(reviews).toEqual([{ tool: 'submit_review', score: 9, issues: [], summary: 'checked after all' }]);
+  });
+
+  it('a single reviewer whose only review was the refused `score: null` gave no review: the round fails like a malformed one', async () => {
+    let reviewRuns = 0;
+    const s = researchSetup(opened, {
+      pick: (r) => {
+        if (r.kind === 'work') return submitWork();
+        if (r.kind === 'revise') return revise('fix')(r);
+        return ++reviewRuns === 1
+          ? async (t) => void (await t.call('submit_review', { score: null, issues: [], summary: 'I could not open the evidence' }).catch(() => undefined))
+          : review(9);
+      },
+    });
+    const task = addTask(s.store);
+    const out = await runTaskWithReview(task, s.deps);
+    expect(out).toMatchObject({ status: 'verified', round: 2 });
+    const reviews = s.store.decisions.list({ kind: 'review' }).map((d) => d.payload as { tool?: string; event?: string; score?: unknown });
+    // Nothing of the refused call is stored: the round has the synthetic review of a run that sent none.
+    expect(reviews.map((p) => [p.tool, p.event ?? null, p.score])).toEqual([['harness', 'synthetic_review', 0], ['submit_review', null, 9]]);
+    expect(reviews[0]).toEqual({ tool: 'harness', event: 'synthetic_review', round: 1, score: 0, issues: [{ id: 'I1', class: 'blocking', description: MALFORMED_REVIEW_ISSUE }], runStatus: 'done' });
+    expect(s.requests.find((r) => r.kind === 'revise')!.prompt).toContain(`[I1] (blocking) ${MALFORMED_REVIEW_ISSUE}`);
+  });
+
   it('malformed review counts as fail', async () => {
     let reviews = 0;
     const s = researchSetup(opened, {

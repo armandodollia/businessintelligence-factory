@@ -32,18 +32,35 @@ export function escalationRequests(store: Store, task: Pick<Task, 'id' | 'worksp
     .filter((r) => r.workspaceId === task.workspaceId);
 }
 
-/** The latest re-run marker of a task, if it was ever re-run after an escalation. */
-export function latestRerun(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): EscalationRerunPayload | undefined {
-  let latest: EscalationRerunPayload | undefined;
+/** Every re-run marker of a task, oldest first: one per escalation whose answers re-ran it. */
+export function taskReruns(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): EscalationRerunPayload[] {
+  const out: EscalationRerunPayload[] = [];
   for (const run of store.agentRuns.list({ taskId: task.id, role: 'escalation' })) {
     for (const d of store.decisions.list({ agentRunId: run.id })) {
       const p = d.payload as Partial<EscalationRerunPayload> | null;
       if (p?.tool === 'harness' && p.event === ESCALATION_RERUN_EVENT && d.workspaceId === task.workspaceId) {
-        latest = p as EscalationRerunPayload;
+        out.push(p as EscalationRerunPayload);
       }
     }
   }
-  return latest;
+  return out;
+}
+
+/** The latest re-run marker of a task, if it was ever re-run after an escalation. */
+export function latestRerun(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): EscalationRerunPayload | undefined {
+  return taskReruns(store, task).at(-1);
+}
+
+/**
+ * Whether a re-run started the work again (the worker's `work` step, in round `previousRound + 1`) and
+ * did not go on as a revision. `rerunAfterEscalation` revises the deliverable when the last review left
+ * issues to answer, and has the work done again otherwise: after a failed worker step, a review that
+ * did not take place (a failed council round), or a review with nothing listed. A review is only ever
+ * made of a submitted deliverable, and a deliverable is never taken back, so the marker's `lastReview`
+ * says which it was.
+ */
+export function rerunRedidWork(rerun: Pick<EscalationRerunPayload, 'lastReview'>): boolean {
+  return !rerun.lastReview?.issues.length;
 }
 
 // KS-5: identity secrets of the tree are redacted from the whole text before it is cut.

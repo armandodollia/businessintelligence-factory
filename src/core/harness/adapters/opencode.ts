@@ -70,6 +70,9 @@ function toOpenCodeMcp(server: unknown): unknown {
  *   `step_start` | `step_finish` | `reasoning` | `error`. There is no terminal event: the CLI
  *   exits when the session goes idle, and it exits 0 even after an `error` — so `error` maps to
  *   error + done(1). Permission prompts are auto-rejected in `run` mode.
+ * - Effort (`spec.effort`): `--variant <level>` (help: "model variant (provider-specific reasoning
+ *   effort, e.g., high, max, minimal)"). The level is passed as configured; which levels exist depends
+ *   on the model's provider.
  * - Offline runs (`spec.offline`): `permission: OPENCODE_OFFLINE_PERMISSION` in the generated config
  *   (rule order and merge checked in the 1.2.27 bundle: `PermissionNext.fromConfig`, `disabled`,
  *   agent rules = defaults, agent rules, then the config's rules).
@@ -96,7 +99,12 @@ export class OpenCodeAdapter implements CliAdapter {
     if (spec.stateDir) env.XDG_CONFIG_HOME = join(spec.stateDir, 'opencode-config');
     return {
       cmd: this.command,
-      args: ['run', '--format', 'json', '-m', spec.model, safePositional(withSystemBlock(spec.systemPrompt, spec.prompt))],
+      args: [
+        'run', '--format', 'json',
+        '-m', spec.model,
+        ...(spec.effort ? ['--variant', spec.effort] : []),
+        safePositional(withSystemBlock(spec.systemPrompt, spec.prompt)),
+      ],
       files: [{ path, content: JSON.stringify(config, null, 2) }],
       env,
     };

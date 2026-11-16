@@ -1,11 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { canRunOffline, NO_OFFLINE_MODEL } from '../harness/offline.js';
+import { councilFor, memberUnavailable } from '../council/settings.js';
 import {
+  COUNCIL_DEFAULTS,
   PROVIDER_IDS,
+  TASK_TYPES,
   bifConfigSchema,
   defaultConfig,
   type BifConfig,
   type ModelRef,
+  type TaskType,
 } from './schema.js';
 
 export interface ConfigIssue {
@@ -109,5 +113,31 @@ export function configWarnings(cfg: BifConfig): string[] {
   if (stakeholders && !PROVIDER_IDS.some((id) => canRunOffline(cfg, id) && cfg.providers[id].models.length > 0)) {
     out.push(`stakeholders: ${NO_OFFLINE_MODEL}; reads by own stakeholders and learning for them are skipped (or set stakeholders.enabled: false)`);
   }
+  out.push(...councilWarnings(cfg));
   return out;
+}
+
+/**
+ * Review council (design §4, §7): one line per member that is seated in a stage and cannot run here
+ * (provider disabled, or model not configured), with the reason, the stages and what happens to them:
+ * `onUnavailable` decides for a blocking member; a non-blocking member never ends a task.
+ * This is a warning, not an error, so one configuration works on machines with different CLIs.
+ */
+function councilWarnings(cfg: BifConfig): string[] {
+  const unavailable = new Map<string, { who: string; reason: string; blocking: boolean; stages: TaskType[] }>();
+  for (const type of TASK_TYPES) {
+    for (const m of councilFor(cfg, type)?.members ?? []) {
+      const reason = memberUnavailable(cfg, m);
+      if (!reason) continue;
+      const entry = unavailable.get(m.name) ?? { who: `member '${m.name}' (${m.provider}/${m.model})`, reason, blocking: m.blocking, stages: [] };
+      entry.stages.push(type);
+      unavailable.set(m.name, entry);
+    }
+  }
+  const onUnavailable = cfg.council?.onUnavailable ?? COUNCIL_DEFAULTS.onUnavailable;
+  const effect = (blocking: boolean): string =>
+    !blocking
+      ? 'run without it (a non-blocking member never ends a task)'
+      : `${onUnavailable === 'fail' ? 'end unverified while it is seated' : 'run without it'} (council.onUnavailable: ${onUnavailable})`;
+  return [...unavailable.values()].map((u) => `council: ${u.who} cannot run: ${u.reason}. Stages ${u.stages.join(', ')} ${effect(u.blocking)}`);
 }

@@ -31,6 +31,7 @@ import type { StoredBusEvent } from '../telemetry/busEvents.js';
 import type { Store } from '../store/db.js';
 import type { AgentRun, Decision, Task, UserRequest } from '../types.js';
 import { isHidden, stakeholderPersonas } from './personas.js';
+import { councilRoundTaskId } from '../council/store.js'; // review council
 
 /** What a withheld task shows. */
 export type WithheldTask = Pick<Task, 'id' | 'workspaceId' | 'runId' | 'phase' | 'type' | 'status' | 'round' | 'model' | 'createdAt'> &
@@ -123,7 +124,9 @@ export function withholding(store: Store): Withholding {
     let v = runs.get(runId);
     if (v === undefined) {
       const r = store.agentRuns.get(runId);
-      const t = r?.taskId ? store.tasks.get(r.taskId) : undefined;
+      // Review council: a council round's Decision has its round id for a run; the round is its task's.
+      const taskId = r?.taskId ?? councilRoundTaskId(runId);
+      const t = taskId ? store.tasks.get(taskId) : undefined;
       // A run whose task row is gone counts as research that may still be running.
       v = t ? task(t) : !!r && r.taskType === OWN_RESEARCH && (r.status === 'running' || nodeHasHidden(r.workspaceId));
       runs.set(runId, v);

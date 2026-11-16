@@ -22,7 +22,7 @@
 import { CronExpressionParser } from 'cron-parser';
 import { PROVIDER_IDS, type BifConfig, type ModelRef } from '../config/schema.js';
 import { treeWorkspaceIds } from '../evidence/synthesis.js';
-import { getRunOutputs } from '../harness/tools/handlers.js';
+import { getRunOutputs, validScore } from '../harness/tools/handlers.js';
 import { runAgent, type ResearchDeps } from '../research/deps.js';
 import { loopSettings, reviewerRunInput } from '../research/reviewLoop.js';
 import type { Store } from '../store/db.js';
@@ -241,25 +241,25 @@ async function auditOne(deps: ResearchDeps, audit: ReviewerAudit, task: Task): P
       .at(-1);
     const base: Partial<ReviewerAudit> = { status: 'done', auditRunId: res.agentRunId, auditPromptVersion: input.promptVersion };
     if (decision) base.auditDecisionId = decision.id;
-    const valid = res.status === 'done' && review !== undefined && Number.isFinite(review.score) && review.score >= 0 && review.score <= 10;
-    if (!valid) {
+    const score = res.status === 'done' && review !== undefined && validScore(review.score) ? review.score : undefined;
+    if (review === undefined || score === undefined) {
       end({ ...base, verdict: 'invalid', reason: res.status === 'done' ? 'the auditor produced no valid review' : `auditor run failed${res.reason ? `: ${res.reason}` : ''}` });
       return;
     }
     const issues: AuditIssue[] = review.issues.map((i) => ({ id: i.id, class: i.class, description: i.description }));
-    if (review.score >= audit.passThreshold) {
-      end({ ...base, verdict: 'agree', auditScore: review.score, auditIssues: issues });
+    if (score >= audit.passThreshold) {
+      end({ ...base, verdict: 'agree', auditScore: score, auditIssues: issues });
       return;
     }
     const outcome = recordOutcome(store, {
       decisionId: audit.originalDecisionId, outcome: 'audit_failed', label: 'weak-review', source: 'reviewer_audit',
       sourceKey: `audit:${audit.id}`, taskId: task.id, targetType: 'task', targetId: task.id,
       evidence: {
-        auditId: audit.id, auditRunId: res.agentRunId, auditModel: audit.auditModel, auditScore: review.score,
+        auditId: audit.id, auditRunId: res.agentRunId, auditModel: audit.auditModel, auditScore: score,
         originalScore: audit.originalScore, passThreshold: audit.passThreshold, issues: issues.map((i) => ({ class: i.class, description: i.description })),
       },
     });
-    end({ ...base, verdict: 'miss', auditScore: review.score, auditIssues: issues, ...(outcome ? { outcomeId: outcome.id } : {}) });
+    end({ ...base, verdict: 'miss', auditScore: score, auditIssues: issues, ...(outcome ? { outcomeId: outcome.id } : {}) });
   } catch (err) {
     end({ status: 'failed', reason: (err as Error).message });
   }

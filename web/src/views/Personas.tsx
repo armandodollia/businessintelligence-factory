@@ -29,7 +29,7 @@ export function Personas({ wsId }: { wsId: string }) {
             {p.status && <span className={`status ${p.status}`}>{p.status}</span>}
             <span className="muted"> v{p.version} · {p.agentMdPath}</span>
           </div>
-          {ps.needsReviewFlag(p) && p.lastReview && <LastReviewNote review={p.lastReview} />}
+          {ps.needsReviewFlag(p) && p.lastReview && <LastReviewNote review={p.lastReview} wsId={wsId} />}
           <label className="muted small">
             <input
               type="checkbox"

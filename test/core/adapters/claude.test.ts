@@ -39,6 +39,15 @@ describe('ClaudeAdapter', () => {
     expect(mcp.mcpServers.playwright).toEqual(spec.extraMcpServers.playwright);
   });
 
+  it('effort: --effort <level> when the run has one; the same command as before when it has none', () => {
+    const plain = new ClaudeAdapter().buildCommand(spec).args;
+    expect(plain).not.toContain('--effort');
+    const args = new ClaudeAdapter().buildCommand({ ...spec, effort: 'high' }).args;
+    const at = args.indexOf('--effort');
+    expect(args.slice(at, at + 2)).toEqual(['--effort', 'high']);
+    expect(args.filter((_, i) => i !== at && i !== at + 1)).toEqual(plain);
+  });
+
   it('honors a custom command and guards a dash-leading prompt', () => {
     const { cmd, args } = new ClaudeAdapter('/opt/claude').buildCommand({ ...spec, prompt: '-x' });
     expect(cmd).toBe('/opt/claude');

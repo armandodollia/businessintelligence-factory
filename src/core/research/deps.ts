@@ -34,9 +34,12 @@ export type AgentRequest = {
   promptReads?: PromptRead[];
   /**
    * Learning loop WP-F: tags written on the run once its id exists and before the agent starts (before
-   * the prompt reads), e.g. a reviewer audit's `auditId`. Decisions of the run inherit them.
+   * the prompt reads), e.g. a reviewer audit's `auditId` (decisions of the run inherit it) or a council
+   * member's round and name.
    */
-  runTags?: { auditId?: string; lessonsOff?: boolean };
+  runTags?: { auditId?: string; lessonsOff?: boolean; councilRoundId?: string; councilMember?: string };
+  /** Review council: the reasoning effort of a member (`RunOptions.effort`). */
+  effort?: string;
   /**
    * The run must not reach the web (`RunOptions.offline`): a stakeholder read by an own stakeholder, a
    * learning run for an own stakeholder persona, a user-persona learning run.
@@ -93,6 +96,7 @@ export async function runAgent(
     needsBrowser: req.needsBrowser,
   };
   if (req.offline) opts.offline = true;
+  if (req.effort !== undefined) opts.effort = req.effort;
   if (fake) opts.fake = fake;
   if (deps.signal) opts.signal = deps.signal;
   // Learning loop WP-B: round / task type on the AgentRun, research run for usage and budgets.

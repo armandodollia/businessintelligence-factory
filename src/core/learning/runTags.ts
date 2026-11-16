@@ -26,13 +26,29 @@ export const NORMAL_DECISION_SQL = (alias = 'decisions') => `(${alias}.experimen
 /** SQL predicate: the `tasks` row (alias) is not an experiment arm task. */
 export const NORMAL_TASK_SQL = (alias = 'tasks') => `(${alias}.experiment_id IS NULL)`;
 
-/** Tags an existing agent run (audit runs; called before the agent starts). */
-export function tagRun(store: Pick<Store, 'db'>, agentRunId: string, tags: { auditId?: string; lessonsOff?: boolean }): void {
+/**
+ * Tags an existing agent run (audit runs, council member runs; called before the agent starts). A council
+ * member run (`councilRoundId`, `councilMember`; migration 29) stays a normal run for metrics, usage and
+ * cost: see `council/store.ts` for what the tag means.
+ */
+export function tagRun(
+  store: Pick<Store, 'db'>,
+  agentRunId: string,
+  tags: { auditId?: string; lessonsOff?: boolean; councilRoundId?: string; councilMember?: string },
+): void {
   const sets: string[] = [];
   const params: Array<string | number> = [];
   if (tags.auditId !== undefined) {
     sets.push('audit_id = ?');
     params.push(tags.auditId);
+  }
+  if (tags.councilRoundId !== undefined) {
+    sets.push('council_round_id = ?');
+    params.push(tags.councilRoundId);
+  }
+  if (tags.councilMember !== undefined) {
+    sets.push('council_member = ?');
+    params.push(tags.councilMember);
   }
   if (tags.lessonsOff !== undefined) {
     sets.push('lessons_off = ?');

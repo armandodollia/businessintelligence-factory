@@ -87,6 +87,14 @@ describe('Supervisor', () => {
     expect(argv[argv.indexOf('--append-system-prompt') + 1]).toBe('sys');
   });
 
+  it('effort reaches the CLI command only when the run has one', async () => {
+    const { dir, sup } = setup();
+    const argvOf = (id: string) => JSON.parse(readFileSync(join(dir, 'ws_a', 'runs', id, 'cwd', 'argv.json'), 'utf8')) as string[];
+    const withEffort = argvOf((await sup.run(cli({ lines: CLAUDE_FIXTURE }, { effort: 'high' }))).agentRunId);
+    expect(withEffort[withEffort.indexOf('--effort') + 1]).toBe('high');
+    expect(argvOf((await sup.run(cli({ lines: CLAUDE_FIXTURE }))).agentRunId)).not.toContain('--effort');
+  });
+
   it('adds browser MCP servers only when needsBrowser', async () => {
     const { dir, sup } = setup();
     const res = await sup.run(cli({ lines: CLAUDE_FIXTURE }));

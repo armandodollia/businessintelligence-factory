@@ -417,3 +417,12 @@ export const stakeholdersApi = {
     post<Statement>(`${ws(wsId)}/recommendations/${enc(recId)}/stakeholder-decisions`, input),
 };
 // --- end stakeholder personas --------------------------------------------------------------------
+
+// --- review council: the council table of a task, the configured council (`src/api/councilRoutes.ts`) ---
+export const councilApi = {
+  /** The council rounds of a task, read from the node the page is on (a task of another business tree answers 404). */
+  getTaskCouncil: (taskId: string, workspaceId: string) =>
+    get<import('./types.js').CouncilView>(`${ws(workspaceId)}/tasks/${enc(taskId)}/council`),
+  /** The configured council with each member's availability; `council: null` when none is configured. */
+  getCouncil: () => get<{ council: import('./types.js').CouncilOverview | null }>('/api/council'),
+};

@@ -16,6 +16,7 @@ import { knowledgeRepos, newId } from '../../src/core/store/repos.js';
 import { createToolHandlers, getRunOutputs, resolveUserRequest, type ToolHandlerDeps } from '../../src/core/harness/tools/handlers.js';
 import { ROLE_TOOLS, TOOL_NAMES } from '../../src/core/harness/tools/registry.js';
 import { TokenRegistry, type RunContext } from '../../src/core/harness/tokens.js';
+import { tagRun } from '../../src/core/learning/runTags.js';
 import type { Task } from '../../src/core/types.js';
 import { PRIVATE_TASK_TOOLS } from '../../src/core/research/phases.js';
 import { STAKEHOLDER_FIELDS } from '../../src/core/scoring/criteria.js';
@@ -213,6 +214,109 @@ describe('tool handlers', () => {
     expect(await p2).toMatchObject({ ok: false });
     expect(store.userRequests.list({ status: 'pending' })).toHaveLength(1); // stays pending for resume
     expect(() => resolveUserRequest({ store, events }, 'nope', 'resolved')).toThrow();
+  });
+
+  it('submit_review stores the optional council fields (action, where, questions, follow_ups) in the Decision payload', async () => {
+    const { store, handle } = setup();
+    const task = addTask(store);
+    const reviewer = ctx('reviewer', { taskId: task.id, model: { provider: 'codex', model: 'gpt-6.1-sol' } });
+    const sent = {
+      score: 6,
+      issues: [
+        { class: 'substantive', description: 'restates its source', action: 'delete', where: ['fnd_1'] },
+        { class: 'blocking', description: 'redo it from the filings', action: 'rewrite', where: ['fnd_1', 'fnd_2'] },
+        { class: 'nit', description: 'typo' },
+      ],
+      summary: 's',
+      questions: ['Is the 2024 figure audited?'],
+      follow_ups: ['The pricing page of the second competitor is out of date'],
+    };
+    const rev = await handle(reviewer, 'submit_review', sent);
+    const issues = [
+      { id: 'I1', class: 'substantive', description: 'restates its source', action: 'delete', where: ['fnd_1'] },
+      { id: 'I2', class: 'blocking', description: 'redo it from the filings', action: 'rewrite', where: ['fnd_1', 'fnd_2'] },
+      { id: 'I3', class: 'nit', description: 'typo' },
+    ];
+    expect(rev).toMatchObject({ ok: true, data: { score: 6, issues } });
+    expect(store.decisions.list({ agentRunId: reviewer.agentRunId })[0]!.payload).toEqual({
+      tool: 'submit_review', score: 6, issues, summary: 's',
+      questions: ['Is the 2024 figure audited?'],
+      followUps: ['The pricing page of the second competitor is out of date'],
+    });
+    // Unknown actions and empty texts are refused; a review without the new fields stores none of them.
+    expect((await handle(reviewer, 'submit_review', { score: 6, issues: [{ class: 'nit', description: 'x', action: 'drop' }] })).ok).toBe(false);
+    expect((await handle(reviewer, 'submit_review', { score: 6, issues: [], questions: [''] })).ok).toBe(false);
+    const plain = ctx('reviewer', { taskId: task.id });
+    await handle(plain, 'submit_review', { score: 9, issues: [{ class: 'nit', description: 'typo' }] });
+    expect(store.decisions.list({ agentRunId: plain.agentRunId })[0]!.payload).toEqual({
+      tool: 'submit_review', score: 9, issues: [{ id: 'I1', class: 'nit', description: 'typo' }],
+    });
+  });
+
+  /** A reviewer run that is a council member's: its row is tagged with the round and the member's name. */
+  const memberRun = (store: Store, taskId: string): RunContext => {
+    const c = ctx('reviewer', { taskId });
+    new TokenRegistry(store).issue(c);
+    tagRun(store, c.agentRunId, { councilRoundId: `cnl:${taskId}:r_1`, councilMember: 'a' });
+    return c;
+  };
+
+  it('submit_review accepts `score: null` from a council member run, and only when `summary` says why (review council design §5.5)', async () => {
+    const { store, handle } = setup();
+    const task = addTask(store);
+    const member = memberRun(store, task.id);
+    for (const bad of [{ score: null, issues: [] }, { score: null, issues: [], summary: '   ' }, { issues: [], summary: 'no score at all' }]) {
+      const res = await handle(member, 'submit_review', bad);
+      expect(res.ok, JSON.stringify(bad)).toBe(false);
+    }
+    expect(store.decisions.list({ agentRunId: member.agentRunId })).toEqual([]);
+    const res = await handle(member, 'submit_review', { score: null, issues: [], summary: 'The evidence copies could not be opened' });
+    expect(res).toMatchObject({ ok: true, data: { score: null, issues: [] } });
+    expect(store.decisions.list({ agentRunId: member.agentRunId })[0]!.payload).toEqual({
+      tool: 'submit_review', score: null, issues: [], summary: 'The evidence copies could not be opened',
+    });
+    expect(getRunOutputs(store, member.agentRunId).review).toEqual({ score: null, issues: [], summary: 'The evidence copies could not be opened' });
+  });
+
+  it('submit_review refuses `score: null` from any other run, with the error a score that is no number always gave, and the run can send a number', async () => {
+    const { store, handle } = setup();
+    const task = addTask(store);
+    // The single reviewer, and a reviewer run with a row of its own that is no member's (an audit).
+    const single = ctx('reviewer', { taskId: task.id });
+    const audit = ctx('reviewer', { taskId: task.id });
+    new TokenRegistry(store).issue(audit);
+    for (const run of [single, audit]) {
+      const res = await handle(run, 'submit_review', { score: null, issues: [], summary: 'The evidence copies could not be opened' });
+      expect(res).toEqual({ ok: false, error: 'invalid input for submit_review: score: Invalid input: expected number, received null' });
+      expect(store.decisions.list({ agentRunId: run.agentRunId })).toEqual([]);
+      // The same kind of error as a missing score.
+      const missing = await handle(run, 'submit_review', { issues: [], summary: 'no score at all' });
+      expect(missing).toEqual({ ok: false, error: 'invalid input for submit_review: score: Invalid input: expected number, received undefined' });
+    }
+    expect((await handle(single, 'submit_review', { score: 4, issues: [], summary: 'The evidence copies could not be opened' })).ok).toBe(true);
+    expect(getRunOutputs(store, single.agentRunId).review).toMatchObject({ score: 4 });
+    // The optional council fields stay accepted from everyone.
+    const fields = await handle(audit, 'submit_review', { score: 7, issues: [{ class: 'substantive', description: 'x', action: 'delete', where: ['fnd_1'] }], questions: ['q'], follow_ups: ['f'] });
+    expect(fields.ok).toBe(true);
+  });
+
+  it('submit_review refuses `score: null` from a run that is no council member\'s with the missing-score error in every case, also with no summary (council review C7)', async () => {
+    const { store, handle } = setup();
+    const task = addTask(store);
+    const single = ctx('reviewer', { taskId: task.id });
+    const refusal = { ok: false, error: 'invalid input for submit_review: score: Invalid input: expected number, received null' };
+    // No summary, a blank one, and no issues list: never the advice to explain in `summary`, which only a member can follow.
+    for (const sent of [{ score: null, issues: [] }, { score: null, issues: [], summary: '   ' }, { score: null }, { score: null, questions: ['Is this audited?'] }]) {
+      expect(await handle(single, 'submit_review', sent), JSON.stringify(sent)).toEqual(refusal);
+    }
+    expect(store.decisions.list({ agentRunId: single.agentRunId })).toEqual([]);
+    // A council member is still told what to add.
+    const member = memberRun(store, task.id);
+    expect(await handle(member, 'submit_review', { score: null, issues: [] })).toEqual({
+      ok: false, error: 'invalid input for submit_review: summary: score is null: say in summary why you cannot score',
+    });
+    // Anything else that is wrong with the input is reported as it is, to everyone.
+    expect(await handle(single, 'submit_review', { score: null, issues: [{ class: 'huge', description: 'x' }] })).toMatchObject({ ok: false, error: expect.stringContaining('issues') });
   });
 
   it('submit_result / submit_review / respond_to_review persist and read back via getRunOutputs', async () => {

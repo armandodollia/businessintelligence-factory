@@ -1,7 +1,10 @@
+import { Fragment, useState } from 'react';
+import { isCouncilReviewed, reviewDecisionLabel } from '../logic/council.js';
 import { changedArtifactLabel, describeEvent, eventRunId, payloadText, shortDate, summarize, toggle } from '../logic/format.js';
 import { artifactUrl, useChanges, useDecisions, useForm, useResearch } from '../logic/hooks.js';
 import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import { ALL_PHASES, OPTIONAL_PHASES, type ResearchPhase } from '../logic/types.js';
+import { CouncilTable } from './CouncilTable.js';
 import { PendingRequests } from './PendingRequests.js';
 
 export function Research({ wsId }: { wsId: string }) {
@@ -10,6 +13,8 @@ export function Research({ wsId }: { wsId: string }) {
   const reviews = useDecisions(wsId, 'review');
   const form = useForm({ phases: [...ALL_PHASES] as ResearchPhase[] });
   const phases = form.values.phases;
+  // Review council: the tasks whose council table is open (it is loaded when it is opened).
+  const [councils, setCouncils] = useState<string[]>([]);
 
   return (
     <div>
@@ -67,27 +72,47 @@ export function Research({ wsId }: { wsId: string }) {
           </thead>
           <tbody>
             {r.tasks.map((t) => (
-              <tr key={t.id}>
-                <td>{t.phase}</td>
-                <td>{t.type}</td>
-                <td>
-                  {isWithheld(t) ? (
-                    <span className="muted">{WITHHELD_TEXT}</span>
-                  ) : (
-                    <>
-                      {t.subject && <b>{t.subject} </b>}
-                      <span className="muted">{summarize(t.brief, 160)}</span>
-                    </>
-                  )}
-                </td>
-                <td>
-                  {t.model.provider}/{t.model.model}
-                </td>
-                <td>{t.round}</td>
-                <td>
-                  <span className={`status ${t.status}`}>{t.status}</span>
-                </td>
-              </tr>
+              <Fragment key={t.id}>
+                <tr>
+                  <td>{t.phase}</td>
+                  <td>{t.type}</td>
+                  <td>
+                    {isWithheld(t) ? (
+                      <span className="muted">{WITHHELD_TEXT}</span>
+                    ) : (
+                      <>
+                        {t.subject && <b>{t.subject} </b>}
+                        <span className="muted">{summarize(t.brief, 160)}</span>
+                      </>
+                    )}
+                  </td>
+                  <td>
+                    {t.model.provider}/{t.model.model}
+                  </td>
+                  <td>{t.round}</td>
+                  <td>
+                    <span className={`status ${t.status}`}>{t.status}</span>
+                    {/* Review council: a council-reviewed task shows its council, whatever its status. */}
+                    {isCouncilReviewed(t) && (
+                      <>
+                        {' '}
+                        <button className="link small" aria-expanded={councils.includes(t.id)} onClick={() => setCouncils((open) => toggle(open, t.id))}>
+                          {councils.includes(t.id) ? 'Hide the council' : 'Show the council'}
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+                {isCouncilReviewed(t) && councils.includes(t.id) && (
+                  <tr>
+                    <td colSpan={6}>
+                      <div role="region" aria-label={`council of task ${t.id}`}>
+                        <CouncilTable taskId={t.id} wsId={wsId} />
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -114,11 +139,15 @@ export function Research({ wsId }: { wsId: string }) {
           </ul>
           <h3>Review rounds</h3>
           <ul className="plain small">
-            {reviews.decisions.slice(0, 30).map((d) => (
-              <li key={d.id}>
-                <span className="muted">{shortDate(d.createdAt)}</span> {payloadText(d.payload, 200)}
-              </li>
-            ))}
+            {reviews.decisions.slice(0, 30).map((d) => {
+              // Review council: a member's own review and the round's review say what they are.
+              const label = reviewDecisionLabel(d);
+              return (
+                <li key={d.id}>
+                  <span className="muted">{shortDate(d.createdAt)}</span> {label && <span className="tag">{label}</span>} {payloadText(d.payload, 200)}
+                </li>
+              );
+            })}
           </ul>
         </aside>
       </div>

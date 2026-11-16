@@ -65,7 +65,7 @@ export function Competitors({ wsId }: { wsId: string }) {
                 <b>{c.name}</b> {c.site && <span className="muted">{c.site}</span>}{' '}
                 {c.status && <span className={`status ${c.status}`}>{c.status}</span>}
               </div>
-              {c.status !== 'verified' && c.lastReview && <LastReviewNote review={c.lastReview} />}
+              {c.status !== 'verified' && c.lastReview && <LastReviewNote review={c.lastReview} wsId={wsId} />}
               {toggle(c, false)}
               {c.evidence.length > 0 && <EvidenceList ids={c.evidence} />}
             </div>

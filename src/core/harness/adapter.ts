@@ -18,6 +18,12 @@ export type SpawnSpec = {
   prompt: string;
   systemPrompt: string;
   model: string;
+  /**
+   * Reasoning effort for this run (review council design §4: a member's `effort`), in the CLI's own words
+   * (e.g. `high`). Each adapter passes it through its CLI's setting; omitted, the command is unchanged and
+   * the CLI uses its default. Only a provider in `EFFORT_PROVIDERS` (config/schema.ts) may be given one.
+   */
+  effort?: string;
   /** Harness MCP endpoint for this run (`<base>/mcp/<token>`). */
   mcpUrl: string;
   /**

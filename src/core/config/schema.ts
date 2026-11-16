@@ -482,6 +482,84 @@ export const userPersonaConfigSchema = z.strictObject({
 });
 // --- end user persona config ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Review council (design 2026-11-16-review-council-design.md §4). Optional and opt-in per stage: with no
+// `council`, or for a task type not in `council.stages`, the single reviewer is used as before. Read it
+// through `councilFor` (src/core/council/settings.ts), which applies `COUNCIL_DEFAULTS`.
+
+/** What a council member looks for (design §5.2). A member has exactly one. */
+export const LENSES = ['evidence', 'brief', 'reasoning', 'privacy', 'value', 'rewrite'] as const;
+export type Lens = (typeof LENSES)[number];
+
+/**
+ * Providers whose CLI has a reasoning-effort setting, which the adapter sets from `SpawnSpec.effort`:
+ * claude `--effort`, codex `-c model_reasoning_effort=`, opencode `--variant`. A provider added
+ * without one stays out of this set, and `effort` on its members is then a configuration error.
+ */
+export const EFFORT_PROVIDERS: ReadonlySet<ProviderId> = new Set(PROVIDER_IDS);
+
+/** Why a member of `provider` cannot have `effort` (`undefined`: it can). Never ignored silently (design §4). */
+export function effortProblem(provider: ProviderId, supported: ReadonlySet<ProviderId> = EFFORT_PROVIDERS): string | undefined {
+  return supported.has(provider) ? undefined : `provider '${provider}' has no reasoning-effort setting: remove effort from this member`;
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+export const councilMemberSchema = z.preprocess(
+  // `cli` is another spelling of `provider`; the parsed member always has `provider`.
+  (raw, ctx) => {
+    if (!isRecord(raw) || !('cli' in raw)) return raw;
+    const { cli, ...rest } = raw;
+    if (!('provider' in rest)) return { ...rest, provider: cli };
+    ctx.addIssue({ code: 'custom', path: ['cli'], message: 'give provider or cli, not both' });
+    return rest;
+  },
+  z.strictObject({
+    /** Unique in the council; stages seat members by it, and round records show it. */
+    name: z.string().trim().min(1),
+    provider: z.enum(PROVIDER_IDS, {
+      error: (issue) =>
+        issue.input === undefined
+          ? `required: one of ${PROVIDER_IDS.join(', ')}`
+          : `unsupported provider '${String(issue.input)}': supported are ${PROVIDER_IDS.join(', ')}`,
+    }),
+    model: z.string().min(1),
+    /** Reasoning effort, in the CLI's own words (e.g. `high`): passed to the CLI unchanged. */
+    effort: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'must be a level name of letters, digits, - and _ (e.g. high)')
+      .optional(),
+    lens: z.enum(LENSES),
+    /** Default true. A non-blocking member's score is never counted and its issues alone uphold nothing. */
+    blocking: z.boolean().optional(),
+  }),
+);
+
+const councilStageSchema = z.strictObject({
+  /** Names of the members seated for this task type. Omitted: the whole council. */
+  members: z.array(z.string().min(1)).optional(),
+  rounds: z.number().int().min(1).optional(),
+  passScore: z.number().min(0).max(10).optional(),
+});
+
+export const councilConfigSchema = z.strictObject({
+  /** Most review rounds of a council stage (default 3); a stage may override. Replaces `loop.maxRounds` there. */
+  rounds: z.number().int().min(1).optional(),
+  /** Every blocking member must score this or more (default 9); a stage may override. Replaces `loop.passThreshold` there. */
+  passScore: z.number().min(0).max(10).optional(),
+  /** Blocking members needed to uphold a finding (default `any`). */
+  blockOn: z.enum(['any', 'majority', 'all']).optional(),
+  /** A member that cannot run: the task ends unverified (`fail`, default) or the round goes on without it (`report`). */
+  onUnavailable: z.enum(['fail', 'report']).optional(),
+  members: z.array(councilMemberSchema),
+  /** The task types reviewed by a council. Every other task type keeps its single reviewer. */
+  stages: perTaskType(councilStageSchema).optional(),
+});
+
+/** Defaults of `config.council` (design §4). `blocking` of a member defaults to true (`councilFor`). */
+export const COUNCIL_DEFAULTS = { rounds: 3, passScore: 9, blockOn: 'any', onUnavailable: 'fail' } as const;
+// --- end review council config -------------------------------------------------------------------
+
 export const bifConfigSchema = z
   .strictObject({
     providers: z.strictObject({
@@ -568,6 +646,8 @@ export const bifConfigSchema = z
     stakeholders: stakeholdersConfigSchema.optional(),
     /** User persona: gates, caps and the brief in prompts (all defaulted). */
     userPersona: userPersonaConfigSchema.optional(),
+    /** Review council: members, rules and the task types it reviews (opt-in per stage). */
+    council: councilConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
@@ -595,6 +675,39 @@ export const bifConfigSchema = z
     check(cfg.audit?.model, ['audit', 'model']); // WP-F
     check(cfg.flows?.model, ['flows', 'model']); // flow ranking
     check(cfg.personaLearning?.model, ['personaLearning', 'model']); // persona learning
+    // Review council (design §4). A member whose provider is disabled or whose model is not configured
+    // is NOT an error: the configuration loads on machines with other CLIs (`configWarnings` names it).
+    if (cfg.council) {
+      const members = cfg.council.members;
+      const byName = new Map<string, (typeof members)[number]>();
+      members.forEach((m, i) => {
+        if (byName.has(m.name)) {
+          ctx.addIssue({ code: 'custom', path: ['council', 'members', i, 'name'], message: `duplicate member name '${m.name}'` });
+        } else {
+          byName.set(m.name, m);
+        }
+        const problem = m.effort === undefined ? undefined : effortProblem(m.provider);
+        if (problem) ctx.addIssue({ code: 'custom', path: ['council', 'members', i, 'effort'], message: problem });
+      });
+      for (const [type, stage] of Object.entries(cfg.council.stages ?? {})) {
+        if (!stage) continue;
+        const path = ['council', 'stages', type];
+        const named = stage.members;
+        let known = true;
+        named?.forEach((name, i) => {
+          if (!byName.has(name)) {
+            known = false;
+            ctx.addIssue({ code: 'custom', path: [...path, 'members', i], message: `unknown member '${name}' (members: ${[...byName.keys()].join(', ')})` });
+          } else if (named.indexOf(name) !== i) {
+            ctx.addIssue({ code: 'custom', path: [...path, 'members', i], message: `member '${name}' is named twice` });
+          }
+        });
+        const seated = named ? named.flatMap((name) => byName.get(name) ?? []) : members;
+        if (known && !seated.some((m) => m.blocking ?? true)) {
+          ctx.addIssue({ code: 'custom', path, message: 'a stage must seat at least one blocking member' });
+        }
+      }
+    }
     // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).
     const ex = cfg.knowledge?.extraction;
     if (ex && (ex.chunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.chunkTokens) > (ex.maxChunkTokens ?? KNOWLEDGE_DEFAULTS.extraction.maxChunkTokens)) {

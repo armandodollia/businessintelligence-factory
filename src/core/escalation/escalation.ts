@@ -27,9 +27,12 @@ import {
   ESCALATION_KIND,
   ESCALATION_RERUN_EVENT,
   escalationRequests,
+  rerunRedidWork,
   type EscalationRerunPayload,
 } from './context.js';
 import { isAuditRun, isExperimentTask } from '../learning/runTags.js'; // learning loop WP-F
+import { councilFor } from '../council/settings.js'; // review council
+import { councilReviewDecisions, councilReviewOf, isCouncilMemberRun, upheldIssues } from '../council/store.js'; // review council
 
 /**
  * Structured escalations (WP-D). When a task ends `unverified` or `failed`, the `escalation` agent
@@ -128,16 +131,42 @@ export function escalationToolHandlers(): Partial<Record<ToolName, ExtraToolHand
 // ---------------------------------------------------------------------------
 // prompts
 
-/** The latest valid review of a task (last reviewer run that submitted one). */
-function lastReviewOf(store: Store, task: Task): { score: number; issues: ReviewIssue[] } | undefined {
+type LastReview = {
+  score: number;
+  issues: ReviewIssue[];
+  /** Review council: the review was a council round of this many seated members. */
+  council?: { members: number; failed?: string };
+};
+
+/**
+ * The latest valid review of a task: the last reviewer run that submitted one, or (review council) the
+ * task's last council round when that is later: its score and the issues the council upheld, i.e. what
+ * is still open. A council member's own review is never the task's. A council round that failed
+ * (design §7) upheld nothing; its reason is in `council.failed`.
+ */
+function lastReviewOf(store: Store, task: Task): LastReview | undefined {
   const runs = store.agentRuns
     .list({ taskId: task.id, role: 'reviewer' })
-    .filter((r) => r.workspaceId === task.workspaceId && !isAuditRun(store, r.id)); // learning loop WP-F
+    .filter((r) => r.workspaceId === task.workspaceId && !isAuditRun(store, r.id)) // learning loop WP-F
+    .filter((r) => !isCouncilMemberRun(store, r.id));
+  let single: (LastReview & { at: string }) | undefined;
   for (const run of runs.reverse()) {
     const review = getRunOutputs(store, run.id).review;
-    if (review) return { score: review.score, issues: review.issues };
+    // A review with `score: null` ("cannot score") is no review: as when none was submitted.
+    if (review && review.score !== null) {
+      single = { score: review.score, issues: review.issues, at: run.startedAt };
+      break;
+    }
   }
-  return undefined;
+  const round = councilReviewDecisions(store, task).at(-1);
+  const council = councilReviewOf(round);
+  if (round && council && (!single || round.createdAt >= single.at)) {
+    return {
+      score: council.score, issues: upheldIssues(council),
+      council: { members: council.members.length, ...(council.failed !== undefined ? { failed: council.failed } : {}) },
+    };
+  }
+  return single ? { score: single.score, issues: single.issues } : undefined;
 }
 
 function lastWorkerRun(store: Store, task: Task): AgentRun | undefined {
@@ -177,9 +206,15 @@ export function escalationPromptWithReads(
     `## Outcome\nThe task ended **${task.status}** after review round ${task.round}.`,
   ];
   const review = lastReviewOf(store, task);
-  if (review) {
+  if (review?.council?.failed !== undefined) {
+    // Review council (design §7): the round did not count, so there is no review to show.
     parts.push(
-      `## Last review (score ${review.score})\n${
+      `## Last review (council of ${review.council.members} reviewers)\n` +
+        `The council round failed, and the task ended without a revision: ${clip(review.council.failed, 500)}`,
+    );
+  } else if (review) {
+    parts.push(
+      `## Last review (${review.council ? `council of ${review.council.members} reviewers, ` : ''}score ${review.score})\n${
         review.issues.map((i) => `- [${i.id}] (${i.class}) ${clip(i.description, 500)}`).join('\n') || '- (no issues listed)'
       }`,
     );
@@ -286,10 +321,16 @@ export function answerEscalation(
   return resolveUserRequest(deps, id, 'resolved', response);
 }
 
-/** Copy of `config` whose loop gives `type` a review budget up to round `maxRounds`. */
+/**
+ * Copy of `config` whose loop gives `type` a review budget up to round `maxRounds`. Review council: for
+ * a council stage the budget is the stage's `rounds` (which replace `loop.maxRounds` for the type).
+ */
 function withRoundBudget(config: BifConfig, type: Task['type'], maxRounds: number): BifConfig {
   const perTaskType = { ...config.loop.perTaskType, [type]: { ...config.loop.perTaskType[type], maxRounds } };
-  return { ...config, loop: { ...config.loop, perTaskType } };
+  const out = { ...config, loop: { ...config.loop, perTaskType } };
+  const stage = config.council?.stages?.[type];
+  if (!config.council || !stage) return out;
+  return { ...out, council: { ...config.council, stages: { ...config.council.stages, [type]: { ...stage, rounds: maxRounds } } } };
 }
 
 /**
@@ -327,7 +368,8 @@ export async function rerunAfterEscalation(deps: ResearchDeps, taskId: string): 
   if (failures.length) payload.failureReasons = failures;
   if (worker) payload.lastWorkerRunId = worker.id;
   const startRound = task.round + 1;
-  const asRevision = task.result !== undefined && !!review?.issues.length;
+  // What `rerunRedidWork` reads back from the marker (the review council counts the reviews of the current work by it).
+  const asRevision = task.result !== undefined && !rerunRedidWork(payload);
   store.transaction(() => {
     recordHarnessDecision(
       store,
@@ -346,7 +388,7 @@ export async function rerunAfterEscalation(deps: ResearchDeps, taskId: string): 
         : { status: 'queued', step: 'work', round: startRound },
     );
   });
-  const { maxRounds } = loopSettings(task.type, config);
+  const maxRounds = councilFor(config, task.type)?.rounds ?? loopSettings(task.type, config).maxRounds;
   return runTaskTracked(store.tasks.get(taskId)!, { ...deps, config: withRoundBudget(config, task.type, startRound + maxRounds - 1) });
 }
 

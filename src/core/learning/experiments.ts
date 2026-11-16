@@ -18,7 +18,8 @@
  * `getExperiment`, `recoverExperiments` (boot).
  */
 import type { ModelRef } from '../config/schema.js';
-import { getRunOutputs } from '../harness/tools/handlers.js';
+import { getRunOutputs, validScore } from '../harness/tools/handlers.js';
+import { councilRounds, isCouncilMemberRun } from '../council/store.js'; // review council
 import { usageTotals, type UsageTotals } from '../metrics/usage.js';
 import { getPromptText, recordPromptVersion } from '../prompts/store.js';
 import type { ResearchDeps } from '../research/deps.js';
@@ -216,15 +217,28 @@ function addTotals(a: UsageTotals, b: UsageTotals): UsageTotals {
   return out;
 }
 
-/** Review scores of a task in order: valid `submit_review`s of finished reviewer runs, and the loop's synthetic 0s. */
+/**
+ * Review scores of a task in order: valid `submit_review`s of finished reviewer runs, and the loop's synthetic 0s.
+ * Review council: a council round is one review with one score (its `council_review` Decision, the latest
+ * when the round was recorded more than once; 0 when the round failed); its members' scores are not
+ * further reviews.
+ */
 function reviewScores(store: Store, task: Task): number[] {
-  const out: number[] = [];
+  const out: Array<{ at: string; score: number }> = [];
   for (const run of store.agentRuns.list({ taskId: task.id, role: 'reviewer' })) {
+    if (isCouncilMemberRun(store, run.id)) continue;
     const review = getRunOutputs(store, run.id).review;
-    if (run.status === 'done' && review && Number.isFinite(review.score) && review.score >= 0 && review.score <= 10) out.push(review.score);
-    else if (store.decisions.list({ agentRunId: run.id }).some((d) => (d.payload as { event?: unknown } | null)?.event === 'synthetic_review')) out.push(0);
+    if (run.status === 'done' && review && validScore(review.score)) out.push({ at: run.startedAt, score: review.score });
+    else if (store.decisions.list({ agentRunId: run.id }).some((d) => (d.payload as { event?: unknown } | null)?.event === 'synthetic_review')) out.push({ at: run.startedAt, score: 0 });
   }
-  return out;
+  // One score per round: of a round recorded twice (a restart after the record), the later record.
+  const rounds = councilRounds(store, task.id);
+  if (!rounds.length) return out.map((x) => x.score);
+  for (const r of rounds) out.push({ at: r.at, score: r.result.score });
+  return out
+    .map((x, i) => ({ ...x, i }))
+    .sort((a, b) => a.at.localeCompare(b.at) || a.i - b.i)
+    .map((x) => x.score);
 }
 
 function armResult(store: Store, exp: Experiment, arm: ExperimentArmSpec): ArmResult {

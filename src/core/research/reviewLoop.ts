@@ -2,7 +2,7 @@ import type { BifConfig } from '../config/schema.js';
 import { reviewerFor } from '../config/load.js';
 import { AbortError } from '../events.js';
 import type { RunOutcome } from '../harness/supervisor.js';
-import { getRunOutputs, type ReviewIssue } from '../harness/tools/handlers.js';
+import { getRunOutputs, validScore, type ReviewIssue } from '../harness/tools/handlers.js';
 import { loadPrompt, promptVersion } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
 import { escalationRerunSection, ESCALATION_KIND } from '../escalation/context.js'; // WP-D
@@ -10,8 +10,8 @@ import { policyDenialsSection } from '../policy/policyEvents.js'; // WP-D
 import type { Finding, Persona, Role, Task, TaskType } from '../types.js';
 import { sameTree } from '../workspace/tree.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type AgentKind, type ResearchDeps } from './deps.js';
-import { applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
-import { recordTaskEndOutcomes } from '../learning/outcomes.js';
+import { allOutputs, applyTaskStatus, currentOutputIds, taskOutputs } from './outputs.js';
+import { recordTaskEndOutcomes, taskLastReviewDecision } from '../learning/outcomes.js';
 import { maxReasserts, recordReviewRound, recordRevisionResponses, reviewerDisputeSection, workerDisputeSection } from '../learning/reviewIssues.js';
 import { workerSystemPrompt, reviewerSystemPrompt } from './systemPrompts.js';
 import { formerColleagues, stakeholderTaskSection } from '../stakeholders/personas.js'; // stakeholder personas
@@ -32,6 +32,11 @@ import { flowRepos } from '../flows/repos.js';
 import type { Flow, FlowCheck, FlowStep, ReviewMention } from '../flows/types.js';
 import type { Store } from '../store/db.js';
 import { knowledgeRepos } from '../store/repos.js';
+// Review council: a council stage's round, and what the worker is shown of it.
+import { councilStep } from '../council/round.js';
+import { councilFor } from '../council/settings.js';
+import { councilRounds } from '../council/store.js';
+import type { MergedIssue } from '../council/merge.js';
 
 /** Issue description used when a reviewer run produced no valid `submit_review`. */
 export const MALFORMED_REVIEW_ISSUE = 'reviewer produced no valid review';
@@ -120,7 +125,7 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
   // Stakeholder positions (design §7.1): the public layers this task saved for former colleagues it
   // follows. The persona is not the task's output (its profile and status are not the task's to
   // change), so the layer is shown here, with its evidence, and nothing else of the persona.
-  const followed = task.type === 'competitor_stakeholders' ? formerColleagues(store, task.workspaceId).filter((p) => p.publicTaskId === task.id && p.publicProfile) : [];
+  const followed = followedColleagues(store, task);
   for (const p of followed) for (const a of layerEvidence(p, task.id)) ids.add(a);
   if (task.result !== undefined) for (const m of JSON.stringify(task.result).matchAll(ARTIFACT_ID)) ids.add(m[0]);
 
@@ -221,6 +226,11 @@ export function reviewContext(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<R
     ...(knowledge.results.length ? { knowledge } : {}),
     ...(outputsRead ? { outputsRead } : {}),
   };
+}
+
+/** The former colleagues whose public layer a `competitor_stakeholders` task saved (none for any other task). */
+function followedColleagues(store: Store, task: Pick<Task, 'id' | 'type' | 'workspaceId'>): Persona[] {
+  return task.type === 'competitor_stakeholders' ? formerColleagues(store, task.workspaceId).filter((p) => p.publicTaskId === task.id && p.publicProfile) : [];
 }
 
 /** What research saw of a former colleague's position, when the task `taskId` is the one that saved it. */
@@ -405,10 +415,15 @@ export function revisePromptWithReads(
   issues: ReviewIssue[],
   deps?: Pick<ResearchDeps, 'store'> & Partial<Pick<ResearchDeps, 'config'>>,
 ): { prompt: string; reads: PromptRead[] } {
-  const issueLines = issues.map((i) => {
-    const ev = i.evidence?.length ? ` (evidence: ${i.evidence.join(', ')})` : '';
-    return `- [${i.id}] (${i.class}) ${i.description}${ev}`;
-  });
+  // Review council: when the issues come from a council round, they are shown with what the council
+  // recorded about them, followed by what it raised without holding the task back.
+  const council = deps ? councilRevision(deps.store, task, issues) : undefined;
+  const issueLines = council
+    ? council.issueLines
+    : issues.map((i) => {
+        const ev = i.evidence?.length ? ` (evidence: ${i.evidence.join(', ')})` : '';
+        return `- [${i.id}] (${i.class}) ${i.description}${ev}`;
+      });
   const outputs = deps ? currentOutputsBriefing(deps, task) : undefined;
   const briefings = deps ? taskBriefings(deps, task) : [];
   const prompt = [
@@ -419,6 +434,7 @@ export function revisePromptWithReads(
     `## Your current deliverable\n\`\`\`json\n${JSON.stringify(task.result ?? null, null, 2)}\n\`\`\``,
     `## Review issues\n${issueLines.join('\n') || '- (none)'}`,
     deps ? workerDisputeSection(deps.store, task, issues, maxReasserts(deps.config)) : '', // learning loop WP-C
+    ...(council?.sections ?? []), // review council: advisory issues and questions
     outputs?.section ?? '',
     ...briefings.map((b) => b.section),
     deps ? stakeholderTaskSection(deps.store, deps.config ?? defaultConfig, task) : '', // stakeholder personas
@@ -428,6 +444,64 @@ export function revisePromptWithReads(
     .filter(Boolean)
     .join('\n\n');
   return { prompt, reads: promptReadsOf(outputs, ...briefings) };
+}
+
+/**
+ * Review council (design 2026-11-16 §6 step 6): how a revision is shown the round it answers, when the
+ * task's latest review is a council round and `issues` are its upheld issues. `undefined` otherwise (the
+ * prompt is then built as for a single reviewer).
+ * - The issue lines keep the form `- [id] (class) text`. An upheld rewrite comes first, with the outputs to
+ *   discard; an issue names the outputs it is about, and a proposed deletion says so.
+ * - "Not blocking (answer if useful)": the advisory issues. "Questions from reviewers": what a member
+ *   suspected and could not show. Neither needs a `respond_to_review`, so neither is listed under an id.
+ * The worker is not shown who raised an issue, except where an issue carries more than one member's
+ * wording: its text then names the members whose words follow the first ("Also raised by <name>: ...").
+ */
+function councilRevision(store: Store, task: Task, issues: ReviewIssue[]): { issueLines: string[]; sections: string[] } | undefined {
+  const round = councilRounds(store, task.id).at(-1);
+  if (!round || taskLastReviewDecision(store, task)?.id !== round.decisionId) return undefined;
+  const upheld = new Map(round.result.issues.filter((i) => i.standing === 'upheld').map((i) => [i.id, i]));
+  if (!issues.length || !issues.every((i) => upheld.has(i.id))) return undefined;
+  const evidence = (i: Pick<MergedIssue, 'evidence'>) => (i.evidence?.length ? ` (evidence: ${i.evidence.join(', ')})` : '');
+  const about = (i: Pick<MergedIssue, 'where'>) => (i.where?.length ? ` (about: ${i.where.join(', ')})` : '');
+  const text = (i: MergedIssue): string => {
+    const outputs = i.where?.length ? i.where.join(', ') : 'the outputs it names';
+    if (i.action === 'rewrite') {
+      return (
+        `Rewrite: discard ${outputs} (neither re-save nor cite them) and redo them as proposed here, for the same brief and nothing more. ` +
+        `${i.description}${evidence(i)}`
+      );
+    }
+    if (i.action === 'delete') return `Delete ${outputs} (neither re-save nor cite them): ${i.description}${evidence(i)}`;
+    return `${i.description}${about(i)}${evidence(i)}`;
+  };
+  const ordered = issues.map((i) => upheld.get(i.id)!);
+  const issueLines = [...ordered.filter((i) => i.action === 'rewrite'), ...ordered.filter((i) => i.action !== 'rewrite')].map(
+    (i) => `- [${i.id}] (${i.class}) ${text(i)}`,
+  );
+  const sections: string[] = [];
+  const advisory = round.result.issues.filter((i) => i.standing === 'advisory');
+  if (advisory.length) {
+    sections.push(
+      [
+        '## Not blocking (answer if useful)',
+        'Reviewers raised these, but they do not hold the task back. Take one up where it improves the deliverable',
+        'within the brief. Do not call `respond_to_review` for them.',
+        ...advisory.map((i) => `- (${i.class}) ${text(i)}`),
+      ].join('\n'),
+    );
+  }
+  if (round.result.questions.length) {
+    sections.push(
+      [
+        '## Questions from reviewers',
+        'A reviewer suspected these and could not show them. Where one points at a real gap, close it in the',
+        'deliverable. Do not call `respond_to_review` for them.',
+        ...round.result.questions.map((q) => `- ${q.text}`),
+      ].join('\n'),
+    );
+  }
+  return { issueLines, sections };
 }
 
 // WP-D: prompt sections shared by work and revise prompts.
@@ -581,12 +655,15 @@ async function workerStep(
  * prompt (with the business's calibration) and its version, the minimal review prompt (`reviewPrompt`,
  * with the open disputes of earlier rounds) and the prompt reads to log before the run starts.
  * Learning loop WP-F: reviewer audits use exactly this, so an auditor sees what the reviewer saw.
+ * Review council: a member is started with exactly this too; `earlierIssues` is its prompt section on
+ * the issues of earlier rounds (`council/round.ts`), placed after the disputes. Empty for everyone else.
  */
 export function reviewerRunInput(
   deps: Pick<ResearchDeps, 'store' | 'config'>,
   task: Task,
   round: number,
   lessons: { lessonsOff?: boolean } = {},
+  earlierIssues = '',
 ): { systemPrompt: string; promptVersion: string; prompt: string; promptReads: PromptRead[] } {
   const { store, config } = deps;
   const system = reviewerSystemPrompt(config, calibrationScope(store, config, task.workspaceId, { taskId: task.id, ...lessons }), task.type);
@@ -606,7 +683,10 @@ export function reviewerRunInput(
   return {
     systemPrompt: system,
     promptVersion: promptVersion(system),
-    prompt: reviewPrompt(task, context.evidence, context.outputs, reviewerDisputeSection(store, task, round, maxReasserts(config))),
+    prompt: reviewPrompt(
+      task, context.evidence, context.outputs,
+      [reviewerDisputeSection(store, task, round, maxReasserts(config)), earlierIssues].filter(Boolean).join('\n\n'),
+    ),
     promptReads,
   };
 }
@@ -631,7 +711,7 @@ async function reviewStep(
   throwIfAborted(deps.signal);
   const review = getRunOutputs(store, res.agentRunId).review;
   // A review counts only if the reviewer run itself finished successfully.
-  if (res.status === 'done' && review && Number.isFinite(review.score) && review.score >= 0 && review.score <= 10) {
+  if (res.status === 'done' && review && validScore(review.score)) {
     return { valid: true, score: review.score, issues: review.issues };
   }
   const issues: ReviewIssue[] = [{ id: 'I1', class: 'blocking', description: MALFORMED_REVIEW_ISSUE }];
@@ -675,6 +755,12 @@ function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unveri
  * `failed`. Failed runs are kept and logged as harness Decisions (`worker_run_failed`, and
  * `worker_retry_succeeded` when the retry worked).
  *
+ * Review council (design 2026-11-16-review-council-design.md): for a task type named in `council.stages`
+ * the round's review is a council round (`councilStep`) instead of one reviewer run. It passes when the
+ * merge says so, the round limit is the stage's `rounds`, and a failed round (a blocking member
+ * unavailable, no blocking member reviewed) ends the task `unverified`, with the reason and without a revision.
+ * Every other task type is reviewed exactly as before.
+ *
  * The current step (`work | review | revise`), the round, the last submitted round and the last
  * review's issues are persisted on the Task, so a resumed task continues exactly where it stopped
  * (an interrupted revise is re-run as a revise with the same issues).
@@ -682,7 +768,11 @@ function finish(deps: ResearchDeps, taskId: string, status: 'verified' | 'unveri
  */
 export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise<Task> {
   const { store, config } = deps;
+  // Review council (design 2026-11-16 §3, §4): a task type named in `council.stages` is reviewed by its
+  // council, whose `rounds` replace `loop.maxRounds` and whose pass is the merge's, not a threshold.
+  const council = councilFor(config, task.type);
   const { maxRounds, passThreshold } = loopSettings(task.type, config);
+  const roundLimit = council ? council.rounds : maxRounds;
   const id = task.id;
   const current = store.tasks.get(id) ?? task;
   let round = Math.max(1, current.round);
@@ -705,12 +795,27 @@ export async function runTaskWithReview(task: Task, deps: ResearchDeps): Promise
         continue;
       }
       store.tasks.update(id, { status: 'reviewing', round, step: 'review' });
-      const review = await reviewStep(deps, id, round);
-      // learning loop WP-C: append the round to the review-issue history; issues carry stable ids.
-      const issues = recordReviewRound(store, config, id, round, review);
-      // Only a valid review from a successful reviewer run can pass (even with passThreshold 0).
-      if (review.valid && review.score >= passThreshold) return finish(deps, id, 'verified', round);
-      if (round >= maxRounds) return finish(deps, id, 'unverified', round);
+      let issues: ReviewIssue[];
+      let pass: boolean;
+      if (council) {
+        // The round is merged and recorded (Decision and review-issue history) by `councilStep`.
+        const merged = await councilStep(deps, id, round, council);
+        if (merged.failed !== undefined) {
+          // Design §7: no revision is made on a partial council; the task goes to the person.
+          store.tasks.update(id, { failureReason: merged.failed });
+          return finish(deps, id, 'unverified', round);
+        }
+        issues = merged.issues;
+        pass = merged.pass;
+      } else {
+        const review = await reviewStep(deps, id, round);
+        // learning loop WP-C: append the round to the review-issue history; issues carry stable ids.
+        issues = recordReviewRound(store, config, id, round, review);
+        // Only a valid review from a successful reviewer run can pass (even with passThreshold 0).
+        pass = review.valid && review.score >= passThreshold;
+      }
+      if (pass) return finish(deps, id, 'verified', round);
+      if (round >= roundLimit) return finish(deps, id, 'unverified', round);
       round++;
       step = 'revise';
       store.tasks.update(id, { status: 'running', round, step, reviewIssues: issues });
@@ -745,3 +850,21 @@ export function reviewSlice(deps: Pick<ResearchDeps, 'store'> & Partial<Pick<Res
   return { ids, artifactIds: new Set(context.evidence) };
 }
 // --- end KS-4 -------------------------------------------------------------------------------------
+
+/**
+ * Review council (design 2026-11-16 §5.1 rule 4): the ids a review issue can name as the output it is
+ * about (`where`). Everything the task saved, under the id the reviewer is shown it with: its outputs
+ * (findings, recommendations, personas, competitors, hypotheses, flows; of every round, so an output a
+ * revision replaced can still be named), its review mentions, the former colleagues whose public layer
+ * it saved, and the facts it confirms or retracts (the confirmation is the task's; the fact's id is the
+ * only one it has).
+ */
+export function taskOutputIds(deps: Pick<ResearchDeps, 'store'>, task: Task): Set<string> {
+  const { store } = deps;
+  return new Set([
+    ...allOutputs(taskOutputs(store, task)).map((o) => o.id),
+    ...taskMentions(store, task).map((m) => m.id),
+    ...followedColleagues(store, task).map((p) => p.id),
+    ...liveObservations(store, task).map((o) => o.findingId),
+  ]);
+}

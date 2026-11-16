@@ -5,6 +5,7 @@ import { applyFlowStatus } from '../flows/flows.js';
 import { flowRepos } from '../flows/repos.js';
 import type { Flow } from '../flows/types.js';
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
+import { councilReviewOf, isCouncilMemberRun } from '../council/store.js'; // review council
 import type { Competitor, Finding, OutputStatus, Persona, Recommendation, SymptomHypothesis, Task } from '../types.js';
 
 /**
@@ -215,12 +216,22 @@ export function setOutputInclude(
 }
 
 /** Latest effective reviewer verdict on a task (spec §7.2: unverified results show the objections). */
-export type LastReview = { score: number; issues: unknown[]; decisionId: string; at: string; synthetic: boolean };
+export type LastReview = {
+  score: number;
+  issues: unknown[];
+  decisionId: string;
+  at: string;
+  synthetic: boolean;
+  /** Review council: the review is a council round of this task (its table: `GET /api/workspaces/:id/tasks/:taskId/council`). */
+  council?: { taskId: string };
+};
 
 /**
  * Latest effective review per task id over the given workspaces. A submitted review counts only
  * when its reviewer run finished `done` (same rule as the review loop); otherwise the loop's
- * synthetic (score 0) review counts instead.
+ * synthetic (score 0) review counts instead. Review council: a council round counts as one review, its
+ * `council_review` Decision (score, upheld issues; `synthetic` for a round that failed, which like a
+ * synthetic review did not judge the work); a member's own `submit_review` never counts.
  */
 export function lastReviewsByTask(store: Store, workspaceIds: string[]): Map<string, LastReview> {
   const out = new Map<string, LastReview>();
@@ -231,13 +242,15 @@ export function lastReviewsByTask(store: Store, workspaceIds: string[]): Map<str
     .map(({ d }) => d);
   for (const d of reviews) {
     const p = (d.payload ?? {}) as { tool?: string; event?: string; score?: unknown; issues?: unknown };
-    const synthetic = p.event === 'synthetic_review';
-    if (!synthetic && p.tool !== 'submit_review') continue;
+    const council = councilReviewOf(d);
+    const synthetic = p.event === 'synthetic_review' || council?.failed !== undefined;
+    if (!synthetic && !council && p.tool !== 'submit_review') continue;
     if (typeof p.score !== 'number') continue;
-    if (!synthetic && store.agentRuns.get(d.agentRunId)?.status !== 'done') continue;
+    if (!synthetic && !council && store.agentRuns.get(d.agentRunId)?.status !== 'done') continue;
     if (decisionTags(store, d.id).auditId !== undefined) continue; // learning loop WP-F: an audit is not the task's review
+    if (!council && isCouncilMemberRun(store, d.agentRunId)) continue; // review council: one member's review is not the task's
     for (const taskId of d.refs) {
-      out.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt, synthetic });
+      out.set(taskId, { score: p.score, issues: Array.isArray(p.issues) ? p.issues : [], decisionId: d.id, at: d.createdAt, synthetic, ...(council ? { council: { taskId } } : {}) });
     }
   }
   return out;

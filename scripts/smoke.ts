@@ -11,6 +11,7 @@
  *   npx tsx scripts/smoke.ts stakeholders [providers]     # own-stakeholder research (default: claude)
  *   npx tsx scripts/smoke.ts stakeholder-positions [providers] # a stakeholder leaves: follow research and the combine run (default: claude)
  *   npx tsx scripts/smoke.ts user-persona [providers]     # the user persona's learning run in the retro (default: claude)
+ *   npx tsx scripts/smoke.ts council                      # a review council of two Claude models (one more CLI: BIF_SMOKE_COUNCIL_EXTRA)
  *   npx tsx scripts/smoke.ts --help                       # lists the modes; runs nothing
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
@@ -77,6 +78,17 @@
  *            proposals (pending, a user field, evidence among the actions shown, at least 3 on 2 different things, no
  *            identifier of the person) and no line or brief until the user decides.
  *            Providers are enabled as in the default config (plus those named), as in the stakeholders mode.
+ * council:   review council (design 2026-11-16-review-council-design.md §10). Seeds a node with a text copy of a fictional
+ *            vendor's pricing page and runs one small `news_scan` task through the real review loop, with `news_scan` a
+ *            council stage (set over `PUT /api/config`): two Claude members on the two cheapest models (lenses
+ *            `evidence` and `brief`; BIF_SMOKE_CLAUDE_MODEL, default haiku, and BIF_SMOKE_COUNCIL_SECOND_MODEL, default
+ *            sonnet), plus one member of another CLI (lens `reasoning`) when BIF_SMOKE_COUNCIL_EXTRA is `codex` or
+ *            `opencode`. At most two rounds. Judged from the store, the runs' files and the council route: per round
+ *            every member ran as its own reviewer run on its own model, the runs overlapping in time; each member's
+ *            prompt holds its lens and no other member's; one `council_review` Decision per round; the task's final
+ *            status follows the council's last round; `GET /api/workspaces/:id/tasks/:taskId/council` serves the rounds. Second pass, a
+ *            new task: a blocking member whose model does not exist, under `onUnavailable: "fail"`. The task must end
+ *            `unverified` in round 1, naming the member, with no revision and no reviewer run on any other model.
  * codex isolation (with the codex worker smoke): `codex mcp list --json` under the exact env and
  *            `-c` overrides the adapter gives a run must list only `bif`.
  *
@@ -135,6 +147,8 @@ import { actorOf } from '../src/core/feedback/events.js';
 import { rateCriterion } from '../src/core/scoring/ratings.js';
 import { USER_FIELDS } from '../src/core/scoring/criteria.js';
 import { collectInteractions } from '../src/core/userPersona/interactions.js';
+import { LOOK_FOR } from '../src/core/council/lenses.js';
+import { councilMemberOf, councilReviewDecisions, councilRounds, type CouncilView } from '../src/core/council/store.js';
 import { containsIdentifier, userBrief, userPersonaOf } from '../src/core/userPersona/persona.js';
 
 const MODELS: Record<ProviderId, string> = {
@@ -1580,8 +1594,196 @@ async function userPersonaSmoke(provider: ProviderId, booted: Booted): Promise<F
   }
 }
 
+// ---------------------------------------------------------------------------
+// review council smoke (review council design 2026-11-16 §10)
+
+const CN_SUBJECT = 'Northwind Widgets';
+/** The second cheapest Claude model: the second Claude member (the first is on BIF_SMOKE_CLAUDE_MODEL). */
+const CN_SECOND_MODEL = process.env.BIF_SMOKE_COUNCIL_SECOND_MODEL ?? 'sonnet';
+/** A model name no CLI has: the member of the second pass. */
+const CN_GHOST_MODEL = 'bif-smoke-no-such-model';
+const CN_PAGE = [
+  `${CN_SUBJECT} pricing (text copy of the public pricing page)`,
+  'Starter plan: $19 per month for a single warehouse and up to two users.',
+  'Team plan: $49 per user per month, billed annually. Includes unlimited warehouses and shared dashboards.',
+  'Enterprise plan: custom pricing. Contact sales.',
+  'Every plan starts with a 14-day free trial. No credit card is required to start the trial.',
+].join('\n');
+
+type CouncilConfig = NonNullable<BifConfig['council']>;
+type SmokeMember = CouncilConfig['members'][number];
+
+/** The other CLI asked for with BIF_SMOKE_COUNCIL_EXTRA; a string that is neither is an error (`problem`). */
+function councilExtra(): { provider?: 'codex' | 'opencode'; problem?: string } {
+  const v = process.env.BIF_SMOKE_COUNCIL_EXTRA;
+  if (!v) return {};
+  return v === 'codex' || v === 'opencode' ? { provider: v } : { problem: `BIF_SMOKE_COUNCIL_EXTRA must be codex or opencode, not '${v}'` };
+}
+
+async function councilSmoke(booted: Booted, base: string): Promise<FlResult> {
+  const { store, config, events, research, dataDir } = booted.runtime;
+  const extra = councilExtra();
+  const name = `council/claude (${MODELS.claude} + ${CN_SECOND_MODEL}${extra.provider ? ` + ${extra.provider} ${MODELS[extra.provider]}` : ''})`;
+  const startedAt = Date.now();
+  const short = (s: string, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const runIds: string[] = [];
+  const wsId = 'ws_smoke_council';
+  const bus: ToolCallLog[] = [];
+  const off = events.on((e) => {
+    if (e.type === 'tool_call' && e.workspaceId === wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+  });
+  try {
+    if (extra.problem) throw new Error(extra.problem);
+    const now = new Date().toISOString();
+    store.workspaces.insert({ id: wsId, name: 'council smoke', sector: 'test', createdAt: now });
+    const rr = store.researchRuns.insert({ id: newId('rrun'), workspaceId: wsId, phase: 'deep_dives', status: 'running', startedAt: now });
+    const files = new ArtifactStore(store, dataDir);
+    /** A queued `news_scan` task with its own copy of the page, captured by it. */
+    const seedTask = () => {
+      const id = newId('tsk');
+      const page = files.save({ workspaceId: wsId, kind: 'text', mime: 'text/plain', bytes: CN_PAGE, title: `${CN_SUBJECT} pricing page (text copy)` });
+      const task = store.tasks.insert({
+        id, workspaceId: wsId, runId: rr.id, phase: 'deep_dives', type: 'news_scan', round: 1, createdAt: new Date().toISOString(),
+        model: { provider: 'claude', model: MODELS.claude }, needsBrowser: false, status: 'queued', subject: CN_SUBJECT,
+        acceptanceCriteria: ['one finding states the price of the Team plan', 'the finding cites the stored page copy with a quote copied exactly from it'],
+        brief:
+          `Smoke test. A text copy of the pricing page of the fictional company "${CN_SUBJECT}" is stored as artifact ${page.id}. ` +
+          'Read it with `read_artifact` (mode "text"). Save exactly one finding (subject "' + CN_SUBJECT + '") that states the price of the Team plan, ' +
+          'citing that artifact with a quote copied exactly from its text. Use only the bif tools: do not browse the web. Then submit your result.',
+      });
+      knowledgeRepos(store).artifactCaptures.insert({ id: newId('cap'), artifactId: page.id, workspaceId: wsId, taskId: task.id, capturedAt: now });
+      return task;
+    };
+    /** Sets the council through the real route, so the configuration is validated as a user's would be. */
+    const setCouncil = async (members: SmokeMember[]) => {
+      const next = structuredClone(config);
+      next.providers.claude.models = [...new Set([...next.providers.claude.models, ...members.filter((m) => m.provider === 'claude').map((m) => m.model)])];
+      next.council = { rounds: 2, onUnavailable: 'fail', members, stages: { news_scan: {} } };
+      const res = await fetch(`${base}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(next) });
+      if (!res.ok) throw new Error(`PUT /api/config failed (${res.status}): ${short(await res.text(), 300)}`);
+    };
+    const review = async (task: ReturnType<typeof seedTask>) => {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), TIMEOUT_MS * 4);
+      try {
+        return await runTaskWithReview(task, { ...research, signal: abort.signal });
+      } finally {
+        clearTimeout(timer);
+        runIds.push(...store.agentRuns.list({ workspaceId: wsId }).filter((r) => r.taskId === task.id).map((r) => r.id));
+      }
+    };
+    const reviewerRuns = (taskId: string) => store.agentRuns.list({ workspaceId: wsId }).filter((r) => r.taskId === taskId && r.role === 'reviewer');
+    const modelOf = (m: { provider: string; model: string }) => `${m.provider}/${m.model}`;
+
+    // --- first pass: the council reviews the task -------------------------------------------------
+    const members: SmokeMember[] = [
+      { name: 'evidence', provider: 'claude', model: MODELS.claude, lens: 'evidence' },
+      { name: 'brief', provider: 'claude', model: CN_SECOND_MODEL, lens: 'brief' },
+      ...(extra.provider ? [{ name: 'extra', provider: extra.provider, model: MODELS[extra.provider], lens: 'reasoning' as const }] : []),
+    ];
+    await setCouncil(members);
+    const task = seedTask();
+    const final = await review(task);
+    const rounds = councilRounds(store, task.id);
+    const decisions = councilReviewDecisions(store, task);
+    const runs = reviewerRuns(task.id);
+
+    // C1: per round, each member ran as its own reviewer run on its own model, and the runs overlapped.
+    const perRound = rounds.map((r) => {
+      const seated = r.result.members.map((m) => ({ m, run: runs.find((x) => x.id === m.runId), tag: m.runId ? councilMemberOf(store, m.runId) : undefined }));
+      const own = seated.every((x) => x.run !== undefined && x.tag?.member === x.m.name && modelOf(x.run.model) === modelOf(x.m));
+      const oneRound = new Set(seated.map((x) => x.tag?.roundId)).size === 1;
+      const distinct = new Set(seated.map((x) => x.m.runId)).size === seated.length;
+      const lastStart = seated.map((x) => x.run?.startedAt ?? '').sort().at(-1) ?? '';
+      const firstEnd = seated.map((x) => x.run?.endedAt ?? '').sort()[0] ?? '';
+      const parallel = lastStart !== '' && firstEnd !== '' && lastStart < firstEnd;
+      return { round: r.round, seated, pass: seated.length === members.length && own && oneRound && distinct && parallel, parallel };
+    });
+    steps.push({
+      step: 'C1 every member ran as its own reviewer run on its own model, in parallel', calls: 0,
+      pass: perRound.length > 0 && perRound.every((r) => r.pass) && runs.length === perRound.length * members.length,
+      did: perRound.map((r) => `round ${r.round}: ${r.seated.map((x) => `${x.m.name}=${x.run ? `${modelOf(x.run.model)} ${x.run.status}` : 'no run'} (${x.m.state}${x.m.score !== undefined ? ` ${x.m.score}/10` : ''})`).join(', ')}; overlapping=${r.parallel}`).join(' | ') || 'no round recorded',
+    });
+
+    // C2: each member's prompt holds its lens and no other member's.
+    const lensOf = new Map(members.map((m) => [m.name, m.lens]));
+    const prompts = perRound.flatMap((r) =>
+      r.seated.map((x) => {
+        const text = x.m.runId ? runPrompts(dataDir, wsId, x.m.runId) : undefined;
+        const lens = lensOf.get(x.m.name)!;
+        const own = !!text && text.includes(`Your lens: \`${lens}\``) && text.includes(LOOK_FOR[lens]);
+        const others = [...new Set(members.map((m) => m.lens))].filter((l) => l !== lens).filter((l) => text?.includes(LOOK_FOR[l]));
+        return { round: r.round, name: x.m.name, lens, found: text !== undefined, own, others };
+      }),
+    );
+    steps.push({
+      step: "C2 each member's prompt holds its lens and not another member's", calls: 0,
+      pass: prompts.length > 0 && prompts.every((p) => p.own && p.others.length === 0),
+      did: prompts.map((p) => `round ${p.round} ${p.name}: ${p.found ? `own lens (${p.lens})=${p.own}, other lenses=${p.others.join(',') || 'none'}` : 'no prompt file'}`).join('; ') || 'no member run',
+    });
+
+    // C3: one `council_review` Decision per round.
+    const recorded = decisions.map((d) => (d.payload as { round?: number }).round);
+    steps.push({
+      step: 'C3 one council_review Decision per round', calls: 0,
+      pass: decisions.length === final.round && recorded.every((n, i) => n === i + 1),
+      did: `task ended in round ${final.round}; council_review Decisions for rounds ${JSON.stringify(recorded)}; member submit_review Decisions=${store.decisions.list({ workspaceId: wsId, kind: 'review' }).filter((d) => runs.some((r) => r.id === d.agentRunId)).length}`,
+    });
+
+    // C4: the task's final status follows the council's last round.
+    const last = rounds.at(-1);
+    const expected = !last ? 'none' : last.failed !== undefined ? 'unverified' : last.result.pass ? 'verified' : 'unverified';
+    const ended = !!last && (last.result.pass || last.failed !== undefined || final.round === 2);
+    steps.push({
+      step: "C4 the task's final status follows the council's result", calls: 0,
+      pass: final.status === expected && ended && (last?.failed === undefined || final.failureReason === last.failed),
+      did: `task ${final.status} in round ${final.round} (expected ${expected}); rounds: ${rounds.map((r) => `${r.round}: ${r.failed !== undefined ? `did not count (${short(r.failed)})` : `${r.result.pass ? 'passed' : 'not passed'} score ${r.result.score}, upheld ${r.result.issues.filter((i) => i.standing === 'upheld').length}, advisory ${r.result.issues.filter((i) => i.standing === 'advisory').length}, dropped ${r.result.dropped.length}, questions ${r.result.questions.length}, follow-ups ${r.result.followUps.length}`}`).join(' | ')}`,
+    });
+
+    // C5: the council route serves the rounds.
+    const res = await fetch(`${base}/api/workspaces/${wsId}/tasks/${task.id}/council`);
+    const view = (res.ok ? await res.json() : undefined) as CouncilView | undefined;
+    steps.push({
+      step: 'C5 GET /api/workspaces/:id/tasks/:taskId/council serves the rounds', calls: 0,
+      pass: !!view && view.rounds.length === rounds.length && view.stage?.rounds === 2 && view.rounds.every((r) => 'result' in r && r.result.members.length === members.length),
+      did: `status ${res.status}; stage=${JSON.stringify(view?.stage)}; rounds=${view?.rounds.length ?? 0}`,
+    });
+
+    // --- second pass: a blocking member whose model does not exist, under `fail` ---------------------
+    await setCouncil([members[0]!, { name: 'ghost', provider: 'claude', model: CN_GHOST_MODEL, lens: 'brief' }]);
+    const task2 = seedTask();
+    const final2 = await review(task2);
+    const runs2 = reviewerRuns(task2.id);
+    const rounds2 = councilRounds(store, task2.id);
+    const ghostRuns = runs2.filter((r) => councilMemberOf(store, r.id)?.member === 'ghost');
+    const allowed = new Set([modelOf({ provider: 'claude', model: MODELS.claude }), modelOf({ provider: 'claude', model: CN_GHOST_MODEL })]);
+    const ghost = rounds2[0]?.result.members.find((m) => m.name === 'ghost');
+    steps.push({
+      step: 'C6 a member whose model does not exist ends the task unverified, named, with no other model in its place', calls: 0,
+      pass:
+        final2.status === 'unverified' && final2.round === 1 && (final2.failureReason ?? '').includes(`council member 'ghost' (claude/${CN_GHOST_MODEL})`) &&
+        rounds2.length === 1 && rounds2[0]!.failed === final2.failureReason && ghost !== undefined && ghost.state !== 'reviewed' &&
+        ghostRuns.length === 1 && ghostRuns.every((r) => r.model.model === CN_GHOST_MODEL && r.status === 'failed') &&
+        runs2.length === 2 && runs2.every((r) => allowed.has(modelOf(r.model))),
+      did: `task ${final2.status} in round ${final2.round}; reason=${short(final2.failureReason ?? 'none', 260)}; reviewer runs: ${runs2.map((r) => `${councilMemberOf(store, r.id)?.member ?? 'untagged'}=${modelOf(r.model)} ${r.status}`).join(', ') || 'none'}; ghost recorded as ${ghost?.state ?? 'absent'}`,
+    });
+
+    for (const c of bus.filter((x) => !x.ok)) confusion.push(`${c.tool} failed: ${short(c.error ?? '')}`);
+    return {
+      name, pass: steps.every((x) => x.pass), seconds: (Date.now() - startedAt) / 1000, steps, usage: usageOf(booted, runIds), toolCalls: bus.length, confusion,
+      detail: `first task=${final.status} (round ${final.round}); second task=${final2.status}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - startedAt) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls: bus.length, confusion };
+  } finally {
+    off();
+  }
+}
+
 /** The parts that can be run alone (first argument); with none, the default set runs. */
-const MODES = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'stakeholder-positions', 'user-persona'];
+const MODES = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'stakeholder-positions', 'user-persona', 'council'];
 
 async function main() {
   const args = process.argv.slice(2);
@@ -1717,6 +1919,19 @@ async function main() {
         printKnowledge(r);
         results.push(r);
       }
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'council') {
+    const { booted, dir, base } = await startServer('council');
+    try {
+      console.log(`[smoke] council (claude ${MODELS.claude} + ${CN_SECOND_MODEL}${councilExtra().provider ? ` + ${councilExtra().provider}` : ''}) …`);
+      const r = await councilSmoke(booted, base);
+      printKnowledge(r);
+      results.push(r);
     } finally {
       await booted.close();
       if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });

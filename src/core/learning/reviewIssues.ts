@@ -21,6 +21,11 @@ import { isAuditRun } from './runTags.js'; // learning loop WP-F
  * it (repeats it → `upheld`). An issue is put to the reviewer as a dispute only while it has been
  * reasserted fewer than `loop.maxReasserts` times (default 1); once the cap is reached, the revise
  * prompt tells the worker to fix it, and a fix of an upheld issue records a worker-miss outcome.
+ *
+ * Review council (design 2026-11-16 §8): a council round is one review. Its rows are the issues the
+ * council upheld (what the worker must answer), under the stable ids the merge gave them; their
+ * `reviewerRunId` is the council round id and their `reviewDecisionId` the round's `council_review`
+ * Decision (`recordReviewRound` is given both; it never looks for a reviewer run then).
  */
 
 /** Default for `loop.maxReasserts`. */
@@ -49,15 +54,15 @@ export function issueSimilarity(a: string, b: string): number {
 }
 
 /** Text similarity at which a new issue is taken to repeat an earlier one. */
-const REPEAT_SIMILARITY = 0.6;
+export const REPEAT_SIMILARITY = 0.6;
 /** Looser bar when the reviewer reused the id of a disputed issue it was shown (or the class matches). */
-const REASSERT_SIMILARITY = 0.25;
+export const REASSERT_SIMILARITY = 0.25;
 
 function taskRows(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): ReviewIssueRecord[] {
   return learningRepos(store).reviewIssues.list({ taskId: task.id }).filter((r) => r.workspaceId === task.workspaceId);
 }
 
-/** Rows of one round: those of its latest reviewer run (a review repeated after a restart replaces the earlier one). */
+/** Rows of one round: those of its latest reviewer run or council round (a review repeated after a restart replaces the earlier one). */
 function latestRoundRows(rows: ReviewIssueRecord[], round: number): ReviewIssueRecord[] {
   const inRound = rows.filter((r) => r.round === round);
   const last = inRound.at(-1)?.reviewerRunId;
@@ -71,6 +76,19 @@ const runsOf = (store: Store, task: Pick<Task, 'id' | 'workspaceId'>, roles: rea
   store.agentRuns
     .list({ taskId: task.id })
     .filter((r) => r.workspaceId === task.workspaceId && roles.includes(r.role) && !isAuditRun(store, r.id)); // WP-F: audits excluded
+
+/**
+ * The issues of the review rounds before `round`, one row per stable id (its latest), harness-made rows
+ * of malformed reviews left out: what a later review can repeat, with the worker's answer in `status` /
+ * `responseReason`.
+ */
+export function earlierRoundIssues(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, round: number): ReviewIssueRecord[] {
+  const rows = taskRows(store, task);
+  const rounds = [...new Set(rows.filter((r) => r.round < round).map((r) => r.round))].sort((a, b) => a - b);
+  const latest = new Map<string, ReviewIssueRecord>();
+  for (const r of rounds.flatMap((n) => latestRoundRows(rows, n))) if (!r.synthetic) latest.set(r.issueId, r);
+  return [...latest.values()];
+}
 
 /** Pushed-back issues the reviewer of `round` must rule on (still under the reassert cap). */
 export function openDisputes(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, round: number, cap: number): ReviewIssueRecord[] {
@@ -120,6 +138,12 @@ export function workerDisputeSection(
  * revise step). Idempotent per reviewer run. A valid review also settles the open disputes: each
  * pushed-back issue it repeats is `upheld`, each it drops is `withdrawn` (reviewer false positive).
  * Without a reviewer run (nothing to attach the history to) the issues are returned unchanged.
+ *
+ * `council`: the round was a council round. `review.issues` are then the issues the council upheld, and
+ * their ids are already stable (the merge matched them against the earlier rounds), so they are kept as
+ * given. The history is attached to the round (`roundId`) and its Decision; idempotent per round id.
+ * `replaced`: ids of issues the council upheld and an upheld rewrite then replaced. They get no row (the
+ * worker answers the rewrite), but a pushed-back one among them was reasserted, not withdrawn.
  */
 export function recordReviewRound(
   store: Store,
@@ -127,10 +151,13 @@ export function recordReviewRound(
   taskId: string,
   round: number,
   review: { valid: boolean; issues: ReviewIssue[] },
+  council?: { roundId: string; decisionId: string; replaced?: string[] },
 ): ReviewIssue[] {
   const task = store.tasks.get(taskId);
   if (!task) return review.issues;
-  const reviewer = runsOf(store, task, ['reviewer']).at(-1);
+  const reviewer: Pick<AgentRun, 'id' | 'startedAt'> | undefined = council
+    ? { id: council.roundId, startedAt: new Date().toISOString() }
+    : runsOf(store, task, ['reviewer']).at(-1);
   if (!reviewer) return review.issues;
   const repo = learningRepos(store).reviewIssues;
   const toIssue = (r: ReviewIssueRecord): ReviewIssue => ({
@@ -148,7 +175,7 @@ export function recordReviewRound(
     const shown = new Set(openDisputes(store, task, round, maxReasserts(config)).map((d) => d.issueId));
     const used = new Set(prior.map((r) => r.issueId));
     const taken = new Set<string>();
-    const reviewDecision = store.decisions.list({ agentRunId: reviewer.id }).filter((d) => d.kind === 'review').at(-1);
+    const reviewDecisionId = council ? council.decisionId : store.decisions.list({ agentRunId: reviewer.id }).filter((d) => d.kind === 'review').at(-1)?.id;
     const worker = runsOf(store, task, WORKER_ROLES).filter((r) => r.status === 'done' && r.startedAt <= reviewer.startedAt).at(-1);
     const now = new Date().toISOString();
     let n = 0;
@@ -164,7 +191,9 @@ export function recordReviewRound(
       const synthetic = !review.valid;
       let stable: string | undefined;
       const explicit = latest.get(issue.id);
-      if (
+      if (council) {
+        stable = issue.id; // the merge's id: an earlier issue's when it repeats one, else new to the task
+      } else if (
         !synthetic && explicit && shown.has(issue.id) && !taken.has(issue.id) &&
         (explicit.class === issue.class || issueSimilarity(explicit.text, issue.description) >= REASSERT_SIMILARITY)
       ) {
@@ -187,7 +216,7 @@ export function recordReviewRound(
         class: issue.class, text: issue.description, evidence: issue.evidence ?? [], status: 'open', synthetic,
         reviewerRunId: reviewer.id, createdAt: now,
       };
-      if (reviewDecision) row.reviewDecisionId = reviewDecision.id;
+      if (reviewDecisionId) row.reviewDecisionId = reviewDecisionId;
       if (worker) {
         row.workerRunId = worker.id;
         if (worker.promptVersion) row.workerPromptVersion = worker.promptVersion;
@@ -197,7 +226,7 @@ export function recordReviewRound(
     }
 
     if (review.valid) {
-      const repeated = new Set(out.map((i) => i.id));
+      const repeated = new Set([...out.map((i) => i.id), ...(council?.replaced ?? [])]);
       const rounds = [...new Set(prior.map((r) => r.round))];
       for (const r of rounds.flatMap((x) => latestRoundRows(rows, x))) {
         if (r.status !== 'pushed_back' || r.synthetic) continue;

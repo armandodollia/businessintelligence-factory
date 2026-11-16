@@ -10,6 +10,7 @@ import { evidenceOf as recordEvidenceOf, itemIsUploadDerived } from '../knowledg
 import { runIsUploadExposed } from '../knowledge/retrievalLog.js'; // KS-6
 import { knowledgeRepos } from '../store/repos.js'; // KS-6
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
+import { councilMemberOf, councilReviewOf } from '../council/store.js'; // review council
 import { personaLearningRepos } from '../personas/store.js';
 import { holdsInternal } from '../stakeholders/kinds.js';
 import { isHidden } from '../stakeholders/personas.js';
@@ -384,7 +385,11 @@ export function exportTrainingDataWithSummary(
     const status = finalReviewStatus(store, decision);
     // Learning loop WP-F: experiment / audit judgments are marked, so consumers can keep them apart.
     const tags = decisionTags(store, decision.id);
-    lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}), ...tags }));
+    // Review council: a member's Decisions are marked, so they are not counted as further reviews of the
+    // task; the round's review is the `council_review` Decision (an ordinary line).
+    const member = councilMemberOf(store, decision.agentRunId);
+    const council = member ? { councilMember: member.member, councilRoundId: member.roundId } : {};
+    lines.push(JSON.stringify({ type: 'decision', decision, ratings: joined, ...(status ? { finalReviewStatus: status } : {}), ...tags, ...council }));
   }
   for (let i = 0; i < withheldRatings.size; i++) tally.other('internal');
   lines.push(...humanFeedbackLines(store, workspaceId, uploads, taskEvidenceOf, tally));
@@ -434,7 +439,8 @@ const TERMINAL = new Set(['verified', 'unverified', 'failed', 'superseded']);
 function finalReviewStatus(store: Store, d: Decision): string | undefined {
   const p = (d.payload ?? {}) as Record<string, unknown>;
   const subject = typeof p.hypothesisId === 'string' ? p.hypothesisId : primarySubject(d);
-  return outputStatus(store, subject) ?? taskStatus(store, store.agentRuns.get(d.agentRunId)?.taskId);
+  // Review council: a council round's Decision has no agent run; it names its task.
+  return outputStatus(store, subject) ?? taskStatus(store, store.agentRuns.get(d.agentRunId)?.taskId ?? councilReviewOf(d)?.taskId);
 }
 
 function outputStatus(store: Store, id: string | undefined): string | undefined {

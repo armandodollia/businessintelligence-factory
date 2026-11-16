@@ -4,6 +4,7 @@ import type { Role } from '../config/schema.js';
 import type { Decision, Task } from '../types.js';
 import { learningRepos } from './store.js';
 import { experimentTaskIds, isAuditRun, isTaggedDecision } from './runTags.js'; // learning loop WP-F
+import { councilReviewDecisions, councilReviewOf, councilRoundTaskId, isCouncilMemberRun } from '../council/store.js'; // review council
 import {
   OUTCOME_LABELS,
   type DecisionOutcome,
@@ -133,7 +134,8 @@ function runOfDecision(store: Store, d: Decision): string | undefined {
 }
 
 function taskOfDecision(store: Store, d: Decision): string | undefined {
-  return store.agentRuns.get(d.agentRunId)?.taskId;
+  // Review council: a council round's Decision has no agent run; its round id names the task.
+  return store.agentRuns.get(d.agentRunId)?.taskId ?? councilRoundTaskId(d.agentRunId);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +183,7 @@ function taskRunDecisions(store: Store, task: Pick<Task, 'id' | 'workspaceId'>, 
     .list({ taskId: task.id })
     .filter((r) => r.workspaceId === task.workspaceId && roles.includes(r.role))
     .filter((r) => !isAuditRun(store, r.id)) // learning loop WP-F: reviewer audits are not the task's reviews
+    .filter((r) => !isCouncilMemberRun(store, r.id)) // review council: neither is one member's review (the round's Decision is)
     .flatMap((r) => store.decisions.list({ agentRunId: r.id }))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
@@ -193,9 +196,16 @@ export function taskDeliverableDecision(store: Store, task: Pick<Task, 'id' | 'w
   return decisions.filter((d) => (d.payload as { tool?: string } | null)?.tool === 'submit_result').at(-1) ?? decisions.at(-1);
 }
 
-/** The latest review decision (`submit_review` or the loop's synthetic review) of the task's reviewer runs. */
+/**
+ * The task's latest review decision: the `submit_review` or the loop's synthetic review of its reviewer
+ * runs, or (review council) the `council_review` Decision of a council round, whichever is later. A
+ * council member's own `submit_review` is never it.
+ */
 export function taskLastReviewDecision(store: Store, task: Pick<Task, 'id' | 'workspaceId'>): Decision | undefined {
-  return taskRunDecisions(store, task, ['reviewer']).filter((d) => d.kind === 'review').at(-1);
+  const single = taskRunDecisions(store, task, ['reviewer']).filter((d) => d.kind === 'review').at(-1);
+  const council = councilReviewDecisions(store, task).at(-1);
+  if (!single || !council) return single ?? council;
+  return council.createdAt >= single.createdAt ? council : single;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +233,9 @@ export function recordTaskEndOutcomes(store: Store, task: Task): DecisionOutcome
   if (status !== 'verified' && status !== 'unverified' && status !== 'failed') return out;
   const review = taskLastReviewDecision(store, task);
   const rp = (review?.payload ?? {}) as { score?: unknown; issues?: unknown; event?: string };
+  // Review council: a round that failed (a member unavailable, no blocking member reviewed) is, like the
+  // synthetic review of a failed reviewer run, a review that did not happen.
+  const noReview = rp.event === 'synthetic_review' || councilReviewOf(review)?.failed !== undefined;
   const roundRows = learningRepos(store)
     .reviewIssues.list({ taskId: task.id, round: task.round })
     .filter((r) => r.workspaceId === task.workspaceId);
@@ -237,7 +250,7 @@ export function recordTaskEndOutcomes(store: Store, task: Task): DecisionOutcome
           ? 'run-failed'
           : unverifiedLabel(
               finalIssues.length ? finalIssues : Array.isArray(rp.issues) ? (rp.issues as IssueLike[]) : [],
-              rp.event === 'synthetic_review',
+              noReview,
             );
     const evidence: Record<string, unknown> = { round: task.round };
     if (status !== 'failed' && typeof rp.score === 'number') evidence.score = rp.score;

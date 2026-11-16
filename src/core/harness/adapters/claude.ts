@@ -33,6 +33,8 @@ export const CLAUDE_OFFLINE_TOOLS = '';
  * `MCP_TOOL_TIMEOUT` is raised so blocking harness tools (`request_approval`) do not time out.
  * Offline runs (`spec.offline`) add `--tools ""` (no built-in tools; variadic like `--mcp-config`,
  * so the empty value is one argument and is followed by another flag).
+ * Effort (`spec.effort`): `--effort <level>` (help: "Effort level for the current session (low, medium,
+ * high, xhigh, max)"); the level is passed as configured and the CLI judges it.
  */
 export class ClaudeAdapter implements CliAdapter {
   readonly id = 'claude' as const;
@@ -51,6 +53,7 @@ export class ClaudeAdapter implements CliAdapter {
         '--output-format', 'stream-json',
         '--verbose',
         '--model', spec.model,
+        ...(spec.effort ? ['--effort', spec.effort] : []),
         '--mcp-config', mcpPath,
         '--strict-mcp-config',
         ...(spec.offline ? ['--tools', CLAUDE_OFFLINE_TOOLS] : []),

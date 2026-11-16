@@ -65,6 +65,10 @@ export function userCodexHome(env: NodeJS.ProcessEnv = process.env): string {
  * Token (`spec.mcpBearer`): the harness URL carries no token; Codex sends it as a bearer header
  * read from `BIF_MCP_TOKEN` in its environment, so it never appears in argv.
  *
+ * Effort (`spec.effort`): `codex exec` has no flag for it; the setting is the `config.toml` key
+ * `model_reasoning_effort`, overridden per run with `-c model_reasoning_effort="<level>"` (the key is in
+ * the 0.167.2 binary's config fields; `-c` is documented in `--help`). The level is passed as configured.
+ *
  * Offline runs are refused (`offline = false`): Codex 0.167 ships several built-in ways to reach the
  * web besides the shell (web search, `browser_use`, `computer_use`, apps / connectors, all enabled by
  * default and changing between releases), and `--help` documents no single switch that turns all of
@@ -91,6 +95,7 @@ export class CodexAdapter implements CliAdapter {
       config.push(`mcp_servers.bif.url=${toToml(spec.mcpUrl)}`);
     }
     config.push(`mcp_servers.bif.tool_timeout_sec=${BIF_TOOL_TIMEOUT_SEC}`);
+    if (spec.effort) config.push(`model_reasoning_effort=${toToml(spec.effort)}`);
     const files: BuiltCommand['files'] = [];
     const links: NonNullable<BuiltCommand['links']> = [];
     if (spec.stateDir) {

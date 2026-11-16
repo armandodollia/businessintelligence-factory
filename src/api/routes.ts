@@ -59,6 +59,8 @@ import { mountFlowRoutes } from './flowRoutes.js'; // flow records and ranking
 import { mountPersonaLearningRoutes } from './personaLearningRoutes.js'; // persona learning
 import { mountStakeholderRoutes } from './stakeholderRoutes.js'; // stakeholder personas
 import { mountUserPersonaRoutes } from './userPersonaRoutes.js'; // user persona
+import { mountCouncilRoutes } from './councilRoutes.js'; // review council
+import { councilReviewedTaskIds, withCouncilMember } from '../core/council/store.js'; // review council
 
 export type AppDeps = {
   store: Store;
@@ -395,7 +397,11 @@ export function createApp(deps: AppDeps): Hono {
     const id = workspace(c.req.param('id')).id;
     const runId = c.req.query('runId');
     const w = withholding(store); // stakeholder design §7: own-stakeholder research of a node with a hidden stakeholder
-    return c.json(store.tasks.list(runId ? { workspaceId: id, runId } : { workspaceId: id }).map((t) => w.servedTask(t)));
+    // Review council (design §9): a task a council reviewed says so, so the page can offer its council table.
+    const council = councilReviewedTaskIds(store, id);
+    return c.json(
+      store.tasks.list(runId ? { workspaceId: id, runId } : { workspaceId: id }).map((t) => (council.has(t.id) ? { ...w.servedTask(t), councilReviewed: true } : w.servedTask(t))),
+    );
   });
 
   // --- results --------------------------------------------------------------------------------
@@ -472,7 +478,12 @@ export function createApp(deps: AppDeps): Hono {
     const kind = c.req.query('kind');
     if (kind && !(DECISION_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `unknown decision kind '${kind}'`);
     const w = withholding(store);
-    return c.json(store.decisions.list(kind ? { workspaceId: id, kind: kind as Decision['kind'] } : { workspaceId: id }).map((d) => w.servedDecision(d)));
+    // Review council (design §9): a member's own review is marked as one member's (name and lens).
+    return c.json(
+      store.decisions
+        .list(kind ? { workspaceId: id, kind: kind as Decision['kind'] } : { workspaceId: id })
+        .map((d) => withCouncilMember(store, config, w.servedDecision(d))),
+    );
   });
   /** "What changed" Decisions recorded by the scheduler after each recurring run. */
   app.get('/api/workspaces/:id/changes', (c) => {
@@ -710,7 +721,11 @@ export function createApp(deps: AppDeps): Hono {
       ...(workspaceId ? { workspaceId } : {}),
       ...(deps.sseHeartbeatMs ? { heartbeatMs: deps.sseHeartbeatMs } : {}),
       signal: c.req.raw.signal,
-      serve: (e) => withholding(store).servedBusEvent(e), // stakeholder design §7
+      serve: (e) => {
+        const served = withholding(store).servedBusEvent(e); // stakeholder design §7
+        // Review council: a member's review arrives marked as it is in the Decision list.
+        return served?.type === 'decision' ? { ...served, decision: withCouncilMember(store, config, served.decision) } : served;
+      },
 
     });
   });
@@ -754,6 +769,9 @@ export function createApp(deps: AppDeps): Hono {
   // --- user persona: the You page (accept / reject / retire use the persona learning routes) ------
   mountUserPersonaRoutes(app, { store, config }, workspace);
   // --- end user persona ------------------------------------------------------------------------
+  // --- review council: the council table of a task, the configured council ------------------------
+  mountCouncilRoutes(app, { store, config }, workspace);
+  // --- end review council ----------------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

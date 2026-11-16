@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { BifConfig } from '../../config/schema.js';
 import { AbortError, type EventBus } from '../../events.js';
 import type { ArtifactStore } from '../../evidence/artifacts.js';
@@ -9,6 +9,8 @@ import type { Store } from '../../store/db.js';
 import { newId } from '../../store/repos.js';
 import type { Decision, Finding, Task, UserRequest } from '../../types.js';
 import type { RunContext } from '../tokens.js';
+import type { CouncilIssueIn } from '../../council/merge.js'; // review council: a review issue with `action` / `where`
+import { isCouncilMemberRun, usedIssueIds } from '../../council/store.js'; // review council
 import { browserConfigured } from '../browser.js';
 import { isAllowedRunFile } from '../paths.js';
 import { taskOutputEvidence } from '../../research/outputs.js';
@@ -80,7 +82,8 @@ export type RunOutputs = {
   /** Last `submit_result` payload of the run. */
   result?: unknown;
   /** Last `submit_review` of the run. */
-  review?: { score: number; issues: ReviewIssue[]; summary?: string };
+  /** `score` is `null` when the reviewer said it cannot score (see `validScore`): then this is no valid review. */
+  review?: { score: number | null; issues: ReviewIssue[]; summary?: string };
   /** Every `respond_to_review`, in call order. */
   responses: ReviewResponse[];
 };
@@ -440,7 +443,21 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
     },
 
     async submit_review(ctx, input: ToolInput<'submit_review'>) {
+      const member = isCouncilMemberRun(store, ctx.agentRunId);
+      // Review council (design §5.5): only a council member may say that it cannot score. From any other
+      // run a `null` score is refused as it always was, with the error of a score that is no number, so
+      // the run can send one.
+      if (input.score === null && !member) {
+        const asBefore = z.object({ score: z.number() }).safeParse({ score: null });
+        return fail(`invalid input for submit_review: ${asBefore.success ? 'score: expected number' : formatZodError(asBefore.error)}`);
+      }
+      // A member that cannot score says why: the reason is what the round records for it.
+      if (input.score === null && !input.summary?.trim()) return fail('invalid input for submit_review: summary: score is null: say in summary why you cannot score');
       const used = new Set(input.issues.map((i) => i.id).filter(Boolean));
+      // Review council (design §6 step 3.5): a member that reuses the id of an earlier issue means that
+      // issue, so a member's issue sent without an id never gets one the task's reviews already used.
+      const reviewed = ctx.taskId && member ? store.tasks.get(ctx.taskId) : undefined;
+      if (reviewed) for (const id of usedIssueIds(store, reviewed)) used.add(id);
       let n = 0;
       const nextId = () => {
         let id: string;
@@ -449,13 +466,19 @@ export function createToolHandlers(deps: ToolHandlerDeps): HandleTool {
         used.add(id);
         return id;
       };
-      const issues: ReviewIssue[] = input.issues.map((i) => {
-        const issue: ReviewIssue = { id: i.id ?? nextId(), class: i.class, description: i.description };
+      // `action`, `where`, `questions`, `followUps` (review council design §5.5) are stored only when
+      // sent, so a review without them has the payload it always had. Only a council reads them.
+      const issues: CouncilIssueIn[] = input.issues.map((i) => {
+        const issue: CouncilIssueIn = { id: i.id ?? nextId(), class: i.class, description: i.description };
         if (i.evidence) issue.evidence = i.evidence;
+        if (i.action) issue.action = i.action;
+        if (i.where) issue.where = i.where;
         return issue;
       });
       const payload: Record<string, unknown> = { tool: 'submit_review', score: input.score, issues };
       if (input.summary !== undefined) payload.summary = input.summary;
+      if (input.questions) payload.questions = input.questions;
+      if (input.follow_ups) payload.followUps = input.follow_ups;
       const d = recordDecision(ctx, 'review', payload, ctx.taskId ? [ctx.taskId] : []);
       events.emit({ type: 'decision', workspaceId: ctx.workspaceId, decision: d });
       return okData({ score: input.score, issues });
@@ -632,6 +655,11 @@ export function resultProvenance(store: Store, task: Task | undefined, result: u
   return [...ids].filter((id) => store.artifacts.get(id) !== undefined);
 }
 
+/** Whether a submitted review score is one a review can be judged by: a number from 0 to 10 (not `null`: "cannot score"). */
+export function validScore(score: unknown): score is number {
+  return typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 10;
+}
+
 /** Reads back what a run submitted through `submit_result`, `submit_review`, `respond_to_review`. */
 export function getRunOutputs(store: Store, agentRunId: string): RunOutputs {
   const out: RunOutputs = { responses: [] };
@@ -644,7 +672,7 @@ export function getRunOutputs(store: Store, agentRunId: string): RunOutputs {
         break;
       case 'submit_review': {
         const review: NonNullable<RunOutputs['review']> = {
-          score: p.score as number,
+          score: p.score as number | null,
           issues: p.issues as ReviewIssue[],
         };
         if (typeof p.summary === 'string') review.summary = p.summary;

@@ -2,6 +2,7 @@ import type { Store } from '../store/db.js';
 import type { Criteria, Decision } from '../types.js';
 import { CRITERIA } from './criteria.js';
 import { decisionTags } from '../learning/runTags.js'; // learning loop WP-F
+import { councilMemberOf, councilReviewOf } from '../council/store.js'; // review council
 import type { ReviewQueueItem } from './reviewQueue.js';
 import { withholding } from '../stakeholders/withheld.js';
 
@@ -15,6 +16,7 @@ export function decisionTitle(d: Decision): string {
   const p = (d.payload ?? {}) as Record<string, unknown>;
   if (typeof p.what === 'string' && p.what) return p.what;
   if (p.tool === 'submit_review') return `Review score (${d.role})`;
+  if (councilReviewOf(d)) return 'Council review score'; // review council: the round's one review
   if (d.kind === 'pushback') return `Pushback on ${String(p.issueId ?? '?')}: ${String(p.reason ?? '')}`; // learning loop WP-C
   return String(p.tool ?? d.kind);
 }
@@ -47,7 +49,11 @@ export function decisionReviewQueue(workspaceId: string, deps: { store: Store })
     if (!unrated.length) continue;
     // Learning loop WP-F: experiment / audit judgments stay ratable (arm comparison) but say what they are.
     const tags = decisionTags(store, d.id);
-    const prefix = tags.auditId ? '[audit] ' : tags.experimentId ? `[experiment arm ${tags.arm ?? '?'}] ` : '';
+    // Review council: a member's own score stays ratable (it calibrates that member), marked as one
+    // member's; the round's review to rate is the `council_review` Decision.
+    const member = (d.payload as { tool?: unknown } | null)?.tool === 'submit_review' ? councilMemberOf(store, d.agentRunId) : undefined;
+    const prefix =
+      (tags.auditId ? '[audit] ' : tags.experimentId ? `[experiment arm ${tags.arm ?? '?'}] ` : '') + (member ? `[council member ${member.member}] ` : '');
     out.push({ targetType: 'decision', targetId: d.id, title: `${prefix}${decisionTitle(d)}`, criteria, unrated });
   }
   return out;
