@@ -11,6 +11,7 @@ import type { Decision, Persona, PersonaProfileField } from '../types.js';
 import { audiencesOf, scopeOf } from '../workspace/tree.js';
 import { activeAdjustments } from '../personas/store.js';
 import { compileAgentMd, compileStakeholderMd } from './agentMd.js';
+import { rulingsProblem } from './panelRounds.js';
 // knowledge store KS-3
 import { linkPersona } from '../knowledge/entityLinks.js';
 
@@ -162,8 +163,9 @@ export function savePersonaHandler(opts: MarketToolOptions): ExtraToolHandler {
 
 /**
  * `submit_persona_feedback` handler (persona panel runs). Only validates that the recommendation
- * belongs to this workspace; the dispatcher writes the `persona_feedback` Decision on success and
- * `runPersonaPanel` attaches the feedback to the recommendation (it knows which persona ran).
+ * belongs to this workspace and, for a read of a configured panel, the rulings (`rulingsProblem`); the
+ * dispatcher writes the `persona_feedback` Decision on success and `runPersonaPanel` attaches the
+ * feedback to the recommendation (it knows which persona ran).
  */
 export const submitPersonaFeedbackHandler: ExtraToolHandler = async (ctx, raw, deps) => {
   const input = raw as ToolInput<'submit_persona_feedback'>;
@@ -171,6 +173,9 @@ export const submitPersonaFeedbackHandler: ExtraToolHandler = async (ctx, raw, d
   if (!rec || rec.workspaceId !== ctx.workspaceId) {
     return fail(`recommendation '${input.recommendation_id}' not found in this workspace`);
   }
+  // A read of a configured panel: rulings only on the earlier concerns its prompt lists (persona panel design §7).
+  const refused = rulingsProblem(ctx.agentRunId, input.rulings);
+  if (refused) return fail(refused);
   return { ok: true, data: { recorded: true, recommendationId: rec.id, simulated: true } };
 };
 

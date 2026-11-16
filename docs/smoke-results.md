@@ -468,6 +468,28 @@ The branch itself was reviewed with the development council skill: correctness (
 acceptance (Codex CLI, gpt-6-astra, read-only), test-value (Claude sonnet). Round 1: 7, 7, 8.
 Round 2: 9, 9, 9.
 
+## Persona panel (2026-11-16)
+
+`npx tsx scripts/smoke.ts persona-panel claude`: three personas on two seats (Claude haiku and
+sonnet) with a baseline, one recommendation, then its summary changed and the panel run again, then a
+third run on unchanged text. Real CLI. Two runs.
+
+| Run | Result | Time | Cost |
+|---|---|---|---|
+| 1 | PASS 6/6 | 60.8 s | $0.1791 |
+| 2 (merged state) | PASS 6/6 | 55.7 s | $0.1749 |
+
+Checked: one run per persona on its own seat with its own profile and no other persona's; the
+baseline ran with no persona and is stored apart from the persona feedback; each round-2 prompt lists
+the reader's own earlier concerns and no other reader's, and shows the text it read before and the
+current text; rulings are stored with the concerns they are about and the earlier round is kept; a
+third run on unchanged text starts no run; the recommendations route serves the panel. In run 1 one
+persona's first answer was refused for a missing field and its second accepted. Not run: seats on
+Codex or OpenCode, an unavailable seat on a real CLI, flow verdict runs on seats.
+
+The branch was reviewed with the council skill: correctness (Claude fable), acceptance (Codex CLI,
+gpt-6-astra, read-only), test-value (Claude sonnet). Round 1: 9, 8, 8. Round 2: 9, 9, 9.
+
 ## Notes
 
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without

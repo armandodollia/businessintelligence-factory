@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { canRunOffline, NO_OFFLINE_MODEL } from '../harness/offline.js';
 import { councilFor, memberUnavailable } from '../council/settings.js';
+import { panelSettings, seatUnavailable } from '../market/panelSettings.js';
 import {
   COUNCIL_DEFAULTS,
   PROVIDER_IDS,
@@ -114,7 +115,27 @@ export function configWarnings(cfg: BifConfig): string[] {
     out.push(`stakeholders: ${NO_OFFLINE_MODEL}; reads by own stakeholders and learning for them are skipped (or set stakeholders.enabled: false)`);
   }
   out.push(...councilWarnings(cfg));
+  out.push(...panelWarnings(cfg));
   return out;
+}
+
+/**
+ * Persona panel (design §3, §4): one line per seat that cannot run here (provider disabled, or model not
+ * configured), with the reason and what `onUnavailable` does about the personas on it. A warning, not an
+ * error, as for the council: one configuration works on machines with different CLIs.
+ */
+function panelWarnings(cfg: BifConfig): string[] {
+  const panel = panelSettings(cfg);
+  if (!panel) return [];
+  const effect = panel.onUnavailable === 'fail' ? 'the panel phase ends as failed' : 'the panel goes on without them';
+  return panel.seats.flatMap((seat, i) => {
+    const reason = seatUnavailable(cfg, seat);
+    if (!reason) return [];
+    return [
+      `personaPanel: seat ${i} (${seat.provider}/${seat.model}) cannot run: ${reason}. ` +
+        `Personas on it are unavailable: ${effect} (personaPanel.onUnavailable: ${panel.onUnavailable})`,
+    ];
+  });
 }
 
 /**

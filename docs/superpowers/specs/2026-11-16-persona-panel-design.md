@@ -141,3 +141,108 @@ the pattern flag, the three round cases and the limit, the prompt of round 2 hol
 persona's own concerns, flow verdict runs on the persona's seat, and that with no `personaPanel`
 block the prompt, runs and stored feedback are byte-identical to today. One real run: three personas
 on two Claude models with a baseline, then a changed recommendation and a second round.
+
+## 11. As built
+
+Rulings taken during the build (2026-11-16), where the sections above are silent or were overruled, and
+what was left for later. Where this section and a section above differ, this section is what the code
+does.
+
+### Seats and unavailable personas
+
+- **Turn-taking and pins.** All personas, sorted by slug, take the seats in turn. A pinned persona keeps
+  its place in that order and only its own seat changes, so a pin moves nobody else.
+- **`fail` is decided at the end.** Every persona that can run still runs and its reaction is stored, the
+  stakeholder reads run as always, and the phase then ends as failed.
+- **Nothing to read is not unavailable.** A persona whose reaction to the text as it is now is stored, or
+  whose rounds are used up, is not unavailable, whatever its seat. The seat is checked only for a pair
+  that would run.
+- **The records.** `persona_unavailable` and `baseline_unavailable` are harness Decisions that name the
+  recommendation and the persona as plain fields (`recommendation`, `persona`) and carry no refs, so the
+  export does not read them as a judgment and no rating joins them. They carry `round` and `textHash`:
+  the page shows one only while it is the last word on the text as it is now. A pair whose run
+  started and gave no answer is in `missing` and in `unavailable`; a pair whose seat could not be
+  started is in `unavailable` only (no run was made, so no answer is missing).
+- **Flow verdict runs.** With the block a persona judges flows on its panel seat, whatever `flows.model`
+  says. `onUnavailable` is not applied there: an unavailable persona never fails the `flow_ranking`
+  phase. A persona with no pair left to judge records nothing, whatever its seat (council round 1).
+
+### The answer
+
+- **`rulings`.** `{ concern, ruling, reason }`, where `concern` is the number of the concern as the
+  prompt lists it, from 1. `reason` is required with `stands` and may be left out with `resolved`
+  (council round 1). The tool refuses a ruling in round 1, a ruling on a number that was not listed and
+  two rulings on one concern, each with a message the persona can act on in the same run. A listed
+  concern without a ruling is accepted and recorded (`notRuled`).
+- **The tool's schema is one for everybody.** Without the block the tool also accepts the new fields; the
+  prompt does not ask for them and they are not stored on the recommendation.
+- **The pattern check covers every free text of a reaction that the page shows:** the concerns and what
+  each rests on, the reasoning, what would change its mind, the other side, another route, what it is
+  unsure about, the reason of each ruling, and the earlier concerns as listed with what each rested on.
+  Each is flagged where it is shown (council round 1).
+- **Stored beyond §9:** `textRead` (the title and summary the read was made on), `earlierConcerns` (the
+  concerns listed to the reader for a ruling, in order), `earlierConcernBasis` (for each of them the
+  basis it was raised with: `''` ungrounded, `null` raised before a basis was asked for) and `notRuled`.
+
+### Rounds
+
+- **The text** is the title and the summary, and nothing else of the recommendation: a new score or
+  priority is not a new text.
+- **A later round shows the text the reader read before and the text as it stands now,** both fenced as
+  data, and asks for new concerns only about what differs between them. Each read is stored with its
+  text for this. The earlier text is the reader's own earlier read, never another reader's. A read
+  stored without its text (before the block, or before this was built) has none to show: the prompt
+  says so and shows the text as it stands now only. (Council round 1; it overrules the ruling during
+  the build that a later round is shown the current text only.)
+- **A later round lists every concern still open,** not only those of the last read: the listed concerns
+  the reader did not rule `resolved`, then the concerns it raised in its last read, exact duplicates
+  once.
+- **A concern is carried with what was recorded of it when it was raised** (its basis, or that it had
+  none), and its flag is found again wherever the concern is listed. The page shows those marks in the
+  list of rulings too (council round 1).
+- **A read without an answer is not a round:** the earlier reaction stays the current one and the next
+  run tries the same round again.
+- **A reaction with no hash** (stored before the block) is round 1; its next round's prompt says the
+  text may have changed, not that it did.
+- **Storage.** A persona's current reaction stays in `recommendations.persona_feedback`. The table
+  `persona_panel_reads` (migration 30) keeps every baseline and each earlier round of a persona.
+
+### The baseline
+
+- It follows the rule of rounds with its own earlier concerns and its own round count, and runs by its
+  own rule: a recommendation with no baseline of its text as it is now gets one even when no persona
+  reads in that run, and the reactions already stored for that text are then marked.
+- It gets no persona calibration. A baseline that cannot be had never fails the phase, also under
+  `fail`. Its Decision is a `persona_feedback` line marked `baseline: true` with no persona and no
+  rating target.
+- **"Not counted as agreement" holds where reactions are counted.** A reaction marked `sameAsBaseline` is
+  left out of `personaScore` and of the numbers of `panelSummary` (`leftOut` says how many were). So
+  with `scoring.personaWeight` above 0 a mark can change a priority; with the default weight of 0 it
+  changes none.
+
+### The page and the documents
+
+- The panel is served with the recommendation (`panel`, built in `market/panelView.ts`), also when the
+  block was removed but earlier rounds or baselines are stored. Round limit and unavailable are shown
+  only while the block is there.
+- The range of disagreement counts every counted current reaction, also one to an earlier text (a
+  persona at its round limit, or unavailable this round). It is marked simulated, as every reaction and
+  every read of the baseline is (council round 1).
+- A persona is labelled by its id, as before. A baseline's concern without a basis reads "No basis in
+  the text", since it has no profile.
+- The example configuration has no `personaPanel` block: the block cannot be inert, and it would turn
+  the panel on, with a baseline run, for whoever copies the file. The README documents the block
+  (council round 1).
+
+### Left for later
+
+- A recommendation's text changes on the same row only through a revision by its own task, an
+  escalation re-run or a manual edit, so rounds past 1 are rare in the pipeline. The main effect of
+  rounds is that unchanged recommendations are not read again on later runs.
+- `markAgainstBaseline` compares only with the latest baseline: a text going A → B → A leaves a first
+  reaction to A unmarked.
+- The pipeline seats every usable persona. The skill's "three to six personas" is guidance for whoever
+  defines the personas; nothing enforces it.
+- `persona_feedback_missing` is still read by the export as a judgment of the recommendation, as on
+  `main`.
+- Stakeholder reads and flow verdicts do not have the baseline, the grounded answer fields or rounds.

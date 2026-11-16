@@ -1,4 +1,4 @@
-import { COUNCIL_DEFAULTS, TASK_TYPES, type BifConfig, type Lens, type ProviderId, type TaskType } from '../config/schema.js';
+import { COUNCIL_DEFAULTS, TASK_TYPES, modelUnavailable, type BifConfig, type Lens, type ProviderId, type TaskType } from '../config/schema.js';
 
 /**
  * Review council settings (design 2026-11-16-review-council-design.md §4): which task types are reviewed
@@ -44,10 +44,7 @@ export function councilFor(config: Pick<BifConfig, 'council'>, taskType: TaskTyp
  * (design §7): the caller reports it.
  */
 export function memberUnavailable(config: Pick<BifConfig, 'providers'>, m: CouncilMember): string | undefined {
-  const provider = config.providers[m.provider];
-  if (!provider.enabled) return `provider '${m.provider}' is not enabled`;
-  if (!provider.models.includes(m.model)) return `model '${m.model}' is not in providers.${m.provider}.models`;
-  return undefined;
+  return modelUnavailable(config.providers, m);
 }
 
 /** The configured council as the settings page shows it (design §9): defaults applied, read-only. */

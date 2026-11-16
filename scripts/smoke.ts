@@ -12,6 +12,7 @@
  *   npx tsx scripts/smoke.ts stakeholder-positions [providers] # a stakeholder leaves: follow research and the combine run (default: claude)
  *   npx tsx scripts/smoke.ts user-persona [providers]     # the user persona's learning run in the retro (default: claude)
  *   npx tsx scripts/smoke.ts council                      # a review council of two Claude models (one more CLI: BIF_SMOKE_COUNCIL_EXTRA)
+ *   npx tsx scripts/smoke.ts persona-panel                # a persona panel of three personas on two Claude models, with a baseline and a second round
  *   npx tsx scripts/smoke.ts --help                       # lists the modes; runs nothing
  *
  * worker:    boots the real server (temp data dir, temp config, free port) and, per provider,
@@ -89,6 +90,17 @@
  *            status follows the council's last round; `GET /api/workspaces/:id/tasks/:taskId/council` serves the rounds. Second pass, a
  *            new task: a blocking member whose model does not exist, under `onUnavailable: "fail"`. The task must end
  *            `unverified` in round 1, naming the member, with no revision and no reviewer run on any other model.
+ * persona-panel: persona panel (design 2026-11-16-persona-panel-design.md §10). Seeds a node with three verified personas of
+ *            a fictional courier firm and one verified recommendation, and configures the panel over `PUT /api/config`: two
+ *            seats on two Claude models (BIF_SMOKE_CLAUDE_MODEL, default haiku, and BIF_SMOKE_PANEL_SECOND_MODEL, default
+ *            sonnet), a baseline, two rounds. The real panel then runs three times: on the recommendation as seeded, after
+ *            its summary was changed, and once more on the unchanged text. Judged from the store, the runs' prompt files
+ *            and the recommendations route: one run per persona (plus its one retry at most) on its own seat, its prompt
+ *            holding its own profile and no other persona's; the baseline run with no persona on seat 0, stored apart from
+ *            the persona feedback; each round-2 prompt lists the reader's own earlier concerns and no other reader's, and
+ *            shows, each in its fence, the text it read before and the text as it stands now; the
+ *            rulings stored with the concerns they are about and the earlier round kept; no run on the third pass;
+ *            `GET /api/workspaces/:id/recommendations` serves the panel.
  * codex isolation (with the codex worker smoke): `codex mcp list --json` under the exact env and
  *            `-c` overrides the adapter gives a run must list only `bif`.
  *
@@ -149,6 +161,11 @@ import { USER_FIELDS } from '../src/core/scoring/criteria.js';
 import { collectInteractions } from '../src/core/userPersona/interactions.js';
 import { LOOK_FOR } from '../src/core/council/lenses.js';
 import { councilMemberOf, councilReviewDecisions, councilRounds, type CouncilView } from '../src/core/council/store.js';
+import { PANEL_ATTEMPTS, runPersonaPanel } from '../src/core/market/panel.js';
+import { openConcerns, panelHistory, textHashOf } from '../src/core/market/panelRounds.js';
+import { panelSettings, seatOf } from '../src/core/market/panelSettings.js';
+import type { RecommendationPanel } from '../src/core/market/panelView.js';
+import type { PanelBaseline, PersonaFeedback, Recommendation } from '../src/core/types.js';
 import { containsIdentifier, userBrief, userPersonaOf } from '../src/core/userPersona/persona.js';
 
 const MODELS: Record<ProviderId, string> = {
@@ -1782,8 +1799,220 @@ async function councilSmoke(booted: Booted, base: string): Promise<FlResult> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// persona panel smoke (persona panel design 2026-11-16 §10)
+
+const PP_COMPANY = 'Larkspur Couriers';
+/** The second Claude model: the panel's seat 1 (seat 0 is on BIF_SMOKE_CLAUDE_MODEL). */
+const PP_SECOND_MODEL = process.env.BIF_SMOKE_PANEL_SECOND_MODEL ?? 'sonnet';
+/** Three people who would not read the same offer the same way. Sorted by slug they take the seats 0, 1, 0. */
+const PP_PERSONAS = [
+  { slug: 'dispatch-lead', segment: 'dispatch leads of small courier firms', who: 'the dispatch lead of a 12-van courier firm who plans the routes every morning and answers to the owner' },
+  { slug: 'finance-clerk', segment: 'finance clerks of mid-size courier firms', who: 'the finance clerk of a 40-person courier firm who approves software invoices and has no budget line for new yearly contracts' },
+  { slug: 'owner-driver', segment: 'owner-drivers with one van', who: 'an owner-driver with one van who is paid per delivery, works from a phone and has never signed a yearly software contract' },
+];
+const PP_TITLE = 'Sell the route planner as a yearly plan per van';
+const PP_SUMMARY = 'Offer the route planner only as a yearly contract billed per van and paid up front, with onboarding through a call with sales.';
+const PP_SUMMARY_CHANGED =
+  'Offer the route planner as a monthly plan per van that can be cancelled at any time, with a 30-day free pilot and self-serve onboarding. ' +
+  'A yearly contract stays as an option, with two months free.';
+/** What the baseline's system prompt says of its reader (`BASELINE_SYSTEM_PROMPT`). */
+const PP_BASELINE_MARK = 'a general reader with no particular stake';
+
+async function personaPanelSmoke(booted: Booted, base: string): Promise<FlResult> {
+  const { store, config, events, research, dataDir } = booted.runtime;
+  const name = `persona-panel/claude (${MODELS.claude} + ${PP_SECOND_MODEL})`;
+  const startedAt = Date.now();
+  const short = (s: string, n = 160) => (s.length > n ? `${s.slice(0, n)}…` : s);
+  const steps: FlStep[] = [];
+  const confusion: string[] = [];
+  const runIds: string[] = [];
+  const wsId = 'ws_smoke_persona_panel';
+  const bus: ToolCallLog[] = [];
+  const off = events.on((e) => {
+    if (e.type === 'tool_call' && e.workspaceId === wsId) bus.push({ tool: e.tool, ok: e.ok, ...(e.error ? { error: e.error } : {}) });
+  });
+  try {
+    const now = new Date().toISOString();
+    store.workspaces.insert({ id: wsId, name: PP_COMPANY, sector: 'test', createdAt: now });
+    const personas = PP_PERSONAS.map((p) =>
+      store.personas.insert({
+        id: newId('per'), workspaceId: wsId, slug: p.slug, segment: p.segment, version: 1, status: 'verified',
+        profile: Object.fromEntries(PERSONA_FIELDS.map((f) => [f, { value: `${f.replace(/_/g, ' ')}: ${p.who}`, confidence: 0.7, evidence: [] }])),
+        agentMdPath: agentMdPath(dataDir, wsId, p.slug),
+      }),
+    );
+    const recId = store.recommendations.insert({
+      id: newId('rec'), workspaceId: wsId, title: PP_TITLE, summary: PP_SUMMARY, criteria: { upside: 4 }, findingIds: [], personaFeedback: [], priority: 0,
+      createdAt: now, status: 'verified',
+    }).id;
+    const rec = (): Recommendation => store.recommendations.get(recId)!;
+
+    // The panel is set through the real route, so the configuration is validated as a user's would be.
+    const next = structuredClone(config);
+    next.providers.claude.models = [...new Set([...next.providers.claude.models, PP_SECOND_MODEL])];
+    next.personaPanel = {
+      rounds: 2, baseline: true, onUnavailable: 'report',
+      seats: [{ provider: 'claude', model: MODELS.claude }, { provider: 'claude', model: PP_SECOND_MODEL }],
+    };
+    const put = await fetch(`${base}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(next) });
+    if (!put.ok) throw new Error(`PUT /api/config failed (${put.status}): ${short(await put.text(), 300)}`);
+    const settings = panelSettings(config);
+    if (!settings) throw new Error('personaPanel is not configured after PUT /api/config');
+    const seatModel = (slug: string) => seatOf(settings, personas, { slug }).seat.model;
+    const modelOf = (m: { provider: string; model: string }) => `${m.provider}/${m.model}`;
+
+    const panelRuns = () => store.agentRuns.list({ workspaceId: wsId }).filter((r) => r.role === 'persona');
+    /** One run of the real panel: its report and the persona-role runs it started. */
+    const read = async () => {
+      const before = new Set(panelRuns().map((r) => r.id));
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), TIMEOUT_MS * 4);
+      try {
+        const report = await runPersonaPanel(wsId, { ...research, signal: abort.signal });
+        return { report, runs: panelRuns().filter((r) => !before.has(r.id)) };
+      } finally {
+        clearTimeout(timer);
+        runIds.push(...panelRuns().filter((r) => !before.has(r.id)).map((r) => r.id));
+      }
+    };
+    /** Who a panel run was, from its prompt file: the personas whose profile it holds, and whether it is the run with no persona. */
+    const readerOf = (run: { id: string; model: ModelRef; status: string }) => {
+      const text = runPrompts(dataDir, wsId, run.id) ?? '';
+      return { run, text, slugs: PP_PERSONAS.map((p) => p.slug).filter((slug) => text.includes(`name: ${slug}`)), baseline: text.includes(PP_BASELINE_MARK) };
+    };
+    const reactionOf = (slug: string): PersonaFeedback | undefined => rec().personaFeedback.find((f) => f.personaId === personas.find((p) => p.slug === slug)!.id);
+    const BASE = 'baseline';
+
+    // --- first pass: the recommendation as seeded ---------------------------------------------------
+    const first = await read();
+    const readers1 = first.runs.map(readerOf);
+    const hash1 = textHashOf(rec());
+    const perPersona = PP_PERSONAS.map(({ slug }) => {
+      const mine = readers1.filter((x) => x.slugs.includes(slug));
+      const reaction = reactionOf(slug);
+      const model = seatModel(slug);
+      const ownPrompt = mine.every((x) => x.slugs.length === 1 && !x.baseline);
+      const ownSeat = mine.every((x) => modelOf(x.run.model) === `claude/${model}`);
+      const stored = !!reaction && reaction.round === 1 && reaction.textHash === hash1 && reaction.seat?.model === model && reaction.simulated === true;
+      return { slug, model, mine, reaction, pass: mine.length >= 1 && mine.length <= PANEL_ATTEMPTS && ownPrompt && ownSeat && stored };
+    });
+    const strays = readers1.filter((x) => (x.baseline ? x.slugs.length > 0 : x.slugs.length !== 1));
+    steps.push({
+      step: 'P1 one run per persona on its own seat, with its own profile and no other persona\'s', calls: 0,
+      pass: perPersona.every((x) => x.pass) && strays.length === 0 && new Set(perPersona.map((x) => x.model)).size === 2 && first.report.feedback === personas.length,
+      did:
+        perPersona.map((x) => `${x.slug} (seat model ${x.model}): ${x.mine.map((m) => `${modelOf(m.run.model)} ${m.run.status}`).join(' + ') || 'no run'}; reaction=${x.reaction ? `round ${x.reaction.round}, ${x.reaction.concerns.length} concern(s), ${x.reaction.ungrounded?.length ?? 0} ungrounded, ${x.reaction.aboutOthers?.length ?? 0} flagged` : 'none'}`).join(' | ') +
+        `; runs that are nobody's or two readers': ${strays.length}; report=${JSON.stringify({ feedback: first.report.feedback, missing: first.report.missing.length, unavailable: first.report.unavailable?.length })}`,
+    });
+
+    // P2: the baseline: one run with no persona on seat 0, stored apart from the persona feedback.
+    const history1 = panelHistory(store, recId);
+    const base1 = history1.baselines[0];
+    const baseRuns1 = readers1.filter((x) => x.baseline);
+    const baseDecisions = base1?.agentRunId ? store.decisions.list({ agentRunId: base1.agentRunId, kind: 'persona_feedback' }) : [];
+    const feedback1 = rec().personaFeedback;
+    steps.push({
+      step: 'P2 the baseline ran with no persona on seat 0 and is stored apart from the persona feedback', calls: 0,
+      pass:
+        history1.baselines.length === 1 && !!base1 && base1.round === 1 && base1.textHash === hash1 && !('personaId' in base1) &&
+        baseRuns1.length >= 1 && baseRuns1.length <= PANEL_ATTEMPTS && baseRuns1.some((x) => x.run.id === base1.agentRunId) &&
+        baseRuns1.every((x) => x.slugs.length === 0 && modelOf(x.run.model) === `claude/${settings.seats[0]!.model}`) &&
+        feedback1.length === personas.length && feedback1.every((f) => personas.some((p) => p.id === f.personaId) && typeof f.sameAsBaseline === 'boolean') &&
+        baseDecisions.length >= 1 && baseDecisions.every((d) => (d.payload as { baseline?: boolean }).baseline === true && !('personaId' in (d.payload as object))) &&
+        first.report.baseline?.stored === 1,
+      did: `baselines stored=${history1.baselines.length} (round ${base1?.round ?? '-'}); baseline runs: ${baseRuns1.map((x) => `${modelOf(x.run.model)} ${x.run.status}, personas in prompt=${x.slugs.length}`).join(' + ') || 'none'}; persona feedback entries=${feedback1.length}, marked against the baseline: ${feedback1.map((f) => String(f.sameAsBaseline)).join(',')}; baseline decisions marked=${baseDecisions.length}`,
+    });
+
+    // What each reader said in round 1, as its next round lists it.
+    const said1 = new Map<string, PanelBaseline>([...PP_PERSONAS.flatMap(({ slug }) => (reactionOf(slug) ? [[slug, reactionOf(slug)!] as const] : [])), ...(base1 ? [[BASE, base1.reaction as PanelBaseline] as const] : [])]);
+    const open1 = new Map([...said1].map(([who, r]) => [who, openConcerns(r).map((c) => c.text)]));
+
+    // --- second pass: the summary changed -----------------------------------------------------------
+    store.recommendations.update(recId, { summary: PP_SUMMARY_CHANGED });
+    const hash2 = textHashOf(rec());
+    const second = await read();
+    const readers2 = second.runs.map(readerOf);
+    const prompts2 = readers2.map((x) => {
+      const who = x.baseline ? BASE : (x.slugs[0] ?? 'nobody');
+      const own = open1.get(who) ?? [];
+      const others = [...open1].filter(([other]) => other !== who).flatMap(([other, concerns]) => concerns.filter((c) => !own.includes(c) && x.text.includes(c)).map((c) => `${other}: ${short(c, 60)}`));
+      // The text it read before and the text as it stands now, each inside its fence.
+      const before = /<<<EVIDENCE text_you_read_before\n([\s\S]*?)\n>>>/.exec(x.text)?.[1] ?? '';
+      const current = /<<<EVIDENCE text_as_it_stands_now\n([\s\S]*?)\n>>>/.exec(x.text)?.[1] ?? '';
+      const texts = before.includes(PP_SUMMARY) && !before.includes(PP_SUMMARY_CHANGED) && current.includes(PP_SUMMARY_CHANGED) && !current.includes(PP_SUMMARY);
+      return { who, model: modelOf(x.run.model), one: x.baseline ? x.slugs.length === 0 : x.slugs.length === 1, own: own.every((c) => x.text.includes(c)), listed: own.length, others, texts };
+    });
+    steps.push({
+      step: "P3 each round-2 prompt lists the reader's own earlier concerns and no other reader's, and shows the text it read before and the text as it stands now", calls: 0,
+      pass:
+        prompts2.length >= said1.size && prompts2.every((p) => p.one && p.own && p.others.length === 0 && p.texts) &&
+        [...said1.keys()].every((who) => prompts2.some((p) => p.who === who)) &&
+        prompts2.every((p) => p.model === `claude/${p.who === BASE ? settings.seats[0]!.model : seatModel(p.who)}`),
+      did: prompts2.map((p) => `${p.who} on ${p.model}: own concerns listed=${p.own} (${p.listed}), of other readers=${p.others.join('; ') || 'none'}, earlier and current text fenced=${p.texts}`).join(' | ') || 'no round-2 run',
+    });
+
+    // P4: the rulings are stored with the concerns they are about, and round 1 is kept.
+    const history2 = panelHistory(store, recId);
+    const rulings = PP_PERSONAS.map(({ slug }) => {
+      const now2 = reactionOf(slug);
+      const listed = open1.get(slug) ?? [];
+      const kept = history2.earlierRounds.filter((r) => r.personaId === personas.find((p) => p.slug === slug)!.id);
+      const given = now2?.rulings ?? [];
+      const consistent =
+        listed.length === 0
+          ? now2?.earlierConcerns === undefined && given.length === 0
+          : JSON.stringify(now2?.earlierConcerns) === JSON.stringify(listed) && now2?.earlierConcernBasis?.length === listed.length &&
+            given.length >= 1 && given.every((r) => r.concern >= 1 && r.concern <= listed.length) &&
+            given.length + (now2?.notRuled?.length ?? 0) === listed.length;
+      const pass =
+        !!now2 && now2.round === 2 && now2.textHash === hash2 && now2.textRead?.summary === PP_SUMMARY_CHANGED && consistent &&
+        kept.length === 1 && kept[0]!.round === 1 && kept[0]!.textHash === hash1 && kept[0]!.reaction.textRead?.summary === PP_SUMMARY;
+      return { slug, pass, did: `${slug}: round ${now2?.round ?? '-'}, listed ${listed.length}, rulings ${given.map((r) => `${r.concern}=${r.ruling}`).join(',') || 'none'}, not ruled ${JSON.stringify(now2?.notRuled ?? [])}, earlier rounds kept ${kept.length}` };
+    });
+    steps.push({
+      step: 'P4 rulings are stored with the concerns they are about; the earlier round and the earlier baseline are kept', calls: 0,
+      pass: rulings.every((r) => r.pass) && history2.baselines.length === 2 && history2.baselines[1]!.round === 2 && history2.baselines[1]!.textHash === hash2 && second.report.feedback === personas.length,
+      did: `${rulings.map((r) => r.did).join(' | ')}; baselines=${history2.baselines.map((b) => `round ${b.round}`).join(', ')}; report=${JSON.stringify({ feedback: second.report.feedback, unavailable: second.report.unavailable?.length, baseline: second.report.baseline })}`,
+    });
+
+    // --- third pass: the same text ------------------------------------------------------------------
+    const third = await read();
+    steps.push({
+      step: 'P5 a third run on the unchanged text starts no run', calls: 0,
+      pass:
+        third.runs.length === 0 && third.report.feedback === 0 && third.report.rounds?.unchanged === personas.length && third.report.rounds.limitReached.length === 0 &&
+        third.report.baseline?.unchanged === 1 && third.report.baseline.stored === 0,
+      did: `runs started=${third.runs.length}; report=${JSON.stringify({ feedback: third.report.feedback, rounds: third.report.rounds, baseline: third.report.baseline })}`,
+    });
+
+    // P6: the recommendations route serves the panel.
+    const res = await fetch(`${base}/api/workspaces/${wsId}/recommendations`);
+    const served = (res.ok ? ((await res.json()) as Array<Recommendation & { panel?: RecommendationPanel }>) : []).find((r) => r.id === recId);
+    const panel = served?.panel;
+    steps.push({
+      step: 'P6 GET /api/workspaces/:id/recommendations serves the panel: the range of disagreement, earlier rounds, the baseline', calls: 0,
+      pass:
+        !!served && !!panel && served.personaFeedback.length === personas.length && panel.simulated === true && Array.isArray(panel.disagreement) &&
+        panel.earlierRounds.length === personas.length && panel.baseline?.current === true && panel.baseline.reaction.round === 2 && panel.baseline.earlier.length === 1 &&
+        panel.unavailable.length === 0 && panel.limitReached.length === 0 && !JSON.stringify(panel).includes('"mean"'),
+      did: `status ${res.status}; disagreement=${JSON.stringify(panel?.disagreement)}; left out=${panel?.leftOut}; earlier rounds=${panel?.earlierRounds.length}; baseline round=${panel?.baseline?.reaction.round} current=${panel?.baseline?.current}; unavailable=${panel?.unavailable.length}; limit reached=${panel?.limitReached.length}`,
+    });
+
+    for (const c of bus.filter((x) => !x.ok)) confusion.push(`${c.tool} failed: ${short(c.error ?? '')}`);
+    return {
+      name, pass: steps.every((x) => x.pass), seconds: (Date.now() - startedAt) / 1000, steps, usage: usageOf(booted, runIds), toolCalls: bus.length, confusion,
+      detail: `runs: first=${first.runs.length}, second=${second.runs.length}, third=${third.runs.length}; promptStoreGaps=${JSON.stringify(promptStoreGaps(store))}`,
+    };
+  } catch (e) {
+    return { name, pass: false, seconds: (Date.now() - startedAt) / 1000, detail: `threw: ${(e as Error).message}`, steps, usage: usageOf(booted, runIds), toolCalls: bus.length, confusion };
+  } finally {
+    off();
+  }
+}
+
 /** The parts that can be run alone (first argument); with none, the default set runs. */
-const MODES = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'stakeholder-positions', 'user-persona', 'council'];
+const MODES = ['worker', 'interview', 'browser', 'knowledge', 'flows', 'persona-learning', 'stakeholders', 'stakeholder-positions', 'user-persona', 'council', 'persona-panel'];
 
 async function main() {
   const args = process.argv.slice(2);
@@ -1930,6 +2159,19 @@ async function main() {
     try {
       console.log(`[smoke] council (claude ${MODELS.claude} + ${CN_SECOND_MODEL}${councilExtra().provider ? ` + ${councilExtra().provider}` : ''}) …`);
       const r = await councilSmoke(booted, base);
+      printKnowledge(r);
+      results.push(r);
+    } finally {
+      await booted.close();
+      if (process.env.BIF_SMOKE_KEEP !== '1') rmSync(dir, { recursive: true, force: true });
+      else console.log(`[smoke] kept ${dir}`);
+    }
+  }
+  if (mode === 'persona-panel') {
+    const { booted, dir, base } = await startServer('persona-panel');
+    try {
+      console.log(`[smoke] persona-panel (claude ${MODELS.claude} + ${PP_SECOND_MODEL}) …`);
+      const r = await personaPanelSmoke(booted, base);
       printKnowledge(r);
       results.push(r);
     } finally {

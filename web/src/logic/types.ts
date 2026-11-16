@@ -304,8 +304,16 @@ export type { OutputStatus } from '../../../src/core/types.js';
 /** A finding as listed by the API; `sourceWorkspaceId` names its node (`?scope=tree` lists the whole tree). */
 export type TreeFindingView = FindingView & { sourceWorkspaceId?: string };
 
-/** Recommendation with the last review of the task that saved it (`GET .../recommendations`). */
-export type RecommendationView = Recommendation & { lastReview?: LastReview };
+// --- persona panel (design 2026-11-16-persona-panel-design.md §8) ---
+export type { AboutOthersFlag, PanelBaseline, PersonaRuling } from '../../../src/core/types.js';
+import type { RecommendationPanel } from '../../../src/core/market/panelView.js';
+export type { RecommendationPanel };
+
+/**
+ * Recommendation with the last review of the task that saved it (`GET .../recommendations`) and, when
+ * the persona panel is configured (or has stored rounds), what the panel shows beyond the current reactions.
+ */
+export type RecommendationView = Recommendation & { lastReview?: LastReview; panel?: RecommendationPanel };
 
 /** Persona with the last review of the task that last saved it (`GET .../personas`). */
 export type PersonaView = PersonaNode & { lastReview?: LastReview };

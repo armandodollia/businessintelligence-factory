@@ -1,9 +1,10 @@
 import { formatValue } from '../logic/format.js';
 import { useFindingIndex, useRecommendations, useScoringWeights, useStakeholderList } from '../logic/hooks.js';
-import type { PersonaFeedback, RecommendationView, TreeFindingView } from '../logic/types.js';
+import type { RecommendationView, TreeFindingView } from '../logic/types.js';
 import { CriteriaRatings, CriterionRating } from './CriterionRating.js';
 import { EvidenceList } from './EvidenceList.js';
 import { LastReviewNote } from './LastReviewNote.js';
+import { PersonaPanel } from './personas/Panel.js';
 import { StakeholderReads } from './stakeholders/Reads.js';
 
 export function Strategy({ wsId }: { wsId: string }) {
@@ -95,10 +96,7 @@ export function Strategy({ wsId }: { wsId: string }) {
                 <CriteriaRatings workspaceId={wsId} targetType="recommendation" targetId={r.id} criteria={r.criteria} />
               </td>
               <td className="simulated">
-                {r.personaFeedback.length === 0 && <span className="muted">no persona feedback</span>}
-                {r.personaFeedback.map((pf) => (
-                  <PersonaFeedbackCell key={pf.personaId} wsId={wsId} recId={r.id} feedback={pf} />
-                ))}
+                <PersonaPanel wsId={wsId} rec={r} />
                 <StakeholderReads wsId={wsId} recId={r.id} owners={stakeholders.ownOpen} />
               </td>
             </tr>
@@ -181,34 +179,6 @@ function WeightsEditor({ wsId, onSaved }: { wsId: string; onSaved: () => void })
         {w.savedDecisionId && <span className="muted">saved (decision {w.savedDecisionId})</span>}
       </div>
     </section>
-  );
-}
-
-function PersonaFeedbackCell({ wsId, recId, feedback }: { wsId: string; recId: string; feedback: PersonaFeedback }) {
-  return (
-    <div className="feedback">
-      <div>
-        <span className="tag">simulated</span> <b>{feedback.personaId}</b>
-      </div>
-      <CriteriaRatings
-        workspaceId={wsId}
-        targetType="persona_feedback"
-        targetId={`${recId}:${feedback.personaId}`}
-        criteria={feedback.scores}
-      />
-      {feedback.concerns.length > 0 && (
-        <ul className="small">
-          {feedback.concerns.map((c, i) => (
-            <li key={i}>{c}</li>
-          ))}
-        </ul>
-      )}
-      <details>
-        <summary>reasoning</summary>
-        <p className="small">{feedback.reasoning}</p>
-        <p className="small muted">Would change mind: {feedback.wouldChangeMind}</p>
-      </details>
-    </div>
   );
 }
 

@@ -8,6 +8,7 @@ import type {
   Finding,
   Identity,
   InterviewTurn,
+  PanelRead,
   Persona,
   Pipeline,
   Profile,
@@ -313,6 +314,15 @@ export const specs = {
       taskRound: 'int', includeOverride: 'bool',
     },
   } satisfies TableSpec<Recommendation>,
+  // Persona panel rounds and baseline (migration 30)
+  personaPanelReads: {
+    table: 'persona_panel_reads',
+    key: 'id',
+    fields: {
+      id: 'text', workspaceId: 'text', recommendationId: 'text', kind: 'text', personaId: 'text', round: 'int', textHash: 'text',
+      agentRunId: 'text', reaction: 'json', createdAt: 'text',
+    },
+  } satisfies TableSpec<PanelRead>,
   personas: {
     table: 'personas',
     key: 'id',
@@ -417,6 +427,7 @@ export function createRepos(db: DatabaseSync) {
     ratings: new Repo<Rating, 'id'>(db, specs.ratings),
     userRequests: new Repo<UserRequest, 'id'>(db, specs.userRequests),
     recommendations: new Repo<Recommendation, 'id'>(db, specs.recommendations),
+    personaPanelReads: new Repo<PanelRead, 'id'>(db, specs.personaPanelReads),
     personas: new Repo<Persona, 'id'>(db, specs.personas),
     symptoms: new Repo<Symptom, 'id'>(db, specs.symptoms),
     schedules: new Repo<Schedule, 'id'>(db, specs.schedules),

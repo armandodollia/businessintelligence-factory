@@ -36,6 +36,7 @@ import type { PromptRead } from '../knowledge/promptReads.js';
 import { itemIsUploadDerived } from '../knowledge/provenance.js';
 import { fenceEvidence, redactServed, stripFences } from '../knowledge/trust.js';
 import { agentMdOf } from '../market/panel.js';
+import { panelSettings, seatOf, seatUnavailable } from '../market/panelSettings.js';
 import { promptTemplate, renderTemplate, withCalibration } from '../prompts/index.js';
 import { recordPromptVersion } from '../prompts/store.js';
 import { recordHarnessDecision, runAgent, throwIfAborted, type PhaseRunner, type ResearchDeps } from '../research/deps.js';
@@ -258,9 +259,18 @@ type Judge = {
   /** Built on first use, inside the persona's own job: a persona whose agent.md cannot be built fails alone. */
   systemPrompt: () => string;
   model: ModelRef;
+  /** Persona panel configured: the effort of the persona's seat (`model` is then the seat's too). */
+  effort?: string;
+  /** Persona panel configured: why the persona's seat cannot be started. It then judges nothing, on no other model. */
+  unavailable?: string;
   settings: FlowsSettings;
   report: RoundReport;
 };
+
+/** Throws when the persona's seat cannot be started: its job records the failure like any other (`recordJobFailure`). */
+function needSeat(j: Judge): void {
+  if (j.unavailable !== undefined) throw new Error(j.unavailable);
+}
 
 /** Pseudo run id of the round's own decisions (a failure before any run exists, the round summary). */
 export const ROUND_ACTOR = 'flow_ranking';
@@ -295,7 +305,7 @@ async function judgeRun(j: Judge, stage: 'broad' | 'focused', flows: Flow[], pai
   throwIfAborted(deps.signal);
   const outcome = await runAgent(deps, {
     kind: 'work', role: 'persona', workspaceId, round: 1, attempt, prompt, systemPrompt, model, needsBrowser: false,
-    promptVersion: version, promptReads: [read],
+    promptVersion: version, promptReads: [read], ...(j.effort !== undefined ? { effort: j.effort } : {}),
   });
   stampPersona(store, outcome.agentRunId, persona, type.id);
   throwIfAborted(deps.signal);
@@ -347,6 +357,8 @@ async function broadStage(j: Judge, flows: Flow[]): Promise<void> {
     for (let attempt = 1; attempt <= BROAD_ATTEMPTS; attempt++) {
       const pairs = missing();
       if (pairs.length === 0) break;
+      // Only a persona that has a pair to judge needs its seat: one with nothing left ends here, whatever its seat.
+      needSeat(j);
       // Only the flows of the pairs still to ask, in the persona's order.
       const involved = order.filter((id) => pairs.some(([a, b]) => a === id || b === id));
       for (const sitting of sittings(involved, pairs, settings.maxFlowsPerSitting)) {
@@ -425,8 +437,21 @@ export async function runFlowRanking(workspaceId: string, deps: ResearchDeps): P
     if (text === undefined) systemPrompts.set(p.id, (text = withCalibration(agentMdOf(deps, p), 'persona', scope)));
     return text;
   };
+  // Persona panel configured: a persona judges flows on the seat it has in the panel (persona panel design §2),
+  // whatever `flows.model` says, and on no other.
+  const panel = panelSettings(config);
+  const seatFor = (persona: Persona): Pick<Judge, 'model' | 'effort' | 'unavailable'> => {
+    if (!panel) return { model };
+    const { index, seat } = seatOf(panel, personas, persona);
+    const why = seatUnavailable(config, seat);
+    return {
+      model: { provider: seat.provider, model: seat.model },
+      ...(seat.effort !== undefined ? { effort: seat.effort } : {}),
+      ...(why !== undefined ? { unavailable: `persona '${persona.slug}' is unavailable on seat ${index} (${seat.provider}/${seat.model}): ${why}` } : {}),
+    };
+  };
   const judge = (type: FlowType, persona: Persona): Judge => ({
-    deps, workspaceId, type, persona, systemPrompt: () => systemPromptOf(persona), model, settings, report,
+    deps, workspaceId, type, persona, systemPrompt: () => systemPromptOf(persona), ...seatFor(persona), settings, report,
   });
 
   // Stage 1 per flow type: broad sittings, personas concurrently.
@@ -471,6 +496,7 @@ export async function runFlowRanking(workspaceId: string, deps: ResearchDeps): P
         const b = flowsById.get(item.b);
         if (!a || !b) continue;
         try {
+          needSeat(j);
           const saved = await judgeRun(j, 'focused', [a, b], [[a.id, b.id]], 1);
           report.verdicts += saved;
         } catch (err) {

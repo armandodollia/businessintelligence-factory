@@ -1690,4 +1690,26 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent_runs ADD COLUMN council_member TEXT;
   CREATE INDEX agent_runs_council ON agent_runs (council_round_id) WHERE council_round_id IS NOT NULL;
   `,
+  // 30: persona panel rounds and baseline (design 2026-11-16-persona-panel-design.md §5, §7, §9). The reads
+  // of a recommendation that are not a persona's current reaction (that one stays in
+  // `recommendations.persona_feedback`): `kind` `baseline` (the run with no persona; `persona_id` NULL;
+  // every baseline is kept) or `persona` (an earlier round, stored when a later round replaced it).
+  // `reaction` is the stored reaction as JSON. Nothing is written without a `personaPanel` block, and
+  // rows of `recommendations` are not touched: a reaction stored before reads as round 1 with no hash.
+  // Repository: `personaPanelReads` (`store/repos.ts`); read through `market/panelRounds.ts`.
+  `
+  CREATE TABLE persona_panel_reads (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    recommendation_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    persona_id TEXT,
+    round INTEGER NOT NULL,
+    text_hash TEXT,
+    agent_run_id TEXT,
+    reaction TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX persona_panel_reads_rec ON persona_panel_reads (recommendation_id);
+  `,
 ];

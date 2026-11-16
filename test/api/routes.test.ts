@@ -6,7 +6,8 @@ import { createApp, type AppDeps } from '../../src/api/routes.js';
 import type { RunContext } from '../../src/core/harness/tokens.js';
 import type { Store } from '../../src/core/store/db.js';
 import { newId } from '../../src/core/store/repos.js';
-import type { Decision, Recommendation, Schedule, UnitProposal, Workspace } from '../../src/core/types.js';
+import { textHashOf } from '../../src/core/market/panelRounds.js';
+import type { Decision, PersonaFeedback, Recommendation, Schedule, UnitProposal, Workspace } from '../../src/core/types.js';
 import { createWorkspace } from '../../src/core/workspace/tree.js';
 import { researchSetup, tick } from '../core/helpers/research.js';
 
@@ -405,6 +406,72 @@ describe('competitors & hypotheses', () => {
     expect((await t.json('GET', `/api/workspaces/${t.ws.id}/hypotheses`)).body).toHaveLength(1);
     const q = await t.json('GET', `/api/workspaces/${t.ws.id}/review-queue`);
     expect(q.body.find((i: { targetType: string }) => i.targetType === 'competitor')).toMatchObject({ targetId: 'cmp_1' });
+  });
+});
+
+describe('the persona panel of a recommendation', () => {
+  const reaction = (personaId: string, adoption: number, extra: Partial<PersonaFeedback> = {}): PersonaFeedback => ({
+    personaId, scores: { appeal: 4, adoption, willingnessToPay: 2, friction: 4 }, concerns: ['the price'], reasoning: 'r', wouldChangeMind: 'w', simulated: true, ...extra,
+  });
+  const persona = (store: Store, workspaceId: string, id: string) =>
+    store.personas.insert({ id, workspaceId, slug: id.replace('_', '-'), segment: id, profile: {}, agentMdPath: '', version: 1, status: 'verified' });
+
+  it('without a personaPanel block a recommendation is served as before, with no panel', async () => {
+    const t = setup();
+    addRec(t.store, t.ws.id, { personaFeedback: [reaction('per_a', 1), reaction('per_b', 5)] });
+    const r = await t.json('GET', `/api/workspaces/${t.ws.id}/recommendations`);
+    expect(r.status).toBe(200);
+    expect('panel' in r.body[0]).toBe(false);
+    // Served unreshaped: the stored feedback, as before the panel existed.
+    expect(r.body[0].personaFeedback).toEqual([reaction('per_a', 1), reaction('per_b', 5)]);
+  });
+
+  it('with the block: the range where personas disagree, earlier rounds, the baseline, who was unavailable and whose rounds are used up', async () => {
+    const t = setup();
+    t.config.personaPanel = { rounds: 2 };
+    for (const id of ['per_a', 'per_b', 'per_c', 'per_d']) persona(t.store, t.ws.id, id);
+    const text = { title: 'Cut onboarding steps', summary: 'Now with a pilot' };
+    const now = textHashOf(text);
+    const seat = { provider: 'claude', model: 'sonnet' } as const;
+    const rec = addRec(t.store, t.ws.id, {
+      ...text,
+      personaFeedback: [
+        reaction('per_a', 1, { round: 2, textHash: now, seat, sameAsBaseline: false }),
+        reaction('per_b', 4, { round: 1, textHash: now, seat, sameAsBaseline: false }),
+        // Says what the general reader says: its adoption of 5 is not in the range.
+        reaction('per_c', 5, { round: 1, textHash: now, seat, sameAsBaseline: true }),
+        // Read an earlier text twice: its two rounds are used up.
+        reaction('per_d', 2, { round: 2, textHash: 'earlier', seat, sameAsBaseline: false }),
+      ],
+    });
+    const general = { scores: { appeal: 3, adoption: 3, willingnessToPay: 3, friction: 3 }, concerns: ['no price'], reasoning: 'g', wouldChangeMind: 'w', simulated: true as const, round: 1, textHash: now, seat };
+    t.store.personaPanelReads.insert({ id: 'ppr_1', workspaceId: t.ws.id, recommendationId: rec.id, kind: 'persona', personaId: 'per_a', round: 1, textHash: 'earlier', reaction: reaction('per_a', 3, { round: 1, textHash: 'earlier' }), createdAt: 'now' });
+    t.store.personaPanelReads.insert({ id: 'ppr_2', workspaceId: t.ws.id, recommendationId: rec.id, kind: 'baseline', round: 1, textHash: now, agentRunId: 'arun_b', reaction: general, createdAt: 'now' });
+    // The last panel run could not get a reaction from a persona that has none yet.
+    persona(t.store, t.ws.id, 'per_e');
+    t.store.decisions.insert({
+      id: newId('dec'), workspaceId: t.ws.id, agentRunId: 'persona_panel', role: 'persona', model: { provider: 'opencode', model: 'big-pickle' }, promptVersion: 'n/a', kind: 'decision',
+      payload: { tool: 'harness', event: 'persona_unavailable', recommendation: rec.id, persona: 'per_e', slug: 'per-e', round: 1, textHash: now, seat: { index: 1, provider: 'opencode', model: 'big-pickle' }, reason: "provider 'opencode' is not enabled" },
+      refs: [], createdAt: new Date().toISOString(),
+    });
+
+    const r = await t.json('GET', `/api/workspaces/${t.ws.id}/recommendations`);
+    expect(r.status).toBe(200);
+    expect(r.body).toHaveLength(1);
+    expect(r.body[0].personaFeedback).toEqual(rec.personaFeedback);
+    expect(r.body[0].panel).toEqual({
+      simulated: true,
+      disagreement: [{ scale: 'adoption', min: 1, max: 4 }],
+      leftOut: 1,
+      earlierRounds: [{ personaId: 'per_a', round: 1, reaction: reaction('per_a', 3, { round: 1, textHash: 'earlier' }) }],
+      baseline: { current: true, reaction: general, earlier: [] },
+      unavailable: [{ personaId: 'per_e', round: 1, seat: { index: 1, provider: 'opencode', model: 'big-pickle' }, reason: "provider 'opencode' is not enabled" }],
+      limitReached: [{ personaId: 'per_d', round: 2 }],
+    });
+    // Another workspace is served nothing of it, and an unknown one answers 404 like the neighbouring routes.
+    const other = createWorkspace(t.store, { name: 'Other', sector: 'saas' });
+    expect((await t.json('GET', `/api/workspaces/${other.id}/recommendations`)).body).toEqual([]);
+    expect((await t.json('GET', '/api/workspaces/ws_nope/recommendations')).status).toBe(404);
   });
 });
 

@@ -551,6 +551,30 @@ export const toolInputSchemas = {
     concerns: z.array(z.string()),
     reasoning: z.string().min(1),
     would_change_mind: z.string(),
+    // Persona panel (design 2026-11-16 §6): asked for, and stored, only when `personaPanel` is configured.
+    other_side: z.string().optional().describe('What would make you dismiss it (if you liked it) or take it up (if you did not)'),
+    instead: z.string().optional().describe('Another route to the same goal, when you would refuse this one (one or two sentences)'),
+    unsure: z.array(z.string()).optional().describe('What you could not judge because your profile does not say'),
+    concern_basis: z
+      .array(z.string())
+      .optional()
+      .describe('For each concern, in the same order, the part of your profile it rests on (a profile field name, or a few words)'),
+    rulings: z
+      .array(
+        z
+          .object({
+            concern: z.number().int().min(1).describe('The number of your earlier concern, as listed in your prompt'),
+            ruling: z.enum(['resolved', 'stands']),
+            reason: z.string().optional().describe('Required with `stands`: what in the changed recommendation still causes it. Optional with `resolved`'),
+          })
+          // The round prompt asks for a reason with `stands` only: `resolved` is taken without one.
+          .refine((r) => r.ruling !== 'stands' || !!r.reason?.trim(), {
+            message: 'a concern that stands needs a reason: what in the recommendation as it stands now still causes it',
+            path: ['reason'],
+          }),
+      )
+      .optional()
+      .describe('From round 2 only: your ruling on each of your own earlier concerns listed in your prompt'),
   }),
   // Flow ranking (design 2026-11-14 §10.2, §12.1): one persona's verdicts on pairs of flows of one type.
   submit_flow_verdicts: z.object({

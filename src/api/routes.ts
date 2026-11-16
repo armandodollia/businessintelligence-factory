@@ -61,6 +61,7 @@ import { mountStakeholderRoutes } from './stakeholderRoutes.js'; // stakeholder 
 import { mountUserPersonaRoutes } from './userPersonaRoutes.js'; // user persona
 import { mountCouncilRoutes } from './councilRoutes.js'; // review council
 import { councilReviewedTaskIds, withCouncilMember } from '../core/council/store.js'; // review council
+import { panelViews } from '../core/market/panelView.js'; // persona panel
 
 export type AppDeps = {
   store: Store;
@@ -467,11 +468,16 @@ export function createApp(deps: AppDeps): Hono {
   /**
    * Recommendations by priority, with review `status` and `lastReview` of the task that saved them
    * (all statuses: the web app hides superseded and failed ones and flags unverified ones).
+   * Persona panel (design 2026-11-16 §8): with `personaPanel` configured, or earlier rounds or baselines
+   * stored, each also has `panel` (`panelViews`): where the personas disagree as a range, earlier rounds,
+   * the baseline, unavailable personas and used-up rounds. Without either there is no `panel`.
    */
   app.get('/api/workspaces/:id/recommendations', (c) => {
     const id = workspace(c.req.param('id')).id;
     const recs = store.recommendations.list({ workspaceId: id }).sort((a, b) => b.priority - a.priority);
-    return c.json(withLastReview(recs, lastReviewsByTask(store, [id])));
+    const panels = panelViews(store, config, id, recs);
+    const served = recs.map((r) => (panels.has(r.id) ? { ...r, panel: panels.get(r.id)! } : r));
+    return c.json(withLastReview(served, lastReviewsByTask(store, [id])));
   });
   app.get('/api/workspaces/:id/decisions', (c) => {
     const id = workspace(c.req.param('id')).id;

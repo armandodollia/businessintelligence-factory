@@ -347,6 +347,27 @@ export interface EscalationOptions {
   choice?: number;
 }
 
+/**
+ * The fields of a persona's reaction that hold its own words, which are every free text of it that the
+ * page shows (what `aboutOthers` can point into). `rulings`: the `reason` of a ruling.
+ */
+export type PersonaFeedbackTextField =
+  | 'concerns' | 'concernBasis' | 'reasoning' | 'wouldChangeMind' | 'otherSide' | 'instead' | 'unsure' | 'rulings' | 'earlierConcerns' | 'earlierConcernBasis';
+
+/**
+ * A passage of a persona's answer that makes a claim about other people in numbers (persona panel design
+ * §6): flagged, never deleted. `index`: the item of a list field (for `rulings`, the place of the ruling
+ * in `rulings`); `text`: the passage, as it stands in the field; `reason`: which rule it hit.
+ */
+export type AboutOthersFlag = { field: PersonaFeedbackTextField; index?: number; text: string; reason: string };
+
+/**
+ * A persona's ruling on one of its own earlier concerns (`concern`: its number as listed to it, from 1).
+ * `reason`: with `stands`, what in the changed text still causes the concern (the tool requires it);
+ * with `resolved` it may be left out.
+ */
+export type PersonaRuling = { concern: number; ruling: 'resolved' | 'stands'; reason?: string };
+
 export interface PersonaFeedback {
   personaId: string;
   scores: { appeal: number; adoption: number; willingnessToPay: number; friction: number };
@@ -355,6 +376,81 @@ export interface PersonaFeedback {
   wouldChangeMind: string;
   /** Persona feedback is always simulated. */
   simulated: true;
+  // --- persona panel (design 2026-11-16-persona-panel-design.md §9): set only when `personaPanel` is configured ---
+  /** Which read of the recommendation by this persona this is. Unset: round 1. */
+  round?: number;
+  /** The seat the persona ran on. */
+  seat?: ModelRef & { effort?: string };
+  /** Hash of the recommendation's title and summary as read. Unset: read before rounds were recorded. */
+  textHash?: string;
+  /**
+   * The title and summary this read was made on (what `textHash` is the hash of). The reader's next
+   * round is shown it beside the text as it then stands, so that it can see what changed. Unset: read
+   * before the panel kept the text of a read.
+   */
+  textRead?: { title: string; summary: string };
+  /** What would make the persona dismiss it (if it liked it) or take it up (if it did not). */
+  otherSide?: string;
+  /** Another route to the same goal, when the persona would refuse this one. */
+  instead?: string;
+  /** What it could not judge because its profile does not say. */
+  unsure?: string[];
+  /** For each concern, in order, the part of the profile it rests on; '' where the persona gave none. */
+  concernBasis?: string[];
+  /** Indexes into `concerns` of the concerns without a basis. */
+  ungrounded?: number[];
+  /** Passages that make a claim about other people in numbers. */
+  aboutOthers?: AboutOthersFlag[];
+  /** From round 2: its rulings on its own earlier concerns (`earlierConcerns`), as sent. */
+  rulings?: PersonaRuling[];
+  /**
+   * From round 2: its own earlier concerns still open, as listed to it for a ruling, in that order (a
+   * ruling's `concern` is the place in this list, from 1). Unset when none was listed.
+   */
+  earlierConcerns?: string[];
+  /**
+   * From round 2: for each of `earlierConcerns`, in order, the part of the profile it rests on, as given
+   * when the concern was raised and carried with it since: '' where the reader gave none (the concern is
+   * ungrounded), `null` where it was raised before the panel asked for a basis (nothing is recorded of
+   * it). Set with `earlierConcerns`; a reaction stored before concerns were carried with it has none.
+   */
+  earlierConcernBasis?: Array<string | null>;
+  /** From round 2: the numbers of the listed concerns it gave no ruling on. Set with `earlierConcerns`. */
+  notRuled?: number[];
+  /**
+   * Whether the reaction says what the run with no persona said about the same text (`true`: it adds
+   * nothing beyond a general reader). Unset: there is no baseline of that text to compare it with.
+   */
+  sameAsBaseline?: boolean;
+}
+
+/**
+ * The answer of the run with no persona (persona panel design §5): what a general reader says. A
+ * reaction that belongs to no persona, and is never among `Recommendation.personaFeedback`.
+ */
+export type PanelBaseline = Omit<PersonaFeedback, 'personaId' | 'sameAsBaseline'>;
+
+/**
+ * A read of a recommendation by the persona panel that is kept apart from
+ * `Recommendation.personaFeedback` (migration 30; ids `ppr_`): a baseline (every one is kept; the
+ * latest is the baseline of the text it read), or an earlier round of a persona, stored when a later
+ * round replaced it as the persona's current reaction. Always simulated.
+ */
+export interface PanelRead {
+  id: string;
+  workspaceId: string;
+  recommendationId: string;
+  kind: 'baseline' | 'persona';
+  /** `persona` only. */
+  personaId?: string;
+  /** Which read of the recommendation by this reader it is (a reaction stored before rounds were recorded: 1). */
+  round: number;
+  /** Hash of the text read (`textHashOf`). Unset: a reaction stored before rounds were recorded. */
+  textHash?: string;
+  /** `baseline` only: the run that gave the answer. */
+  agentRunId?: string;
+  reaction: PersonaFeedback | PanelBaseline;
+  createdAt: string;
 }
 
 export interface Recommendation {

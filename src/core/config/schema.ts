@@ -498,37 +498,70 @@ export type Lens = (typeof LENSES)[number];
  */
 export const EFFORT_PROVIDERS: ReadonlySet<ProviderId> = new Set(PROVIDER_IDS);
 
-/** Why a member of `provider` cannot have `effort` (`undefined`: it can). Never ignored silently (design §4). */
-export function effortProblem(provider: ProviderId, supported: ReadonlySet<ProviderId> = EFFORT_PROVIDERS): string | undefined {
-  return supported.has(provider) ? undefined : `provider '${provider}' has no reasoning-effort setting: remove effort from this member`;
+/**
+ * Why a member (or, for the persona panel, a seat: `what`) of `provider` cannot have `effort` (`undefined`:
+ * it can). Never ignored silently (design §4).
+ */
+export function effortProblem(
+  provider: ProviderId,
+  supported: ReadonlySet<ProviderId> = EFFORT_PROVIDERS,
+  what: 'member' | 'seat' = 'member',
+): string | undefined {
+  return supported.has(provider) ? undefined : `provider '${provider}' has no reasoning-effort setting: remove effort from this ${what}`;
+}
+
+/**
+ * Why a run on `ref` cannot be started with these providers (its provider is disabled, or its model is not
+ * one of the provider's `models`); `undefined` when it can. The one check behind the role models (an error
+ * at load), the council's members and the persona panel's seats (a start-up warning, and unavailable at run time).
+ */
+export function modelUnavailable(
+  providers: Record<ProviderId, { enabled: boolean; models: string[] }>,
+  ref: { provider: ProviderId; model: string },
+): string | undefined {
+  const provider = providers[ref.provider];
+  if (!provider.enabled) return `provider '${ref.provider}' is not enabled`;
+  if (!provider.models.includes(ref.model)) return `model '${ref.model}' is not in providers.${ref.provider}.models`;
+  return undefined;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-export const councilMemberSchema = z.preprocess(
-  // `cli` is another spelling of `provider`; the parsed member always has `provider`.
-  (raw, ctx) => {
+/**
+ * Who runs on which CLI (a council member, a persona panel seat): `cli` is another spelling of `provider`,
+ * and the parsed object always has `provider`. `shape` is the strict object that follows.
+ */
+function withCliAsProvider<T extends z.ZodType>(shape: T) {
+  return z.preprocess((raw, ctx) => {
     if (!isRecord(raw) || !('cli' in raw)) return raw;
     const { cli, ...rest } = raw;
     if (!('provider' in rest)) return { ...rest, provider: cli };
     ctx.addIssue({ code: 'custom', path: ['cli'], message: 'give provider or cli, not both' });
     return rest;
-  },
+  }, shape);
+}
+
+/** One of BIF's CLIs, with errors that list the supported ones. */
+const cliProviderSchema = z.enum(PROVIDER_IDS, {
+  error: (issue) =>
+    issue.input === undefined
+      ? `required: one of ${PROVIDER_IDS.join(', ')}`
+      : `unsupported provider '${String(issue.input)}': supported are ${PROVIDER_IDS.join(', ')}`,
+});
+
+/** Reasoning effort, in the CLI's own words (e.g. `high`): passed to the CLI unchanged. */
+const effortSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'must be a level name of letters, digits, - and _ (e.g. high)')
+  .optional();
+
+export const councilMemberSchema = withCliAsProvider(
   z.strictObject({
     /** Unique in the council; stages seat members by it, and round records show it. */
     name: z.string().trim().min(1),
-    provider: z.enum(PROVIDER_IDS, {
-      error: (issue) =>
-        issue.input === undefined
-          ? `required: one of ${PROVIDER_IDS.join(', ')}`
-          : `unsupported provider '${String(issue.input)}': supported are ${PROVIDER_IDS.join(', ')}`,
-    }),
+    provider: cliProviderSchema,
     model: z.string().min(1),
-    /** Reasoning effort, in the CLI's own words (e.g. `high`): passed to the CLI unchanged. */
-    effort: z
-      .string()
-      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'must be a level name of letters, digits, - and _ (e.g. high)')
-      .optional(),
+    effort: effortSchema,
     lens: z.enum(LENSES),
     /** Default true. A non-blocking member's score is never counted and its issues alone uphold nothing. */
     blocking: z.boolean().optional(),
@@ -559,6 +592,37 @@ export const councilConfigSchema = z.strictObject({
 /** Defaults of `config.council` (design §4). `blocking` of a member defaults to true (`councilFor`). */
 export const COUNCIL_DEFAULTS = { rounds: 3, passScore: 9, blockOn: 'any', onUnavailable: 'fail' } as const;
 // --- end review council config -------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Persona panel (design 2026-11-16-persona-panel-design.md §3). Optional: with no `personaPanel` the
+// panel runs as before (every persona on `roles.persona`). Read it through `panelSettings`
+// (src/core/market/panelSettings.ts), which applies `PERSONA_PANEL_DEFAULTS`.
+
+/** A seat of the panel: the CLI, model and effort the personas on it run with. */
+export const panelSeatSchema = withCliAsProvider(
+  z.strictObject({
+    provider: cliProviderSchema,
+    model: z.string().min(1),
+    effort: effortSchema,
+  }),
+);
+
+export const personaPanelConfigSchema = z.strictObject({
+  /** Most reads of one recommendation by one persona (default 3). */
+  rounds: z.number().int().min(1).optional(),
+  /** One run with no persona per recommendation (default true). */
+  baseline: z.boolean().optional(),
+  /** A persona that cannot run: the panel goes on without it (`report`, default) or the panel phase ends as failed (`fail`). */
+  onUnavailable: z.enum(['fail', 'report']).optional(),
+  /** Personas sorted by slug take the seats in turn. Omitted: one seat with `roles.persona`. */
+  seats: z.array(panelSeatSchema).min(1).optional(),
+  /** Pins by persona slug: `seat` is an index into `seats`. A slug no persona has is ignored. */
+  personas: z.record(z.string().min(1), z.strictObject({ seat: z.number().int().min(0) })).optional(),
+});
+
+/** Defaults of `config.personaPanel` when the block is present (`seats` has none here: one seat with `roles.persona`). */
+export const PERSONA_PANEL_DEFAULTS = { rounds: 3, baseline: true, onUnavailable: 'report' } as const;
+// --- end persona panel config --------------------------------------------------------------------
 
 export const bifConfigSchema = z
   .strictObject({
@@ -648,21 +712,14 @@ export const bifConfigSchema = z
     userPersona: userPersonaConfigSchema.optional(),
     /** Review council: members, rules and the task types it reviews (opt-in per stage). */
     council: councilConfigSchema.optional(),
+    /** Persona panel: seats, baseline, rounds and what an unavailable persona does (opt-in). */
+    personaPanel: personaPanelConfigSchema.optional(),
   })
   .superRefine((cfg, ctx) => {
     // Every role model must be an allowed model of an enabled provider.
     const check = (ref: ModelRef | undefined, path: (string | number)[]) => {
-      if (!ref) return;
-      const p = cfg.providers[ref.provider];
-      if (!p.enabled) {
-        ctx.addIssue({ code: 'custom', path, message: `provider '${ref.provider}' is not enabled` });
-      } else if (!p.models.includes(ref.model)) {
-        ctx.addIssue({
-          code: 'custom',
-          path,
-          message: `model '${ref.model}' is not in providers.${ref.provider}.models`,
-        });
-      }
+      const message = ref ? modelUnavailable(cfg.providers, ref) : undefined;
+      if (message) ctx.addIssue({ code: 'custom', path, message });
     };
     for (const role of ['orchestrator', 'interviewer', 'reviewer', 'synthesizer', 'persona'] as const) {
       check(cfg.roles[role], ['roles', role]);
@@ -706,6 +763,21 @@ export const bifConfigSchema = z
         if (known && !seated.some((m) => m.blocking ?? true)) {
           ctx.addIssue({ code: 'custom', path, message: 'a stage must seat at least one blocking member' });
         }
+      }
+    }
+    // Persona panel (design §3). As for the council, a seat whose provider is disabled or whose model is
+    // not configured is NOT an error (`configWarnings` names it); a pin to a seat that does not exist is.
+    if (cfg.personaPanel) {
+      const seats = cfg.personaPanel.seats;
+      seats?.forEach((seat, i) => {
+        const problem = seat.effort === undefined ? undefined : effortProblem(seat.provider, EFFORT_PROVIDERS, 'seat');
+        if (problem) ctx.addIssue({ code: 'custom', path: ['personaPanel', 'seats', i, 'effort'], message: problem });
+      });
+      const count = seats?.length ?? 1; // no `seats`: the one seat with roles.persona
+      for (const [slug, pin] of Object.entries(cfg.personaPanel.personas ?? {})) {
+        if (pin.seat < count) continue;
+        const have = count === 1 ? 'the only seat is 0' : `seats: 0 to ${count - 1}`;
+        ctx.addIssue({ code: 'custom', path: ['personaPanel', 'personas', slug, 'seat'], message: `seat ${pin.seat} does not exist (${have})` });
       }
     }
     // Knowledge store KS-0: chunk target must not exceed the chunk cap (after defaults).

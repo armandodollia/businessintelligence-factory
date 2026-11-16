@@ -5,7 +5,7 @@ import type { ToolInput, ToolName } from '../harness/tools/registry.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { RunContext } from '../harness/tokens.js';
-import type { Criteria, Decision, Recommendation } from '../types.js';
+import type { Criteria, Decision, PersonaFeedback, Recommendation } from '../types.js';
 import { sameTree } from '../workspace/tree.js';
 import { CRITERIA, INVERTED_KEYS, RECOMMENDATION_KEYS, pctFraction, toNumber } from './criteria.js';
 
@@ -97,9 +97,22 @@ export function normalizeCriterion(key: string, value: unknown): number | undefi
   return INVERTED_KEYS.has(key) ? 6 - v : v;
 }
 
-/** Mean persona score on 1–5: per persona mean(appeal, adoption, willingnessToPay, 6 − friction), then averaged. */
+/**
+ * Whether a persona's reaction is counted where reactions are counted (`personaScore`, the panel
+ * summary): not when it is marked as saying what the run with no persona said (`sameAsBaseline`,
+ * persona panel design §5: it adds nothing beyond a general reader, so it is no agreement). Only a
+ * configured persona panel sets the mark; without one every reaction is counted.
+ */
+export function countedReaction(f: Pick<PersonaFeedback, 'sameAsBaseline'>): boolean {
+  return f.sameAsBaseline !== true;
+}
+
+/**
+ * Mean persona score on 1–5: per persona mean(appeal, adoption, willingnessToPay, 6 − friction), then
+ * averaged over the reactions that are counted (`countedReaction`). Undefined when none is.
+ */
 export function personaScore(rec: Pick<Recommendation, 'personaFeedback'>): number | undefined {
-  const per = (rec.personaFeedback ?? []).map((f) => {
+  const per = (rec.personaFeedback ?? []).filter(countedReaction).map((f) => {
     const s = f.scores;
     return (clamp(s.appeal, 1, 5) + clamp(s.adoption, 1, 5) + clamp(s.willingnessToPay, 1, 5) + (6 - clamp(s.friction, 1, 5))) / 4;
   });
