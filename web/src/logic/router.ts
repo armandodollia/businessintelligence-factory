@@ -1,4 +1,4 @@
-/** Hash router: `#/`, `#/settings`, `#/w/<workspaceId>/<page>`. */
+/** Hash router: `#/`, `#/settings`, `#/feedback`, `#/w/<workspaceId>/<page>`. */
 import { useEffect, useState } from 'react';
 
 export const WORKSPACE_PAGES = [
@@ -27,6 +27,7 @@ export type WorkspacePage = (typeof WORKSPACE_PAGES)[number]['page'];
 export type Route =
   | { name: 'workspaces' }
   | { name: 'settings' }
+  | { name: 'feedback' }
   | { name: 'workspace'; wsId: string; page: WorkspacePage };
 
 const PAGES = new Set<string>(WORKSPACE_PAGES.map((p) => p.page));
@@ -34,6 +35,7 @@ const PAGES = new Set<string>(WORKSPACE_PAGES.map((p) => p.page));
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'settings') return { name: 'settings' };
+  if (parts[0] === 'feedback') return { name: 'feedback' };
   if (parts[0] === 'w' && parts[1]) {
     const page = parts[2] && PAGES.has(parts[2]) ? (parts[2] as WorkspacePage) : 'map';
     return { name: 'workspace', wsId: parts[1], page };
@@ -47,6 +49,8 @@ export function href(route: Route): string {
       return '#/';
     case 'settings':
       return '#/settings';
+    case 'feedback':
+      return '#/feedback';
     case 'workspace':
       return `#/w/${encodeURIComponent(route.wsId)}/${route.page}`;
   }

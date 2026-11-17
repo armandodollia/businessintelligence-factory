@@ -96,11 +96,17 @@ export const sharedBrowserSchema = z.strictObject({
   env: z.record(z.string(), z.string()).optional(),
 });
 
+/**
+ * The pinned version of the research browser (`@playwright/mcp`). The same version is a dependency in
+ * `package.json`, so the packaged app ships exactly what a checkout downloads with `npx`.
+ */
+export const PLAYWRIGHT_MCP_VERSION = '0.0.85';
+
 /** Pinned Playwright MCP shared on one persistent research profile (`--shared-browser-context`). */
 export const PLAYWRIGHT_SHARED_BROWSER: z.output<typeof sharedBrowserSchema> = {
   command: 'npx',
   args: [
-    '-y', '@playwright/mcp@0.0.85',
+    '-y', `@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}`,
     '--host', '127.0.0.1', '--port', '{{port}}',
     '--shared-browser-context',
     '--user-data-dir', '{{profileDir}}',

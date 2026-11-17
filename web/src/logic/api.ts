@@ -39,6 +39,7 @@ import type {
 } from './types.js';
 import type { FeedbackEvent, HypothesisCorrection, SymptomHypothesis } from './types.js';
 import type { OutcomeReport } from './types.js';
+import type { StopResearchReport } from './research.js';
 
 export class ApiError extends Error {
   constructor(
@@ -118,6 +119,7 @@ export const api = {
   // research
   startResearch: (id: string, phases?: ResearchPhase[]) =>
     post<ResearchRun | ResearchRun[] | null>(`${ws(id)}/research`, phases ? { phases } : {}),
+  stopResearch: (id: string) => post<StopResearchReport>(`${ws(id)}/research/stop`),
   listRuns: (id: string) => get<ResearchRun[]>(`${ws(id)}/runs`),
   listTasks: (id: string, runId?: string) =>
     get<Task[]>(`${ws(id)}/tasks${runId ? `?runId=${enc(runId)}` : ''}`),
@@ -426,3 +428,34 @@ export const councilApi = {
   /** The configured council with each member's availability; `council: null` when none is configured. */
   getCouncil: () => get<{ council: import('./types.js').CouncilOverview | null }>('/api/council'),
 };
+
+// --- feedback bundle: the preview and the file a tester saves (`src/api/feedbackBundleRoutes.ts`) ---
+type BundleChoices = import('./types.js').BundleChoices;
+export const feedbackBundleApi = {
+  /** What the file would hold; with `section`, also that section's first rows. */
+  preview: (choices: BundleChoices, section?: string) =>
+    post<import('./types.js').BundlePreview>('/api/feedback-bundle/preview', { ...choices, ...(section ? { rows: { section } } : {}) }),
+  /** The file itself and the name the server gives it. Nothing is stored or sent by the server. */
+  download: async (choices: BundleChoices): Promise<{ blob: Blob; fileName: string }> => {
+    const path = '/api/feedback-bundle';
+    const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(choices) });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as { error?: unknown } | null;
+      throw new ApiError(res.status, data?.error ? String(data.error) : `POST ${path} failed (${res.status})`, data);
+    }
+    const fileName = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? 'bif-feedback.json.gz';
+    return { blob: await res.blob(), fileName };
+  },
+};
+// --- end feedback bundle -------------------------------------------------------------------------
+
+// --- setup check and data folder (`src/api/setupRoutes.ts`) ----------------------------------------
+export const setupApi = {
+  /** The setup check as the server keeps it; `refresh` runs it anew. */
+  get: (refresh = false) => get<import('./types.js').SetupInfo>(`/api/setup${refresh ? '?refresh=1' : ''}`),
+  /** Writes the configuration that fits what was found. Refused when one exists, unless `overwrite`. */
+  apply: (overwrite = false) => post<{ config: BifConfig; configExists: boolean }>('/api/setup/apply', overwrite ? { overwrite: true } : {}),
+  /** Opens the server's own data folder in the file manager of the computer it runs on. */
+  openFolder: () => post<{ opened: string }>('/api/setup/open-folder'),
+};
+// --- end setup check -----------------------------------------------------------------------------

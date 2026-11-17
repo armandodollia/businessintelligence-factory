@@ -1,0 +1,3 @@
+# Text files are stored and checked out with LF on every platform: prompts are hashed and the
+# README is parsed by tests, so a CRLF checkout (core.autocrlf on Windows) must not change them.
+* text=auto eol=lf

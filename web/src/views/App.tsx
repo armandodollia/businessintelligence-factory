@@ -16,6 +16,7 @@ import { Personas } from './Personas.js';
 import { Research } from './Research.js';
 import { ReviewQueue } from './ReviewQueue.js';
 import { Schedule } from './Schedule.js';
+import { SendFeedback } from './SendFeedback.js'; // feedback bundle
 import { Settings } from './Settings.js';
 import { Stakeholders } from './Stakeholders.js'; // stakeholder personas
 import { You } from './You.js'; // user persona
@@ -38,11 +39,15 @@ export function App() {
           <a href={href({ name: 'settings' })} className={route.name === 'settings' ? 'current' : ''}>
             Settings
           </a>
+          <a href={href({ name: 'feedback' })} className={route.name === 'feedback' ? 'current' : ''}>
+            Send feedback
+          </a>
         </nav>
       </header>
       <main>
         {route.name === 'workspaces' && <Workspaces />}
         {route.name === 'settings' && <Settings />}
+        {route.name === 'feedback' && <SendFeedback />}
         {route.name === 'workspace' && <WorkspaceShell key={route.wsId} wsId={route.wsId} page={route.page} />}
       </main>
     </div>

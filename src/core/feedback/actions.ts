@@ -1052,7 +1052,7 @@ export function proposeRuleRetirementAsUser(store: Store, ruleId: string, rootWo
 }
 
 /** Human actions that have no record of their own (re-gate, Opus 4); see the `user_action` feedback kind. */
-export const USER_ACTIONS = ['create_workspace', 'interview_message', 'upload', 'research_start', 'schedule_create', 'schedule_update', 'config_change', 'retro_run'] as const;
+export const USER_ACTIONS = ['create_workspace', 'interview_message', 'upload', 'research_start', 'research_stop', 'schedule_create', 'schedule_update', 'config_change', 'retro_run'] as const;
 export type UserAction = (typeof USER_ACTIONS)[number];
 
 /**

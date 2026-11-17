@@ -160,12 +160,17 @@ Then open http://127.0.0.1:4317 in your browser. Sign in to each assistant you e
 `codex`, `opencode`) once in a terminal before starting. The settings file controls which
 assistants and models are used; the Settings page edits the same file.
 
+There is also a packaged app for macOS and Windows that needs none of the commands above. It is in
+beta. See [docs/beta-testers.md](docs/beta-testers.md).
+
 ## Where to read more
 
 - [docs/README.md](docs/README.md): the index of the technical documentation.
 - [docs/architecture.md](docs/architecture.md): how the parts fit together, with diagrams.
 - [docs/setup.md](docs/setup.md): installation, the research browser and running the server.
 - [docs/configuration.md](docs/configuration.md): every setting and its default.
+- [docs/desktop-app.md](docs/desktop-app.md): the packaged app for macOS and Windows.
+- [docs/feedback-bundle.md](docs/feedback-bundle.md): the feedback file a tester can send.
 - [docs/known-limitations.md](docs/known-limitations.md): what does not work yet.
 
 Created in [T3 Code](https://t3.codes).

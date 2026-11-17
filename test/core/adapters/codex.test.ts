@@ -82,7 +82,7 @@ describe('CodexAdapter', () => {
       expect(env).toMatchObject({ CODEX_HOME: home });
       expect(files).toEqual([{ path: join(home, 'config.toml'), content: CODEX_HOME_CONFIG }]);
       expect(CODEX_HOME_CONFIG.split('\n').filter((l) => l.trim() && !l.startsWith('#'))).toEqual([]);
-      expect(links).toEqual([{ path: join(home, 'auth.json'), target: '/users/me/.codex/auth.json' }]);
+      expect(links).toEqual([{ path: join(home, 'auth.json'), target: join('/users/me/.codex', 'auth.json') }]);
       // Without stateDir nothing changes (the CLI's own home is used).
       expect(new CodexAdapter().buildCommand(spec).env).toBeUndefined();
     } finally {

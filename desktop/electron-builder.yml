@@ -1,0 +1,81 @@
+# The installers of the desktop app (design 2026-11-16-desktop-app-and-feedback-bundle-design.md §4.5).
+# Used by `npm run dist:mac` and `npm run dist:win` through `desktop/build.ts`, which builds what goes
+# in first and decides about signing. Paths are relative to the checkout.
+#
+# What is in the app:
+#   - dist/shell   the shell (one bundled file and its package.json), packed into app.asar
+#   - dist/server  the server with its resources and the research browser, as plain files in the
+#                  app's resources folder (the server finds its resources next to itself)
+# The Electron runtime is the version pinned in package.json; the server runs on it as Node.
+
+appId: app.bif.desktop
+productName: Business Intelligence Factory
+copyright: Business Intelligence Factory
+
+directories:
+  app: dist/shell
+  output: dist/installers
+  # Nothing is in it: the icon is named for each platform below.
+  buildResources: desktop/resources
+
+asar: true
+# The shell is two files and has no packages of its own. Without the exclusion the builder, finding
+# none in dist/shell, packs the packages of the whole project into the app; the server has its own,
+# bundled. desktop/build.ts checks after the build that the app archive holds the shell alone.
+files:
+  - main.js
+  - package.json
+  - "!node_modules"
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
+extraResources:
+  - from: dist/server
+    to: server
+  # The research browser. A folder named node_modules at the top of a copied folder is always left
+  # out by the builder, so it is copied by name. desktop/build.ts checks after the build that every
+  # file of dist/server is in the app.
+  - from: dist/server/node_modules
+    to: server/node_modules
+
+# Nothing is published from a build: the hosted workflow attaches the files to a draft release itself.
+publish: null
+
+# The architectures are not named here: desktop/build.ts passes them as arguments (Apple silicon and
+# Intel on macOS, x64 on Windows, or the one asked for, as in `npm run dist:mac -- --arm64`). A list
+# in this file would win over the arguments.
+#
+# The icon is one PNG of 1024 by 1024 pixels, made once from assets/icon.svg (on macOS:
+# `qlmanage -t -s 1024 -o <folder> assets/icon.svg`). The builder makes the .icns and the .ico from it.
+
+mac:
+  category: public.app-category.business
+  icon: assets/icon.png
+  target:
+    - target: dmg
+  artifactName: Business-Intelligence-Factory-${version}-mac-${arch}.${ext}
+  # Signing is decided by desktop/build.ts: an ad-hoc signature unless a certificate is given in the
+  # environment (CSC_LINK, or CSC_NAME), then a Developer ID signature with the hardened runtime, and
+  # notarisation when the Apple account variables are present as well.
+
+dmg:
+  sign: false
+
+win:
+  icon: assets/icon.png
+  target:
+    - target: nsis
+  # Not signed unless a certificate is given in the environment (WIN_CSC_LINK, or CSC_LINK).
+
+nsis:
+  # One step for a person who is not a developer: installs for the current user, no administrator
+  # rights, then starts the app. Removing the app keeps the data (the application folder).
+  oneClick: true
+  perMachine: false
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  # Removing the app also removes the copy of the installer that electron-builder keeps for its
+  # auto-updater (the app has none), which its own uninstaller leaves behind.
+  include: desktop/installer.nsh
+  artifactName: Business-Intelligence-Factory-${version}-windows-${arch}-setup.${ext}

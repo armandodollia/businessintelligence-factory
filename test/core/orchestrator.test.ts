@@ -22,6 +22,17 @@ import { newId } from '../../src/core/store/repos.js';
 import type { Phase, ResearchRun, Task } from '../../src/core/types.js';
 import { researchSetup, review, submitWork, tick, type SetupOptions } from './helpers/research.js';
 
+const isWin = process.platform === 'win32';
+/** A process that sleeps 30 s: `sleep` in its own process group on POSIX, node on Windows. */
+const sleeper = () =>
+  isWin
+    ? spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore', windowsHide: true })
+    : spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+/** How a killed process ended: SIGKILL on POSIX; `taskkill /F` ends it with exit code 1 on Windows. */
+const KILLED = isWin ? 'exit 1' : 'SIGKILL';
+const endOf = (child: ReturnType<typeof spawn>) =>
+  new Promise<string | null>((r) => child.on('exit', (code, sig) => r(sig ?? (isWin ? `exit ${code}` : null))));
+
 const opened: Store[] = [];
 afterEach(() => {
   for (const s of opened.splice(0)) s.close();
@@ -328,8 +339,8 @@ describe('resumeInterrupted', () => {
     const s1 = setup({ dir });
     const rr = seedPhase(s1.store);
     const task = seedTask(s1.store, rr);
-    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
-    const exited = new Promise<NodeJS.Signals | null>((r) => child.on('exit', (_c, sig) => r(sig)));
+    const child = sleeper();
+    const exited = endOf(child);
     const ctx: RunContext = {
       agentRunId: newId('arun'), workspaceId: 'ws_a', taskId: task.id, role: 'worker',
       model: { provider: 'claude', model: 'sonnet' }, promptVersion: 'pv',
@@ -354,7 +365,7 @@ describe('resumeInterrupted', () => {
     expect(report.continuedRuns).toEqual([rr.id]);
     expect(s2.store.agentRuns.get(ctx.agentRunId)).toMatchObject({ status: 'failed' });
     expect(s2.tokens.resolve(token)).toBeNull();
-    expect(await exited).toBe('SIGKILL');
+    expect(await exited).toBe(KILLED);
 
     await tick(50);
     expect(s2.store.tasks.get(task.id)!.status).toBe('waiting_user');
@@ -370,17 +381,17 @@ describe('resumeInterrupted', () => {
   });
 
   it('killOrphanGroup verifies the process start time before killing', async () => {
-    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
-    const exited = new Promise<NodeJS.Signals | null>((r) => child.on('exit', (_c, sig) => r(sig)));
+    const child = sleeper();
+    const exited = endOf(child);
     const started = processStartTime(child.pid!)!;
-    expect(Number.isFinite(Date.parse(started))).toBe(true); // LC_ALL=C format
-    expect(started).toMatch(/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4}$/);
+    expect(Number.isFinite(Date.parse(started))).toBe(true); // LC_ALL=C format; Windows: ISO-8601 UTC
+    expect(started).toMatch(isWin ? /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z$/ : /^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4}$/);
     expect(killOrphanGroup(child.pid!, 'Mon Jan  1 00:00:00 2001')).toBe(false); // pid reused / before boot
     expect(killOrphanGroup(child.pid!, undefined)).toBe(false); // unverifiable
     expect(killOrphanGroup(child.pid!, started.replace(/\d\d:\d\d:\d\d/, '00:00:00'))).toBe(false); // other process
     expect(child.exitCode).toBeNull();
     expect(killOrphanGroup(child.pid!, started)).toBe(true);
-    expect(await exited).toBe('SIGKILL');
+    expect(await exited).toBe(KILLED);
   });
 
   it('a round interrupted mid-run is not started again on resume', async () => {

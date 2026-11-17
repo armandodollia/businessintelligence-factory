@@ -452,6 +452,7 @@ export function useResearch(wsId: string | null | undefined) {
   );
   const [liveEvents, setLiveEvents] = useState<BusEvent[]>([]);
   const action = useAction();
+  const stopAction = useAction();
 
   useEffect(() => {
     setLiveEvents([]);
@@ -491,6 +492,13 @@ export function useResearch(wsId: string | null | undefined) {
     [wsId, action.run, reloadRuns],
   );
 
+  /** Stops the research of this business (its running agents too), then reads the runs and tasks again. */
+  const stop = useCallback(async () => {
+    if (!wsId) return;
+    await stopAction.run(() => api.stopResearch(wsId));
+    await Promise.all([reloadRuns(), reloadTasks()]);
+  }, [wsId, stopAction.run, reloadRuns, reloadTasks]);
+
   return {
     runs: runs.data ?? [],
     tasks: tasks.data ?? [],
@@ -498,10 +506,12 @@ export function useResearch(wsId: string | null | undefined) {
     selectRun: setSelected,
     start,
     starting: action.busy,
+    stop,
+    stopping: stopAction.busy,
     liveEvents,
     clearLiveEvents: () => setLiveEvents([]),
     loading: runs.loading || tasks.loading,
-    error: action.error ?? runs.error ?? tasks.error,
+    error: action.error ?? stopAction.error ?? runs.error ?? tasks.error,
     reload: async () => {
       await Promise.all([reloadRuns(), reloadTasks()]);
     },
@@ -1322,7 +1332,7 @@ export function useConfig() {
     },
     [action.run, res.mutate],
   );
-  return { config: res.data ?? null, save, saving: action.busy, savedAt, loading: res.loading, error: res.error ?? action.error };
+  return { config: res.data ?? null, save, saving: action.busy, savedAt, loading: res.loading, error: res.error ?? action.error, reload: res.reload };
 }
 
 /** JSON text editor over `useConfig` for the Settings page. */

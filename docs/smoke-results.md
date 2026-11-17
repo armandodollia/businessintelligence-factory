@@ -490,6 +490,41 @@ Codex or OpenCode, an unavailable seat on a real CLI, flow verdict runs on seats
 The branch was reviewed with the council skill: correctness (Claude fable), acceptance (Codex CLI,
 gpt-6-astra, read-only), test-value (Claude sonnet). Round 1: 9, 8, 8. Round 2: 9, 9, 9.
 
+## Desktop app and feedback bundle (2026-11-16)
+
+Real runs through the packaged app, each with a throwaway application folder and a short PATH, as a
+person starting it from Finder or the Start menu would get.
+
+| Where | What | Result |
+|---|---|---|
+| macOS, Apple silicon | App built (`npm run dist:mac`), launched, second launch, quit by the menu's event, by SIGTERM and by killing the shell | Passed; no process left; the real application folder was never written |
+| macOS, Apple silicon | One interview turn through the app, every role on Claude haiku | `done` in 9 to 11 s, about $0.004 |
+| macOS, Apple silicon | Feedback bundle saved from that data and read with `npm run feedback:report` | Read back; no business name, user name or path in the file |
+| Windows 11 x64 | Test suite and the suite on the app's runtime | Passed (2,647 passed, 10 skipped at the time) |
+| Windows 11 x64 | Installer built (`npm run dist:win`) without Developer Mode or elevation, installed quietly, started, removed | Passed; the uninstall removes the app and the installer copy it kept |
+| Windows 11 x64 | Setup check with the PATH read from the registry | Found Claude Code and Codex, signed in |
+| Windows 11 x64 | One interview turn on Claude haiku; a second one interrupted by quitting | First `done` in 6.9 s; the interrupted agent's process tree was gone after the quit and the next start cleaned up |
+| Windows 11 x64 | Feedback bundle saved and read | Read back; no business name, user name or path in the file |
+
+Earlier on the same Windows machine, before the app existed: `worker claude` and `browser claude`
+smoke modes passed.
+
+Not tried: a signed build; the Intel macOS build (built, not launched); the app's Start-menu shortcut
+and the installer's normal (not quiet) run; research phases, Codex or OpenCode through the app; the
+hosted build workflow.
+
+The branch was reviewed with the council skill: correctness (Claude fable), acceptance (Codex CLI,
+gpt-6-astra, read-only), privacy (Claude opus), test-value (Claude sonnet).
+
+| Member | Round 1 | Round 2 | Round 3 |
+|---|---|---|---|
+| correctness | 8/10 | 7/10 | 9/10 |
+| acceptance | 8/10 | 9/10 | not seated |
+| privacy | 7/10 | 9/10 | 9/10 |
+| test-value | 8/10 | 9/10 | not seated |
+
+Round 3 seated only the two members whose areas had changed since round 2.
+
 ## Notes
 
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without

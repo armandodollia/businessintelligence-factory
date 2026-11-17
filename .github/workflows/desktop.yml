@@ -1,0 +1,114 @@
+# Builds the desktop app (design 2026-11-16-desktop-app-and-feedback-bundle-design.md §4.5):
+# on a version tag (v1.2.3) and when started by hand. Each platform runs the test suite, builds its
+# installer and keeps it as a workflow file; the last job attaches the installers to a draft release.
+#
+# No secret is needed: without the signing secrets below the builds are unsigned (macOS gets an ad-hoc
+# signature), and the release job uses the token every workflow run gets. To sign, add the secrets
+# named in the two `env` blocks; desktop/build.ts describes what each one is.
+
+name: Desktop app
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mac:
+    name: macOS (Apple silicon and Intel)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 25
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Test suite
+        run: npm test
+      - name: Test suite on the runtime the app ships (Electron as Node)
+        run: npm run test:desktop-runtime
+      - name: Build the installers
+        run: npm run dist:mac
+        env:
+          # Optional. All absent: an unsigned build.
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-mac
+          path: dist/installers/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 25
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Test suite
+        run: npm test
+      - name: Test suite on the runtime the app ships (Electron as Node)
+        run: npm run test:desktop-runtime
+      - name: Build the installer
+        run: npm run dist:win
+        env:
+          # Optional. Both absent: an unsigned build.
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installers-windows
+          path: dist/installers/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Attach the installers to a draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # The tag that started the build; a build started by hand gets a name of its own.
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+        run: |
+          ls -l installers
+          cat > notes.md <<'NOTES'
+          Beta build for testers. The installers are not signed unless the signing secrets were set for this build: `docs/beta-testers.md` says how to open an unsigned build on each platform.
+
+          Windows builds are new. When this workflow was written, the test suite and two real research runs had passed on one Windows machine, and the Windows installer itself had not been tried on a real machine.
+          NOTES
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" installers/* --clobber
+          else
+            gh release create "$TAG" installers/* --draft --target "$GITHUB_SHA" --title "Business Intelligence Factory $TAG" --notes-file notes.md
+          fi

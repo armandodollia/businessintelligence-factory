@@ -343,17 +343,18 @@ export function reviewIssueHistory(store: Store, taskId: string): IssueThread[] 
 
 /**
  * How often each issue class recurs per executing role + task type (optionally per worker prompt
- * version) over the given workspaces (one business tree): distinct tasks and issue rows. Synthetic
- * rows are left out. Input for lessons ("a class recurring in ≥ 3 tasks").
+ * version) over the given workspaces (one business tree): distinct tasks and issue rows, of the rows
+ * created from `since` through `until` (inclusive ISO bounds; default: all). Synthetic rows are left out. Input for lessons ("a class recurring in ≥ 3 tasks").
  */
 export function issueRecurrence(
   store: Store,
   workspaceIds: string[],
-  opts: { byPromptVersion?: boolean; since?: string } = {},
+  opts: { byPromptVersion?: boolean; since?: string; until?: string } = {},
 ): IssueRecurrence[] {
   const groups = new Map<string, IssueRecurrence>();
   const taskCache = new Map<string, Task | undefined>();
   for (const r of listReviewIssues(store, { workspaceIds, ...(opts.since ? { since: opts.since } : {}) })) {
+    if (opts.until && r.createdAt > opts.until) continue;
     if (!taskCache.has(r.taskId)) taskCache.set(r.taskId, store.tasks.get(r.taskId));
     const task = taskCache.get(r.taskId);
     if (!task) continue;

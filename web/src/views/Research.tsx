@@ -2,6 +2,7 @@ import { Fragment, useState } from 'react';
 import { isCouncilReviewed, reviewDecisionLabel } from '../logic/council.js';
 import { changedArtifactLabel, describeEvent, eventRunId, payloadText, shortDate, summarize, toggle } from '../logic/format.js';
 import { artifactUrl, useChanges, useDecisions, useForm, useResearch } from '../logic/hooks.js';
+import { researchRunning, STOP_RESEARCH_NOTE } from '../logic/research.js';
 import { isWithheld, WITHHELD_TEXT } from '../logic/stakeholders.js';
 import { ALL_PHASES, OPTIONAL_PHASES, type ResearchPhase } from '../logic/types.js';
 import { CouncilTable } from './CouncilTable.js';
@@ -15,6 +16,9 @@ export function Research({ wsId }: { wsId: string }) {
   const phases = form.values.phases;
   // Review council: the tasks whose council table is open (it is loaded when it is opened).
   const [councils, setCouncils] = useState<string[]>([]);
+  // "Stop research" asks once before it stops.
+  const [confirmingStop, setConfirmingStop] = useState(false);
+  const running = researchRunning(r.runs);
 
   return (
     <div>
@@ -36,6 +40,34 @@ export function Research({ wsId }: { wsId: string }) {
           {r.starting ? 'Starting…' : 'Start research'}
         </button>
       </section>
+
+      {(running || r.stopping) && (
+        <section>
+          <h3>Research is running</h3>
+          {!confirmingStop && (
+            <button disabled={r.stopping} onClick={() => setConfirmingStop(true)}>
+              {r.stopping ? 'Stopping…' : 'Stop research'}
+            </button>
+          )}
+          {confirmingStop && (
+            <div>
+              <p>{STOP_RESEARCH_NOTE}</p>
+              <div className="row">
+                <button
+                  className="primary"
+                  onClick={() => {
+                    setConfirmingStop(false);
+                    void r.stop();
+                  }}
+                >
+                  Yes, stop it
+                </button>
+                <button onClick={() => setConfirmingStop(false)}>Keep it running</button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <WhatChanged wsId={wsId} />
 

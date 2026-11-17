@@ -422,9 +422,13 @@ describe('tool handlers', () => {
       // This dataDir lives under the OS temp dir: the rest of the data dir is still off limits.
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/file_path must be inside/) });
     }
-    // A symlink inside the cwd pointing outside is resolved and refused.
-    symlinkSync('/etc/passwd', join(cwd, 'link.txt'));
-    const link = await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', file_path: join(cwd, 'link.txt') });
+    // A symlink inside the cwd pointing outside is resolved and refused. Windows: file symlinks need
+    // administrator rights or developer mode, so a directory junction (no rights needed) to another
+    // run's cwd is the link; it must be resolved and refused the same way.
+    if (process.platform === 'win32') symlinkSync(otherRun, join(cwd, 'linkdir'), 'junction');
+    else symlinkSync('/etc/passwd', join(cwd, 'link.txt'));
+    const linked = process.platform === 'win32' ? join(cwd, 'linkdir', 'x.txt') : join(cwd, 'link.txt');
+    const link = await handle(c, 'save_artifact', { kind: 'text', mime: 'text/plain', file_path: linked });
     expect(link).toMatchObject({ ok: false, error: expect.stringMatching(/file_path must be inside/) });
   });
 

@@ -1,6 +1,7 @@
 import type { SQLInputValue } from 'node:sqlite';
 import type { BifConfig } from '../config/schema.js';
 import type { BusEvent } from '../events.js';
+import { STOPPED_REQUEST_RESPONSE } from '../research/stop.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
 import type { Role } from '../types.js';
@@ -230,6 +231,8 @@ export function recordPolicyEventsFromBus(
         out.push(recordPolicyEvent(store, { ...ev, kind: 'blocked', detail: 'approval requested for an action the policy never allows' }));
       }
     } else {
+      // Closed because research was stopped (`stopResearch`): the person denied nothing.
+      if (r.status === 'denied' && r.response === STOPPED_REQUEST_RESPONSE) return out;
       const done: NewPolicyEvent = { ...ev, kind: r.status === 'resolved' ? 'approval_granted' : 'approval_denied' };
       if (r.response) done.detail = r.response;
       out.push(recordPolicyEvent(store, done));

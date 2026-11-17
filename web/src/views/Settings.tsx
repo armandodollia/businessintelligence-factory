@@ -2,6 +2,7 @@ import { blockOnText, onUnavailableText, useCouncilOverview } from '../logic/cou
 import { shortDate } from '../logic/format.js';
 import { useConfigEditor } from '../logic/hooks.js';
 import type { CouncilOverview } from '../logic/types.js';
+import { ThisComputer } from './SetupCheck.js';
 
 export function Settings() {
   const c = useConfigEditor();
@@ -9,6 +10,9 @@ export function Settings() {
   return (
     <div>
       <h2>Settings</h2>
+      {/* First on the page: the setup check is what a new person needs, and the configuration below is long. */}
+      <ThisComputer onApplied={() => void c.reload()} />
+      <h3>Configuration</h3>
       <p className="muted">Edits <code>bif.config.json</code> (providers, models, roles, loop, limits, browser, identity, action policy, scoring).</p>
       {c.error && <div className="error">{c.error}</div>}
       {c.loading && <div className="muted">loading…</div>}

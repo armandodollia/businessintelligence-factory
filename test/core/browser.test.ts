@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -225,8 +225,15 @@ describe('Supervisor + browser', () => {
     await s.run({ ctx: ctx('codex'), prompt: '{}', systemPrompt: 's', needsBrowser: false });
     await s.run({ ctx: ctx('codex'), prompt: '{}', systemPrompt: 's', needsBrowser: false });
     const home = join(dir, 'cli-state', 'codex-home');
-    expect(lstatSync(join(home, 'auth.json')).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(join(home, 'auth.json'))).toBe(join(userHome, 'auth.json'));
+    if (process.platform === 'win32') {
+      // Windows: a hard link (one volume here), so it is the user's file itself.
+      const [linked, user] = [statSync(join(home, 'auth.json')), statSync(join(userHome, 'auth.json'))];
+      expect([linked.dev, linked.ino]).toEqual([user.dev, user.ino]);
+      expect(user.nlink).toBe(2);
+    } else {
+      expect(lstatSync(join(home, 'auth.json')).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(join(home, 'auth.json'))).toBe(join(userHome, 'auth.json'));
+    }
     expect(readFileSync(join(userHome, 'auth.json'), 'utf8')).toBe('{"auth_mode":"test"}');
     expect(readFileSync(join(home, 'config.toml'), 'utf8')).toMatch(/^# Generated/);
   });

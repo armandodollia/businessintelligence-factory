@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { runtimePaths } from '../runtime/paths.js';
 import type { ProviderId } from '../types.js';
 
 /** USD per 1M tokens. `cacheRead` / `cacheWrite` default to `input` when absent. */
@@ -20,7 +20,8 @@ export type PriceTable = {
 /** Token counts of one usage record (disjoint). */
 export type TokenCounts = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
-export const DEFAULT_PRICING_PATH = join(import.meta.dirname, 'pricing.json');
+/** The price table file: next to this module in a checkout, in the shipped resources when packaged. */
+export const DEFAULT_PRICING_PATH = runtimePaths().resources.pricingPath;
 
 /** Reads and validates a price table file. */
 export function loadPricing(path: string = DEFAULT_PRICING_PATH): PriceTable {

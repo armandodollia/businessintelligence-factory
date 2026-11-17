@@ -87,7 +87,15 @@ describe('adapters enforce offline in the command they build', () => {
 
 describe('own-stakeholder research is not offline', () => {
   it('an own_stakeholders task reaches the adapter without offline through the review loop, like other tasks', async () => {
-    const s = researchSetup(opened);
+    // The real CLI path asks for the task's browser before the command is built. With the default
+    // configuration that starts the shared research browser server (`npx`, the network): this test
+    // gives each run its own browser entry instead, which starts nothing (`per_run`).
+    const s = researchSetup(opened, {
+      config: (c) => {
+        c.browser.mode = 'per_run';
+        c.browser.mcpServers = { playwright: { command: 'npx', args: ['@playwright/mcp@0.0.41'] } };
+      },
+    });
     s.store.workspaces.insert({ id: 'ws_a', name: 'Acme', sector: 'saas', createdAt: NOW });
     s.deps.fake = undefined; // the real CLI path, stopped at buildCommand
     const specs: SpawnSpec[] = [];
@@ -99,6 +107,8 @@ describe('own-stakeholder research is not offline', () => {
     await runTaskWithReview(own, s.deps);
     expect(specs.length).toBeGreaterThan(0);
     expect(specs.every((sp) => sp.offline === undefined)).toBe(true);
+    // The worker's run was handed the browser it asked for.
+    expect(specs.some((sp) => 'playwright' in sp.extraMcpServers)).toBe(true);
 
     specs.length = 0;
     await runTaskWithReview(addTask(s.store, { type: 'news_scan' }), s.deps);

@@ -719,3 +719,34 @@ export type ServedStakeholderRead = import('../../../src/core/stakeholders/types
   subjectKind: 'own' | 'competitor' | 'former';
 };
 export type RealDecision = NonNullable<import('../../../src/core/stakeholders/types.js').StakeholderStatement['decision']>;
+
+// --- feedback bundle (`src/api/feedbackBundleRoutes.ts`) ------------------------------------------
+export type BundleLevel = 'standard' | 'with_texts';
+/** What the tester chose: the level, the period (days, both optional) and a note. */
+export type BundleChoices = { level: BundleLevel; since?: string; until?: string; note?: string };
+/** What the file would hold: each section with its rows and its size as JSON; `totalBytes` is the file's size. */
+export type BundlePreview = {
+  id: string;
+  level: BundleLevel;
+  fileName: string;
+  sections: Array<{ name: string; rows: number; bytes: number }>;
+  totalBytes: number;
+  firstRows?: { section: string; rows: unknown[] };
+};
+// --- end feedback bundle -------------------------------------------------------------------------
+
+// --- setup check and data folder: the Settings page (`src/api/setupRoutes.ts`) -------------------
+export type { ChromeCheck, CliCheck, SetupReport } from '../../../src/core/setup/doctor.js';
+/** What `GET /api/setup` answers: the check (null on a server without one), the version and where things are. */
+export type SetupInfo = {
+  available: boolean;
+  report: import('../../../src/core/setup/doctor.js').SetupReport | null;
+  /** Whether a configuration file exists (none on the first run). */
+  configExists: boolean;
+  version: string;
+  /** True in the desktop app: data, configuration and logs are in the application folder. */
+  packaged: boolean;
+  folders: { app?: string; data: string; config?: string; logs?: string; browserProfile?: string; open: string };
+  canOpenFolder: boolean;
+};
+// --- end setup check -----------------------------------------------------------------------------

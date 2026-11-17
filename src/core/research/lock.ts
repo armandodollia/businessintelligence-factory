@@ -24,14 +24,46 @@ export class PipelineBusyError extends Error {
   }
 }
 
-export function isPipelineLocked(store: Store, workspaceId: string): boolean {
-  return held(store).has(workspaceId);
+/**
+ * Workspaces whose research is being stopped (`stopResearch`). From the abort until the stop is
+ * recorded the lock cannot be taken, also once the stopped pipeline has released it: what is recorded
+ * as stopped is then only what ran when the stop came, never research started in between.
+ */
+const stopping = new WeakMap<Store, Set<string>>();
+
+function stops(store: Store): Set<string> {
+  let s = stopping.get(store);
+  if (!s) {
+    s = new Set();
+    stopping.set(store, s);
+  }
+  return s;
 }
 
-/** Takes the lock synchronously; returns the release function, or `null` when already held. */
+/** True while a pipeline holds the lock, and while a stop of the workspace's research is in progress. */
+export function isPipelineLocked(store: Store, workspaceId: string): boolean {
+  return held(store).has(workspaceId) || stops(store).has(workspaceId);
+}
+
+/**
+ * Keeps the lock from being taken (whoever holds it now keeps it) until the returned function is
+ * called. For `stopResearch`, which runs one stop per workspace at a time.
+ */
+export function holdStarts(store: Store, workspaceId: string): () => void {
+  const set = stops(store);
+  set.add(workspaceId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    set.delete(workspaceId);
+  };
+}
+
+/** Takes the lock synchronously; returns the release function, or `null` when it is held or a stop is in progress. */
 export function tryLockPipeline(store: Store, workspaceId: string): (() => void) | null {
   const set = held(store);
-  if (set.has(workspaceId)) return null;
+  if (set.has(workspaceId) || stops(store).has(workspaceId)) return null;
   set.add(workspaceId);
   let released = false;
   return () => {

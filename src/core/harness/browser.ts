@@ -2,9 +2,10 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { BifConfig } from '../config/schema.js';
-import { groupAlive, isOurProcessGroup, processStartTime } from './procinfo.js';
+import { runtimePaths } from '../runtime/paths.js';
+import { childEnv, commandFor, groupAlive, isOurProcess, killTreeNow, signalTree, startTimeOf } from './platform.js';
 
 /** MCP server name browser-using runs see the shared browser under (`mcp__browser__*` tools). */
 export const SHARED_BROWSER_NAME = 'browser';
@@ -107,12 +108,52 @@ function freePort(): Promise<number> {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// --- the research browser shipped inside the packaged app (design 2026-11-16 §4.4) ----------------
+
+type SharedCfg = NonNullable<BifConfig['browser']['shared']>;
+
+/** The research browser shipped with the app: the command line script of `@playwright/mcp` and its version. */
+export type ShippedBrowser = { cli: string; version: string };
+
+/** Where the shipped script would be (absent in a checkout); fixed when the server starts. */
+const SHIPPED_CLI = runtimePaths().resources.shippedBrowserCli;
+
+/**
+ * The research browser the app ships, when it does: `cli` exists and the `package.json` next to it
+ * says its version. A checkout ships none (`runtimePaths`), so it starts the browser as it always did.
+ */
+export function shippedBrowser(cli: string | undefined = SHIPPED_CLI): ShippedBrowser | undefined {
+  if (!cli || !existsSync(cli)) return undefined;
+  try {
+    const version = (JSON.parse(readFileSync(join(dirname(cli), 'package.json'), 'utf8')) as { version?: unknown }).version;
+    return typeof version === 'string' ? { cli, version } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The shared browser command to start. When the configured command is `npx [-y] @playwright/mcp@<v>`
+ * and the app ships exactly that version, the shipped script is run with the current Node runtime
+ * (`node`) and the same remaining arguments, so no npm is needed on the machine. Any other command,
+ * package or version is the person's own choice and is returned unchanged.
+ */
+export function sharedBrowserCommand(shared: SharedCfg, shipped: ShippedBrowser | undefined = shippedBrowser(), node: string = process.execPath): SharedCfg {
+  if (!shipped || shared.command !== 'npx') return shared;
+  const rest = shared.args[0] === '-y' || shared.args[0] === '--yes' ? shared.args.slice(1) : shared.args;
+  if (rest[0] !== `@playwright/mcp@${shipped.version}`) return shared;
+  return { ...shared, command: node, args: [shipped.cli, ...rest.slice(1)] };
+}
+// --- end shipped research browser ------------------------------------------------------------------
+
 export type SharedBrowserOptions = {
   config: BrowserCfg;
   /** Holds the server log and pid file (`<dataDir>/browser/`). */
   dataDir: string;
   /** How long to wait for the server to answer HTTP (npx may download first). Default 120 s. */
   startTimeoutMs?: number;
+  /** The research browser shipped with the app; default `shippedBrowser()` (none in a checkout). */
+  shipped?: ShippedBrowser;
 };
 
 /**
@@ -124,6 +165,8 @@ export type SharedBrowserOptions = {
 export class SharedBrowser {
   private starting: Promise<string> | null = null;
   private child: ChildProcess | null = null;
+  /** Start time of `child` (finds what it started on Windows). */
+  private childStartedAt: string | undefined;
   private readonly dir: string;
   private readonly onExit = () => this.killNow();
 
@@ -155,8 +198,9 @@ export class SharedBrowser {
   }
 
   private async start(): Promise<string> {
-    const shared = this.opts.config.browser.shared;
-    if (!shared) throw new Error('browser.shared is not configured');
+    const configured = this.opts.config.browser.shared;
+    if (!configured) throw new Error('browser.shared is not configured');
+    const shared = sharedBrowserCommand(configured, this.opts.shipped ?? shippedBrowser());
     mkdirSync(this.dir, { recursive: true });
     this.killStale();
     const port = shared.port || (await freePort());
@@ -166,12 +210,19 @@ export class SharedBrowser {
     mkdirSync(outputDir, { recursive: true });
     const vars = { port: String(port), profileDir, outputDir };
     const args = substitute(shared.args, vars) as string[];
-    const env = { ...process.env, ...(substitute(shared.env ?? {}, vars) as Record<string, string>) };
     const log = openSync(this.logPath, 'a');
     let child: ChildProcess;
+    const spawnedAt = Date.now();
     try {
+      const launch = commandFor(shared.command, args);
+      // The shipped research browser runs on the server's own program, which in the desktop app needs
+      // its run-as-Node variables: `childEnv` keeps them for that program and for no other command.
+      const env = { ...childEnv(launch.cmd), ...(substitute(shared.env ?? {}, vars) as Record<string, string>) };
       // cwd = the output dir: files a client names without roots land there (OS temp dir, accepted by save_artifact).
-      child = spawn(shared.command, args, { cwd: outputDir, env, stdio: ['ignore', log, log], detached: process.platform !== 'win32' });
+      child = spawn(launch.cmd, launch.args, {
+        cwd: outputDir, env, stdio: ['ignore', log, log], detached: process.platform !== 'win32', windowsHide: true,
+        ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+      });
     } finally {
       closeSync(log);
     }
@@ -188,7 +239,8 @@ export class SharedBrowser {
       }
     });
     if (child.pid !== undefined) {
-      writeFileSync(this.pidPath, JSON.stringify({ pid: child.pid, startedAt: processStartTime(child.pid) }));
+      this.childStartedAt = startTimeOf(child.pid, spawnedAt);
+      writeFileSync(this.pidPath, JSON.stringify({ pid: child.pid, startedAt: this.childStartedAt }));
       // A harness exit must not leave the browser (and its profile lock) behind.
       process.on('exit', this.onExit);
     }
@@ -216,7 +268,7 @@ export class SharedBrowser {
     if (!existsSync(this.pidPath)) return;
     try {
       const { pid, startedAt } = JSON.parse(readFileSync(this.pidPath, 'utf8')) as { pid: number; startedAt?: string };
-      if (process.platform !== 'win32' && isOurProcessGroup(pid, startedAt).ours) process.kill(-pid, 'SIGKILL');
+      if (isOurProcess(pid, startedAt).ours) killTreeNow(pid, startedAt);
     } catch {
       // unreadable pid file or already gone
     }
@@ -227,8 +279,7 @@ export class SharedBrowser {
     const pid = this.child?.pid;
     if (pid === undefined) return;
     try {
-      if (process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
-      else this.child?.kill('SIGKILL');
+      killTreeNow(pid, this.childStartedAt);
     } catch {
       // already gone
     }
@@ -241,12 +292,7 @@ export class SharedBrowser {
     if (!child || child.pid === undefined) return;
     const pid = child.pid;
     const gone = () => (process.platform === 'win32' ? child.exitCode !== null || child.signalCode !== null : !groupAlive(pid));
-    try {
-      if (process.platform !== 'win32') process.kill(-pid, 'SIGTERM');
-      else child.kill('SIGTERM');
-    } catch {
-      // already gone
-    }
+    signalTree(pid, 'SIGTERM', child);
     const deadline = Date.now() + graceMs;
     while (!gone() && Date.now() < deadline) await sleep(25);
     if (!gone()) this.killNow();

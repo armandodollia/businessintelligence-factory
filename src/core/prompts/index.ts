@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { runtimePaths } from '../runtime/paths.js';
 
-/** Directory holding the role/task prompt templates (`<name>.md`). */
-export const PROMPTS_DIR = import.meta.dirname;
+/**
+ * Directory holding the role/task prompt templates (`<name>.md`): this directory in a checkout, the
+ * shipped resources in the packaged app (`runtimePaths`). Read only: nothing is ever written here.
+ */
+export const PROMPTS_DIR = runtimePaths().resources.promptsDir;
 
 /**
  * Where a business tree's approved calibration appendices live:

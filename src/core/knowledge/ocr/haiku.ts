@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import type { BifConfig } from '../../config/schema.js';
 import { isRateLimitText, num, obj, parseJsonObject, str } from '../../harness/adapter.js';
+import { childEnv, commandFor, signalTree } from '../../harness/platform.js';
 import { knowledgeSettings } from '../config.js';
 import { normalizeText } from '../extract/normalize.js';
 import type { OcrImageMediaType } from './rules.js';
@@ -181,7 +182,12 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 const runProcess: RunProcess = (cmd, args, stdin, timeoutMs) =>
   new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd: tmpdir(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const launch = commandFor(cmd, args);
+    const child = spawn(launch.cmd, launch.args, {
+      // The agent CLI's environment: the server's, without what is meant for the desktop app's own program.
+      cwd: tmpdir(), env: childEnv(launch.cmd), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
+      ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    });
     let stdout = '';
     let stderr = '';
     let done = false;
@@ -192,7 +198,9 @@ const runProcess: RunProcess = (cmd, args, stdin, timeoutMs) =>
       fn();
     };
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      // Windows: the CLI may run under node or cmd.exe; stop the whole tree.
+      if (process.platform === 'win32' && child.pid !== undefined) signalTree(child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
       finish(() => reject(new Error(`the OCR call timed out after ${Math.round(timeoutMs / 1000)} s`)));
     }, timeoutMs);
     child.stdout.setEncoding('utf8').on('data', (c: string) => {

@@ -1,7 +1,7 @@
 import type { BifConfig } from '../config/schema.js';
 import { PROVIDER_IDS } from '../config/schema.js';
 import { AbortError } from '../events.js';
-import { isOurProcessGroup } from '../harness/procinfo.js';
+import { isOurProcess, killTreeNow } from '../harness/platform.js';
 import type { ExtraToolHandler } from '../harness/tools/handlers.js';
 import { findReplay } from '../harness/tools/idempotency.js';
 import type { ToolInput } from '../harness/tools/registry.js';
@@ -10,7 +10,7 @@ import { loadPrompt, promptVersion } from '../prompts/index.js';
 import { calibrationScope } from '../scoring/calibration.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
-import type { Decision, ModelRef, Phase, Pipeline, ResearchRun, Task, TaskType, Workspace } from '../types.js';
+import type { Decision, ModelRef, Phase, Pipeline, ResearchRun, Task, TaskType, UserRequest, Workspace } from '../types.js';
 import { recordWhatChanged } from '../scheduler/whatChanged.js';
 import { treeContext, treeLines } from '../workspace/businessMap.js';
 import { CronExpressionParser } from 'cron-parser'; // KS-5
@@ -28,7 +28,9 @@ import { runCombine } from '../stakeholders/combine.js'; // stakeholder position
 import { colleaguesToFollow, treeCompetitors } from '../stakeholders/personas.js'; // stakeholder personas
 import { ensureQuestions } from '../stakeholders/questions.js'; // stakeholder personas
 import { stakeholdersSettings } from '../stakeholders/settings.js'; // stakeholder personas
-import { PipelineBusyError, tryLockPipeline } from './lock.js';
+import { holdStarts, isPipelineLocked, PipelineBusyError, tryLockPipeline } from './lock.js';
+import { abortStoppable, hasStoppableWork, runStoppable, STOPPED_REQUEST_RESPONSE } from './stop.js';
+import { ESCALATION_KIND } from '../escalation/context.js';
 import { failureReason, runTaskWithReview } from './reviewLoop.js';
 import { applyTaskStatus } from './outputs.js';
 import { recordTaskEndOutcomes } from '../learning/outcomes.js';
@@ -496,6 +498,11 @@ async function runTracked(task: Task, deps: ResearchDeps): Promise<void> {
 /**
  * Runs the research run's tasks until none is queued or waiting. Tasks left in `waiting_user` by a
  * previous process (no live run) are resumed once their user request is answered.
+ *
+ * The tasks of a batch end in any order. When research is cancelled, a run that waited for a worker
+ * slot ends at once and a started one only when its process is gone; the drain ends (rejects) only
+ * after every task of the batch has ended, so nothing of it is still at work when its caller goes on
+ * (`stopResearch` records the stop then).
  */
 export async function drainTasks(deps: ResearchDeps, rr: ResearchRun): Promise<void> {
   const { store, events } = deps;
@@ -508,7 +515,10 @@ export async function drainTasks(deps: ResearchDeps, rr: ResearchRun): Promise<v
     }
     const queued = store.tasks.list({ runId: rr.id }).filter((t) => t.status === 'queued' && !active.has(t.id));
     if (queued.length) {
-      await Promise.all(queued.map((t) => runTracked(t, deps)));
+      const ended = await Promise.allSettled(queued.map((t) => runTracked(t, deps)));
+      throwIfAborted(deps.signal);
+      const failed = ended.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (failed) throw failed.reason;
       continue;
     }
     const waiting = new Set(tasks.filter((t) => t.status === 'waiting_user').map((t) => t.id));
@@ -667,6 +677,8 @@ async function continuePipeline(deps: ResearchDeps, pipelineId: string): Promise
       .at(-1);
   let failed = false;
   for (let i = pipeline.nextIndex; i < pipeline.phases.length; i++) {
+    // Cancelled while a phase ended by itself: the next one does not begin.
+    throwIfAborted(deps.signal);
     const phase = pipeline.phases[i]!;
     const existing = runOf(phase);
     const rr = !existing
@@ -715,10 +727,130 @@ export async function runPipeline(
       ...(opts.scheduleId ? { scheduleId: opts.scheduleId } : {}),
     };
     deps.store.pipelines.insert(pipeline);
-    return await continuePipeline(deps, pipeline.id);
+    // Stoppable for this business alone (`stopResearch`).
+    return await runStoppable(deps, workspaceId, (scoped) => continuePipeline(scoped, pipeline.id));
   } finally {
     release();
   }
+}
+
+/** `failureReason` of a research run that was stopped from the app (`stopResearch`). */
+export const STOPPED_REASON = 'stopped by the user';
+
+export type StopReport = {
+  /** False when the business had nothing running: nothing was changed. */
+  stopped: boolean;
+  /** Research runs that were `running` and are now `failed` with `STOPPED_REASON`. */
+  researchRuns: string[];
+  /** Pipelines that were `running` and are now `failed`. */
+  pipelines: string[];
+  /** Tasks of the stopped research that were in work, in review or waiting for the person, and are back in the queue with their step and round. */
+  requeuedTasks: string[];
+  /** Requests to the person of those tasks that were pending and are now closed (`denied`, `STOPPED_REQUEST_RESPONSE`). */
+  closedRequests: string[];
+};
+
+/**
+ * Stops the research of one business, as asked from the app.
+ *
+ * Everything of `workspaceId` that runs through `runPipeline`, a continuation of `resumeInterrupted`
+ * or `runTaskTracked` is aborted on the path a cancelled `deps.signal` takes: the supervisor stops
+ * each agent run (its record: `failed`, reason `aborted`), the loops end without changing a task, and
+ * the pipeline lock is released. Then the stop is recorded, so that nothing says `running` and nothing
+ * continues by itself: the business's running research runs and pipelines are `failed` (the runs with
+ * `STOPPED_REASON`), and the tasks of the stopped research that were in work, in review or waiting
+ * for the person go back to `queued`, as the recovery of a start leaves an interrupted task. Only the
+ * tasks of the stopped research are touched: those of the research runs that were running, and those
+ * that ran outside a pipeline through `runTaskTracked` when the stop came. A task of anything else of
+ * the business (an arm task of a running experiment) stays as it is.
+ *
+ * The stop is recorded only after ALL the stopped work has ended, however many agents were in flight
+ * and in whatever order they end (a run that waited for a worker slot ends at once, a started one when
+ * its process is gone: `drainTasks` and the council round wait for every one of theirs). The wait is
+ * bounded by the supervisor: after the abort a started CLI gets the polite stop, then after the kill
+ * grace the forced one, and its run ends for its caller. From the abort until the stop is recorded no
+ * research of the business can be started (`holdStarts`): a start is refused as while research runs,
+ * so what is recorded as stopped is what ran when the stop came. A second call while a stop is in
+ * progress is the same stop and gets the same answer.
+ *
+ * A task that waited for the person has no agent any more that could take the answer, so its pending
+ * requests are closed: `denied`, with `STOPPED_REQUEST_RESPONSE`. They can no longer be answered (an
+ * answer would put the task back in work with no agent, and the next start would fail it). The
+ * question of an escalation is not such a request and stays open.
+ *
+ * Nothing is deleted, no task is failed and no task status is announced (a failed task would start
+ * an escalation agent). Findings and every other finished result stay as they are. A task whose run
+ * ended by itself before the abort reached it is where its loop left it: finished, or queued again in
+ * its next step.
+ *
+ * Afterwards research can be started again (a new pipeline); the queued tasks of the stopped run
+ * stay with that run and are not run by it. Other businesses, of this tree or another, are not
+ * touched. Runs that are not research of the pipeline (an interview, an experiment, an audit, a
+ * retro, the escalation agent) are not stopped by this.
+ */
+export function stopResearch(deps: ResearchDeps, workspaceId: string): Promise<StopReport> {
+  let byWorkspace = stopsInProgress.get(deps.store);
+  if (!byWorkspace) stopsInProgress.set(deps.store, (byWorkspace = new Map()));
+  const inProgress = byWorkspace.get(workspaceId);
+  if (inProgress) return inProgress;
+  // Read before the hold below, which counts as locked.
+  const inFlight = hasStoppableWork(deps.store, workspaceId) || isPipelineLocked(deps.store, workspaceId);
+  const allowStarts = holdStarts(deps.store, workspaceId);
+  const stop = stopOnce(deps, workspaceId, inFlight).finally(() => {
+    byWorkspace.delete(workspaceId);
+    allowStarts();
+  });
+  byWorkspace.set(workspaceId, stop);
+  return stop;
+}
+
+/** The stops in progress, per store and business (`stopResearch`). In-process, like the pipeline lock. */
+const stopsInProgress = new WeakMap<Store, Map<string, Promise<StopReport>>>();
+
+async function stopOnce(deps: ResearchDeps, workspaceId: string, inFlight: boolean): Promise<StopReport> {
+  const { store } = deps;
+  // The tasks the stoppable work of this business is running now: those of its research runs, and
+  // those run again outside a pipeline (`runTaskTracked`). Read before the abort empties the set.
+  const tracked = new Set([...active].filter((id) => store.tasks.get(id)?.workspaceId === workspaceId));
+  // Resolves when all of that work has ended: every task run of it is out of the active set by then.
+  await abortStoppable(store, workspaceId);
+  const now = new Date().toISOString();
+  const closed: UserRequest[] = [];
+  const report = store.transaction(() => {
+    const researchRuns = store.researchRuns.list({ workspaceId, status: 'running' }).map((rr) => {
+      store.researchRuns.update(rr.id, { status: 'failed', endedAt: now, failureReason: STOPPED_REASON });
+      return rr.id;
+    });
+    const pipelines = store.pipelines.list({ workspaceId, status: 'running' }).map((p) => {
+      store.pipelines.update(p.id, { status: 'failed', endedAt: now });
+      return p.id;
+    });
+    const stoppedRuns = new Set(researchRuns);
+    const requeuedTasks: string[] = [];
+    for (const t of store.tasks.list({ workspaceId })) {
+      // Only what was stopped: a task of anything else of the business is not research of the pipeline.
+      if (!(stoppedRuns.has(t.runId) || tracked.has(t.id))) continue;
+      // At work for something that began after the abort (a re-run after an answered escalation): not
+      // stopped by this stop. A task the stopped work was running is requeued whatever the set says.
+      if (active.has(t.id) && !tracked.has(t.id)) continue;
+      if (t.status !== 'running' && t.status !== 'reviewing' && t.status !== 'waiting_user') continue;
+      if (t.status === 'waiting_user') {
+        for (const r of store.userRequests.list({ taskId: t.id, status: 'pending' })) {
+          if (r.workspaceId !== workspaceId || r.kind === ESCALATION_KIND) continue;
+          closed.push(store.userRequests.update(r.id, { status: 'denied', response: STOPPED_REQUEST_RESPONSE, resolvedAt: now }));
+        }
+      }
+      store.tasks.update(t.id, { status: 'queued' });
+      requeuedTasks.push(t.id);
+    }
+    return {
+      stopped: inFlight || researchRuns.length > 0 || pipelines.length > 0,
+      researchRuns, pipelines, requeuedTasks, closedRequests: closed.map((r) => r.id),
+    };
+  });
+  // The pages that show a request learn that it is closed. No task status is announced.
+  for (const request of closed) deps.events.emit({ type: 'user_request_resolved', workspaceId, request });
+  return report;
 }
 
 export type ResumeReport = {
@@ -740,18 +872,18 @@ export type ResumeReport = {
 
 /**
  * SIGKILLs an orphaned CLI process group, but only after verifying it is still ours (recorded start
- * time, no reboot since, leader start time unchanged; see `isOurProcessGroup`). A vanished group
+ * time, no reboot since, leader start time unchanged; see `isOurProcess`; on Windows its process tree). A vanished group
  * (ESRCH) is ignored. Returns whether a kill signal was sent.
  */
 export function killOrphanGroup(pid: number, startedAt?: string): boolean {
-  if (process.platform === 'win32' || !Number.isInteger(pid) || pid <= 1) return false;
-  const check = isOurProcessGroup(pid, startedAt);
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  const check = isOurProcess(pid, startedAt);
   if (!check.ours) {
     if (check.reason !== 'process group is gone') console.warn(`[bif] not killing process group ${pid}: ${check.reason}`);
     return false;
   }
   try {
-    process.kill(-pid, 'SIGKILL');
+    killTreeNow(pid, startedAt);
     return true;
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
@@ -813,20 +945,31 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
   const piped = new Set(pipelines.map((p) => p.id));
   const loose = runs.filter((rr) => !rr.pipelineId || !piped.has(rr.pipelineId));
   // Continue on a later tick so callers (server boot) can finish their own setup first.
-  // Continued runs hold their workspace's pipeline lock until they finish.
-  const workspaces = [...new Set([...pipelines.map((p) => p.workspaceId), ...loose.map((r) => r.workspaceId)])];
-  const releases = workspaces.map((id) => tryLockPipeline(store, id));
-  const done = new Promise<void>((r) => setImmediate(r))
-    .then(() =>
-      Promise.all([
-        ...pipelines.map((p) => continuePipeline(deps, p.id)),
-        ...loose.map((rr) => executePhase(deps, rr).then((r) => [r])),
-      ]),
-    )
-    .then((lists) => lists.flat())
-    .finally(() => {
-      for (const r of releases) r?.();
-    });
+  // Continued runs hold their workspace's pipeline lock until the work of that workspace has ended
+  // (finished, failed or stopped: `stopResearch`), each stoppable for its business alone.
+  const jobs: Array<{ workspaceId: string; run: (scoped: ResearchDeps) => Promise<ResearchRun[]> }> = [
+    ...pipelines.map((p) => ({ workspaceId: p.workspaceId, run: (scoped: ResearchDeps) => continuePipeline(scoped, p.id) })),
+    ...loose.map((rr) => ({ workspaceId: rr.workspaceId, run: (scoped: ResearchDeps) => executePhase(scoped, rr).then((r) => [r]) })),
+  ];
+  const locks = new Map<string, { release: (() => void) | null; jobs: number }>();
+  for (const job of jobs) {
+    const lock = locks.get(job.workspaceId) ?? { release: tryLockPipeline(store, job.workspaceId), jobs: 0 };
+    lock.jobs++;
+    locks.set(job.workspaceId, lock);
+  }
+  const ended = (workspaceId: string) => {
+    const lock = locks.get(workspaceId)!;
+    if (--lock.jobs === 0) lock.release?.();
+  };
+  // Each job is stoppable from now on, though it begins on the later tick: a stop that comes first
+  // finds it, and it never begins.
+  const laterTick = new Promise<void>((r) => setImmediate(r));
+  const begin = (job: (typeof jobs)[number]) => async (scoped: ResearchDeps) => {
+    await laterTick;
+    throwIfAborted(scoped.signal);
+    return job.run(scoped);
+  };
+  const done = Promise.all(jobs.map((job) => runStoppable(deps, job.workspaceId, begin(job)).finally(() => ended(job.workspaceId)))).then((lists) => lists.flat());
   done.catch(() => {});
   return {
     failedRuns, requeuedTasks, waitingTasks, abandonedTasks,
@@ -847,9 +990,13 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
 export async function runTaskTracked(task: Task, deps: ResearchDeps): Promise<Task | undefined> {
   if (active.has(task.id)) return undefined;
   active.add(task.id);
-  try {
-    return await runTaskWithReview(task, deps);
-  } finally {
-    active.delete(task.id);
-  }
+  // Stoppable with the research of its business (`stopResearch`). The task leaves the active set
+  // inside the stoppable work, so it is out of it by the time that work counts as ended.
+  return runStoppable(deps, task.workspaceId, async (scoped) => {
+    try {
+      return await runTaskWithReview(task, scoped);
+    } finally {
+      active.delete(task.id);
+    }
+  });
 }

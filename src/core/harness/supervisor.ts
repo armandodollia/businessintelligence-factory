@@ -1,7 +1,5 @@
 import { spawn } from 'node:child_process';
-import {
-  appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync,
-} from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { BifConfig } from '../config/schema.js';
@@ -18,7 +16,7 @@ import { getAdapter } from './adapters/index.js';
 import { browserServersFor, effectiveMaxBrowserRuns, SharedBrowser } from './browser.js';
 import { runCwdOf, runDirOf } from './paths.js';
 import { priorAttemptSection } from './priorAttempt.js';
-import { processStartTime } from './procinfo.js';
+import { childEnv, commandFor, killTreeNow, linkLogin, signalTree, startTimeOf, stopTree, syncLoginBack, type Launch } from './platform.js';
 import { Semaphore } from './semaphore.js';
 import type { RunContext, TokenRegistry } from './tokens.js';
 import type { HandleTool } from './tools/handlers.js';
@@ -126,6 +124,12 @@ const sleep = (ms: number, signal?: AbortSignal) =>
  * Raw stdout/stderr are kept beside it (`stdout.log`, `stderr.log`).
  *
  * `run()` never throws for agent failures; it resolves with `status: 'failed'`.
+ *
+ * Shutdown (`stopRuns`, `close`): every running CLI is stopped with what it started, and from then on
+ * the supervisor is closed: no run starts, and no run ends for its caller. A stopped run is left as a
+ * crash of the server would leave it (its record still says `running`, its task is untouched), so the
+ * recovery of the next start (`resumeInterrupted`) continues the work. Nothing after the stop may
+ * record a failure, retry the run or move its task on: the process is about to exit.
  */
 export class Supervisor {
   private readonly workers: Semaphore;
@@ -136,6 +140,11 @@ export class Supervisor {
   private readonly dataDir: string;
   /** The shared browser MCP server browser-using runs connect to (started on first use). */
   readonly browser: SharedBrowser;
+  /** The CLI processes that are running now, by agent run. */
+  private readonly live = new Map<string, { pid: number; startedAt: string | undefined }>();
+  /** Set by `stopRuns`: the server is shutting down. */
+  private closed = false;
+  private stopping: Promise<void> | undefined;
 
   constructor(private readonly deps: SupervisorDeps) {
     this.dataDir = resolvePath(deps.dataDir);
@@ -147,9 +156,46 @@ export class Supervisor {
     this.killGraceMs = deps.killGraceMs ?? 5000;
   }
 
-  /** Stops the shared browser server, if one was started. */
+  /**
+   * Shutdown, first part: stops every running CLI with the processes it started (`stopTree`: a
+   * polite stop, the kill grace, then by force) and resolves when they are gone. The supervisor is
+   * closed from the first call on (see the class comment). Idempotent.
+   */
+  stopRuns(): Promise<void> {
+    this.closed = true;
+    this.stopping ??= Promise.all(
+      [...this.live].map(async ([id, r]) => {
+        await stopTree(r.pid, this.killGraceMs, r.startedAt);
+        this.live.delete(id);
+      }),
+    ).then(() => undefined);
+    return this.stopping;
+  }
+
+  /**
+   * Stops every running CLI at once and by force, synchronously: for a shutdown that ran out of
+   * time, right before the process exits. Never throws.
+   */
+  killRunsNow(): void {
+    this.closed = true;
+    for (const r of this.live.values()) {
+      try {
+        killTreeNow(r.pid, r.startedAt);
+      } catch {
+        // already gone
+      }
+    }
+  }
+
+  /** Shutdown: stops the running agents (`stopRuns`), then the shared browser server, if one was started. */
   async close(): Promise<void> {
+    await this.stopRuns();
     await this.browser.close();
+  }
+
+  /** For a closed supervisor: a promise that never settles, so the code waiting on a run does nothing more. */
+  private halt<T>(): Promise<T> {
+    return new Promise<T>(() => {});
   }
 
   /**
@@ -160,6 +206,7 @@ export class Supervisor {
     if (opts.needsBrowser && !this.browsers) {
       throw new Error('this run needs a browser but limits.maxBrowserRuns is 0');
     }
+    if (this.closed) return this.halt();
     // Learning loop WP-B: no new run past a configured budget cap (waits for the user to extend).
     const { pipelineId } = this.scopeOf(opts);
     await enforceBudget(this.deps, pipelineId ? { workspaceId: opts.ctx.workspaceId, pipelineId } : { workspaceId: opts.ctx.workspaceId }, opts.signal);
@@ -168,6 +215,8 @@ export class Supervisor {
       if (LIMITED_ROLES.has(opts.ctx.role)) releases.push(await this.workers.acquire(opts.signal));
       if (opts.needsBrowser) releases.push(await this.browsers!.acquire(opts.signal));
       if (opts.signal?.aborted) throw new AbortError('run cancelled before start');
+      // Shut down while this run waited for its turn: it does not start.
+      if (this.closed) return await this.halt();
       return await this.execute(opts);
     } finally {
       for (const r of releases.reverse()) r();
@@ -271,6 +320,8 @@ export class Supervisor {
 
     let result: AttemptResult;
     for (;;) {
+      // Shut down between two attempts (the wait after a rate limit): no further attempt.
+      if (this.closed) return this.halt();
       attempt++;
       setAttempt(attempt);
       const attemptStarted = new Date().toISOString();
@@ -282,6 +333,8 @@ export class Supervisor {
       result = opts.fake
         ? await this.attemptFake(ctx, opts, record)
         : await this.attemptCli(ctx, token, cwd, runDir, { ...opts, prompt }, record);
+      // Shut down while an in-process script ran: nothing more is recorded for the run.
+      if (this.closed) return this.halt();
       const attemptRow: AgentRunAttempt = {
         id: newId('att'), workspaceId: ctx.workspaceId, runId: ctx.agentRunId, attempt, startedAt: attemptStarted,
         endedAt: new Date().toISOString(), exitCode: result.exitCode, rateLimited: result.rateLimited,
@@ -473,14 +526,25 @@ export class Supervisor {
       ...(opts.offline ? { offline: true } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
     };
+    // Shut down while the run waited for its browser: no CLI is started any more.
+    if (this.closed) return this.halt();
     const built = adapter.buildCommand(spec);
     for (const f of built.files) {
       mkdirSync(dirname(f.path), { recursive: true });
       writeFileSync(f.path, f.content);
     }
-    for (const l of built.links ?? []) linkFile(l.path, l.target);
+    for (const l of built.links ?? []) linkLogin(l.path, l.target);
     const stdoutLog = join(runDir, 'stdout.log');
     const stderrLog = join(runDir, 'stderr.log');
+    let launch: Launch;
+    try {
+      launch = commandFor(built.cmd, built.args);
+    } catch (e) {
+      const reason = `spawn failed: ${(e as Error).message}`;
+      record({ t: 'error', message: reason, rateLimited: false });
+      record({ t: 'done', exitCode: 127 });
+      return { exitCode: 127, rateLimited: false, reason };
+    }
 
     return new Promise<AttemptResult>((resolve) => {
       let rateLimited = false;
@@ -495,25 +559,33 @@ export class Supervisor {
         record(e);
       };
 
-      const child = spawn(built.cmd, built.args, {
+      const spawnedAt = Date.now();
+      const child = spawn(launch.cmd, launch.args, {
         cwd,
-        env: { ...process.env, ...built.env },
+        // The server's environment, without what is meant for the desktop app's own program (`childEnv`).
+        env: { ...childEnv(launch.cmd), ...built.env },
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
+        windowsHide: true,
+        ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       });
       const pid = child.pid;
+      let pidStartedAt: string | undefined;
       if (pid !== undefined) {
         // Persisted so crash recovery (Task 9) can kill an orphaned process group.
         // Start time identifies this process later (crash recovery verifies it before SIGKILL).
-        this.deps.store.agentRuns.update(ctx.agentRunId, { pid, pidStartedAt: processStartTime(pid) });
+        pidStartedAt = startTimeOf(pid, spawnedAt);
+        this.deps.store.agentRuns.update(ctx.agentRunId, { pid, pidStartedAt });
+        // Known to `stopRuns` until the attempt ends (`finish`).
+        this.live.set(ctx.agentRunId, { pid, startedAt: pidStartedAt });
       }
 
       // Kill the CLI if it ignores SIGTERM; descendants are reaped after it exits (reapGroup).
       const kill = (why: string) => {
         if (reason || settled) return;
         reason = why;
-        signalGroup(pid, 'SIGTERM', child);
-        killTimer = setTimeout(() => signalGroup(pid, 'SIGKILL', child), this.killGraceMs);
+        signalTree(pid, 'SIGTERM', child);
+        killTimer = setTimeout(() => signalTree(pid, 'SIGKILL', child), this.killGraceMs);
         killTimer.unref();
       };
 
@@ -534,6 +606,9 @@ export class Supervisor {
         opts.signal?.removeEventListener('abort', onAbort);
         out.close();
         err.close();
+        this.live.delete(ctx.agentRunId);
+        // Stopped by the shutdown: the run is left as a crash would leave it, and its caller waits on.
+        if (this.closed) return;
         if (reason) emit({ t: 'error', message: reason, rateLimited: false });
         // Process exit code wins when non-zero; otherwise trust the stream (OpenCode exits 0 on error).
         let code = exitCode !== 0 ? exitCode : (lastDone ?? 0);
@@ -554,13 +629,13 @@ export class Supervisor {
       });
 
       out.on('line', (line) => {
-        if (settled) return;
+        if (settled || this.closed) return;
         dog.touch();
         appendFileSync(stdoutLog, line + '\n');
         for (const e of adapter.parseLine(line)) emit(e);
       });
       err.on('line', (line) => {
-        if (settled) return;
+        if (settled || this.closed) return;
         dog.touch();
         appendFileSync(stderrLog, line + '\n');
         // stderr is never JSON events; only scan it for rate-limit text.
@@ -583,7 +658,9 @@ export class Supervisor {
         void (async () => {
           // Leftovers in the group (MCP servers, browsers) must be gone before the run resolves and
           // its semaphore slots (e.g. the browser profile) are released.
-          await reapGroup(pid, this.killGraceMs);
+          await reapGroup(pid, this.killGraceMs, pidStartedAt);
+          // Windows: a login copied (not linked) into the private CLI home goes back to the user.
+          for (const l of built.links ?? []) syncLoginBack(l.path, l.target);
           // Group is dead, so stdout closes promptly; bound the wait anyway.
           if (!outClosed) {
             await new Promise<void>((r) => {
@@ -623,74 +700,10 @@ function promptMarkdown(ctx: RunContext, systemPrompt: string, prompt: string, a
   ].join('\n');
 }
 
-const isWin = process.platform === 'win32';
-
 /**
- * Points `path` at `target` with a symlink, so a CLI that refreshes credentials in place writes
- * them to the user's own file; copies when symlinks are unavailable. A missing target removes
- * `path`. The link (or copy) is made under a temp name and renamed into place, so concurrent runs
- * never write through an existing link onto the target.
+ * Terminates every remaining process the CLI started (its process group on POSIX, its process tree
+ * on Windows): polite stop, wait up to `graceMs`, then force and confirm. See `stopTree`.
  */
-function linkFile(path: string, target: string) {
-  mkdirSync(dirname(path), { recursive: true });
-  let current: string | null | undefined; // link target, null = regular file, undefined = absent
-  try {
-    current = lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null;
-  } catch {
-    current = undefined;
-  }
-  if (!existsSync(target)) {
-    if (current !== undefined) rmSync(path, { force: true });
-    return;
-  }
-  if (current === target) return;
-  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  try {
-    symlinkSync(target, tmp);
-  } catch {
-    copyFileSync(target, tmp);
-  }
-  renameSync(tmp, path);
-}
-
-function signalGroup(pid: number | undefined, sig: NodeJS.Signals, child?: { kill(sig: NodeJS.Signals): boolean }) {
-  try {
-    if (pid !== undefined && !isWin) process.kill(-pid, sig);
-    else child?.kill(sig);
-  } catch {
-    // already gone
-  }
-}
-
-/** True while any process in group `pid` exists (probe with signal 0). */
-function groupAlive(pid: number): boolean {
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-async function waitGroupGone(pid: number, ms: number): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  while (groupAlive(pid)) {
-    if (Date.now() >= deadline) return false;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return true;
-}
-
-/**
- * Terminates every remaining process in the CLI's process group: only if the group still exists
- * (avoids signalling a recycled pgid), SIGTERM, wait up to `graceMs`, then SIGKILL and confirm.
- */
-export async function reapGroup(pid: number | undefined, graceMs: number): Promise<void> {
-  if (pid === undefined || isWin || !groupAlive(pid)) return;
-  signalGroup(pid, 'SIGTERM');
-  if (await waitGroupGone(pid, graceMs)) return;
-  signalGroup(pid, 'SIGKILL');
-  if (!(await waitGroupGone(pid, 5000))) {
-    console.warn(`[bif] process group ${pid} still present after SIGKILL`);
-  }
+export async function reapGroup(pid: number | undefined, graceMs: number, startedAt?: string): Promise<void> {
+  await stopTree(pid, graceMs, startedAt);
 }

@@ -14,7 +14,7 @@ import { uploadInternal } from '../core/internal/uploads.js';
 import { interviewCoverage, sendInterviewMessage, type InterviewerFake } from '../core/interview/interview.js';
 import { competitorCriteria } from '../core/market/competitors.js';
 import type { ResearchDeps } from '../core/research/deps.js';
-import { currentResearchRun, runPipeline } from '../core/research/orchestrator.js';
+import { currentResearchRun, runPipeline, stopResearch } from '../core/research/orchestrator.js';
 import { ALL_PHASES } from '../core/research/phases.js';
 import { validateCron } from '../core/scheduler/scheduler.js';
 import { calibrationReport, proposePromptPatch, proposeWeights } from '../core/scoring/calibration.js';
@@ -60,6 +60,12 @@ import { mountPersonaLearningRoutes } from './personaLearningRoutes.js'; // pers
 import { mountStakeholderRoutes } from './stakeholderRoutes.js'; // stakeholder personas
 import { mountUserPersonaRoutes } from './userPersonaRoutes.js'; // user persona
 import { mountCouncilRoutes } from './councilRoutes.js'; // review council
+import { mountFeedbackBundleRoutes } from './feedbackBundleRoutes.js'; // feedback bundle
+import { mountSetupRoutes } from './setupRoutes.js'; // setup check (desktop app)
+import { defaultPricing } from '../core/harness/pricing.js'; // health route
+import { loadPrompt } from '../core/prompts/index.js'; // health route
+import { appVersion, runtimePaths, type RuntimePaths } from '../core/runtime/paths.js'; // desktop app
+import type { SetupCheck } from '../core/setup/doctor.js'; // setup check (desktop app)
 import { councilReviewedTaskIds, withCouncilMember } from '../core/council/store.js'; // review council
 import { panelViews } from '../core/market/panelView.js'; // persona panel
 
@@ -86,6 +92,16 @@ export type AppDeps = {
    * these back instead of the runtime override, unless the user changed the field since boot.
    */
   fileValues?: { dataDir?: string; port?: number };
+  // --- desktop app (design 2026-11-16 §4) ---
+  /** Where resources and the person's files are (default: `runtimePaths()`, a checkout's answers). */
+  paths?: RuntimePaths;
+  /** The app version (default: `appVersion(paths)`, the package version in a checkout). */
+  appVersion?: string;
+  /** The setup check. Absent (tests): `GET /api/setup` says it is not available and no command is run. */
+  setup?: SetupCheck;
+  /** Opens a folder in the system's file manager (the Settings page's "Open folder"). */
+  openFolder?: (dir: string) => void;
+  // --- end desktop app ---
 };
 
 /** Error with an HTTP status, rendered as `{ error, ...extra }`. */
@@ -287,6 +303,33 @@ export function createApp(deps: AppDeps): Hono {
     });
   };
 
+  // --- health (desktop app, design 2026-11-16 §4.1) ------------------------------------------
+  const paths = deps.paths ?? runtimePaths();
+  const version = deps.appVersion ?? appVersion(paths);
+  const webIndex = deps.webDist ? join(deps.webDist, 'index.html') : undefined;
+  /**
+   * Whether the server is up and found what it reads from its resources: the version, the version of
+   * a prompt (a hash of its text), the price table's version and whether the web app is served. The
+   * shell asks this before it opens its window. 503 with the reasons when a resource is missing.
+   */
+  app.get('/api/health', (c) => {
+    const problems: string[] = [];
+    const read = <T>(what: string, f: () => T): T | undefined => {
+      try {
+        return f();
+      } catch (e) {
+        problems.push(`${what}: ${(e as Error).message}`);
+        return undefined;
+      }
+    };
+    const resources = {
+      promptVersion: read('prompts', () => loadPrompt('worker').version),
+      priceTable: read('price table', () => defaultPricing().version),
+      web: webIndex !== undefined && existsSync(webIndex),
+    };
+    return c.json({ ok: problems.length === 0, version, resources, ...(problems.length ? { problems } : {}) }, problems.length ? 503 : 200);
+  });
+
   // --- workspaces & business map ------------------------------------------------------------
   app.get('/api/workspaces', (c) => c.json(store.workspaces.list()));
   app.post('/api/workspaces', async (c) => {
@@ -392,6 +435,19 @@ export function createApp(deps: AppDeps): Hono {
       after: { phases: phases ?? ALL_PHASES, ...(started ? { researchRunId: started.id } : {}) },
     }, { actor: actorOf(config) }); // re-gate (Opus 4)
     return c.json(started ?? null, 202);
+  });
+  // The person stops the research of this business (and of no other): its pipeline and agent runs end,
+  // tasks in work go back to the queue, nothing is deleted (`stopResearch`). Answers what was stopped;
+  // `stopped: false` when nothing was running.
+  app.post('/api/workspaces/:id/research/stop', async (c) => {
+    const id = workspace(c.req.param('id')).id;
+    const report = await stopResearch(research, id);
+    if (report.stopped) {
+      recordUserAction(store, {
+        workspaceId: id, action: 'research_stop', targetType: 'workspace', targetId: id, after: { researchRunIds: report.researchRuns },
+      }, { actor: actorOf(config) });
+    }
+    return c.json(report);
   });
   app.get('/api/workspaces/:id/runs', (c) => c.json(store.researchRuns.list({ workspaceId: workspace(c.req.param('id')).id })));
   app.get('/api/workspaces/:id/tasks', (c) => {
@@ -685,19 +741,11 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // --- config ---------------------------------------------------------------------------------
-  app.get('/api/config', (c) => c.json(config));
   /**
-   * Replaces the config (validated). Applied in place, so new runs use it; limits that size the
-   * supervisor's semaphores (`maxParallelWorkers`, `maxBrowserRuns`) and `server.port` need a restart.
+   * Replaces the config in use with `next` (already validated), writes the file and records the
+   * change. Used by `PUT /api/config` and by `POST /api/setup/apply`.
    */
-  app.put('/api/config', async (c) => {
-    let raw: unknown;
-    try {
-      raw = await c.req.json();
-    } catch {
-      throw new HttpError(400, 'request body must be JSON');
-    }
-    const next = parseConfig(raw, 'PUT /api/config');
+  const applyConfig = (next: BifConfig): void => {
     const before = structuredClone(config.scoring);
     const lessonsWereOn = config.lessons?.enabled !== false; // ruling R1
     const keysBefore = JSON.stringify(config);
@@ -717,6 +765,20 @@ export function createApp(deps: AppDeps): Hono {
     if (JSON.stringify(before) !== JSON.stringify(config.scoring)) {
       scoringChanged(before, store.workspaces.list().map((w) => w.id), 'config');
     }
+  };
+  app.get('/api/config', (c) => c.json(config));
+  /**
+   * Replaces the config (validated). Applied in place, so new runs use it; limits that size the
+   * supervisor's semaphores (`maxParallelWorkers`, `maxBrowserRuns`) and `server.port` need a restart.
+   */
+  app.put('/api/config', async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      throw new HttpError(400, 'request body must be JSON');
+    }
+    applyConfig(parseConfig(raw, 'PUT /api/config'));
     return c.json(config);
   });
 
@@ -778,6 +840,17 @@ export function createApp(deps: AppDeps): Hono {
   // --- review council: the council table of a task, the configured council ------------------------
   mountCouncilRoutes(app, { store, config }, workspace);
   // --- end review council ----------------------------------------------------------------------
+  // --- feedback bundle: the preview and the file a tester saves (nothing is written or sent here) --
+  mountFeedbackBundleRoutes(app, { store, config, appVersion: version, ...(deps.setup ? { setup: deps.setup } : {}) });
+  // --- end feedback bundle ---------------------------------------------------------------------
+  // --- setup check (desktop app): what is installed, the configuration that fits, the data folder --
+  mountSetupRoutes(app, {
+    config, dataDir: artifacts.dataDir, paths, appVersion: version, applyConfig,
+    ...(deps.configPath ? { configPath: deps.configPath } : {}),
+    ...(deps.setup ? { setup: deps.setup } : {}),
+    ...(deps.openFolder ? { openFolder: deps.openFolder } : {}),
+  });
+  // --- end setup check -------------------------------------------------------------------------
 
   app.all('/api/*', (c) => c.json({ error: `no route for ${c.req.method} ${c.req.path}` }, 404));
 

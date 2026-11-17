@@ -6,3 +6,5 @@ dist/
 bif.config.json
 .claude/worktrees/
 src/core/prompts/calibration/*.md
+# Desktop app: build output beside the shell's sources (the builds themselves go to dist/).
+desktop/dist/

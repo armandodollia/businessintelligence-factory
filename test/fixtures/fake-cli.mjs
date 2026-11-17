@@ -30,7 +30,9 @@ if (plan.stubbornChild) {
   const child = spawn(
     process.execPath,
     ['-e', "process.on('SIGTERM', () => {}); require('node:fs').writeFileSync('child.ready', '1'); setInterval(() => {}, 1 << 30);"],
-    { stdio: 'ignore' },
+    // Windows: a non-detached child sits in its parent's job object and dies with it; detached, it
+    // outlives the CLI like a real CLI's helper processes do, so the reap is what has to stop it.
+    { stdio: 'ignore', ...(process.platform === 'win32' ? { detached: true, windowsHide: true } : {}) },
   );
   writeFileSync('child.pid', String(child.pid));
   child.unref(); // the CLI may exit and leave it behind

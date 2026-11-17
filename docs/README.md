@@ -23,6 +23,9 @@ Technical documentation for engineers working on the Business Intelligence Facto
 | [privacy-and-export.md](privacy-and-export.md) | what leaves the machine, the export and upload rules, the local-only server |
 | [data-storage.md](data-storage.md) | files under the data directory and the main database records |
 | [smoke-tests.md](smoke-tests.md) | the real-CLI smoke test: modes, variables, what each checks |
+| [desktop-app.md](desktop-app.md) | the packaged app for macOS and Windows: how it is built, what it ships, where its data lives, the setup check |
+| [feedback-bundle.md](feedback-bundle.md) | the feedback file a tester saves: sections, levels, what is removed, the reader |
+| [beta-testers.md](beta-testers.md) | the guide for beta testers (written for people who are not developers) |
 | [known-limitations.md](known-limitations.md) | what does not work yet or has a known gap |
 
 ## Results and history
@@ -38,6 +41,7 @@ Technical documentation for engineers working on the Business Intelligence Facto
 | File | About |
 |---|---|
 | [2026-11-12-business-intelligence-factory-design.md](superpowers/specs/2026-11-12-business-intelligence-factory-design.md) | the main design |
+| [2026-11-16-desktop-app-and-feedback-bundle-design.md](superpowers/specs/2026-11-16-desktop-app-and-feedback-bundle-design.md) | the desktop app, the feedback bundle, Windows |
 | [2026-11-13-knowledge-store-design.md](superpowers/specs/2026-11-13-knowledge-store-design.md) | the knowledge store |
 | [2026-11-13-learning-loop-parity.md](superpowers/specs/2026-11-13-learning-loop-parity.md) | the learning loop |
 | [2026-11-14-flow-records-and-ranking-design.md](superpowers/specs/2026-11-14-flow-records-and-ranking-design.md) | flow records and ranking |

@@ -68,6 +68,7 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/interview': { test: HERE },
   'POST /api/workspaces/:id/uploads': { test: HERE },
   'POST /api/workspaces/:id/research': { test: HERE },
+  'POST /api/workspaces/:id/research/stop': { test: 'test/api/researchStopRoutes.test.ts' },
   'POST /api/workspaces/:id/schedules': { test: HERE },
   'PATCH /api/workspaces/:id/schedules': { test: HERE },
   'PUT /api/config': { test: HERE },
@@ -76,6 +77,12 @@ const ROUTES: Record<string, { test: string } | { exempt: string }> = {
   'POST /api/workspaces/:id/lessons/evaluate': { test: HERE },
   'POST /api/workspaces/:id/lessons/rules/:rid/propose-retire': { test: HERE },
   'POST /api/workspaces/:id/calibration/prompt-patch': { exempt: 'computes a proposal and writes nothing; applying it is the actored route below' },
+  // feedback bundle: both build the bundle in memory and answer with it (test/api/feedbackBundleRoutes.test.ts: no file, no write)
+  'POST /api/feedback-bundle/preview': { exempt: 'reads the store and writes nothing: the preview of the feedback bundle' },
+  'POST /api/feedback-bundle': { exempt: 'reads the store and writes nothing: the feedback bundle file is handed to the caller' },
+  // setup check (desktop app): writing the configuration for what was found is a config change by the configured actor
+  'POST /api/setup/apply': { test: 'test/api/setupRoutes.test.ts' },
+  'POST /api/setup/open-folder': { exempt: "opens the server's own data folder in the file manager and writes nothing" },
   'POST /api/unit-proposals/:id': { test: 'test/api/feedbackRoutes.test.ts' },
   'POST /api/findings/:id/include': { test: 'test/api/feedbackRoutes.test.ts' },
   'POST /api/recommendations/:id/include': { test: HERE },
