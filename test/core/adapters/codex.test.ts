@@ -91,6 +91,31 @@ describe('CodexAdapter', () => {
     }
   });
 
+  it('skills: no skills instructions in the run (the person\'s own skills under ~/.agents/skills are not listed)', () => {
+    for (const s of [spec, { ...spec, stateDir: '/data/cli-state' }]) {
+      const { args } = new CodexAdapter().buildCommand(s);
+      const at = args.indexOf('skills.include_instructions=false');
+      expect(at).toBeGreaterThan(0);
+      expect(args[at - 1]).toBe('-c');
+    }
+  });
+
+  it('ephemeral: no session files kept (--ephemeral), with or without a private CODEX_HOME', () => {
+    for (const s of [spec, { ...spec, stateDir: '/data/cli-state' }]) {
+      const { args } = new CodexAdapter().buildCommand(s);
+      expect(args).toContain('--ephemeral');
+      expect(args.indexOf('--ephemeral')).toBeLessThan(args.length - 1); // the prompt stays last
+    }
+  });
+
+  it('withheld MCP tools: -c mcp_servers.<server>.disabled_tools=[...]', () => {
+    const plain = new CodexAdapter().buildCommand(spec).args;
+    expect(plain.some((a) => a.includes('disabled_tools'))).toBe(false);
+    const args = new CodexAdapter().buildCommand({ ...spec, withheldTools: { browser: ['browser_close'] } }).args;
+    const at = args.indexOf('mcp_servers.browser.disabled_tools=["browser_close"]');
+    expect(args[at - 1]).toBe('-c');
+  });
+
   it('toToml renders inline values', () => {
     expect(toToml('a"b')).toBe('"a\\"b"');
     expect(toToml(3)).toBe('3');

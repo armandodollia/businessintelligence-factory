@@ -7,7 +7,7 @@ import { RELATION_TYPES } from '../../knowledge/relations.js';
 import { PERSONA_FIELDS, STAKEHOLDER_FIELDS, USER_FIELDS, type PersonaField, type StakeholderField } from '../../scoring/criteria.js';
 import { OWN_STANCES, RIVAL_STANCES, STAKEHOLDER_TYPES } from '../../stakeholders/types.js';
 import { FLOW_LABEL_MAX, FLOW_TEXT_MAX, type CheckAnsweredBy, type CheckKind, type ReviewSourceType, type StopReason } from '../../flows/types.js';
-import type { Role } from '../../types.js';
+import type { ProviderId, Role } from '../../types.js';
 
 export const TOOL_NAMES = [
   'log_decision',
@@ -925,13 +925,41 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
     'Add a description to an artifact that has none (e.g. an uploaded image), or replace the description of one you saved in this run.',
 };
 
-/** JSON Schema of a tool's input as agents should send it (defaults shown as optional). */
-export function toolJsonSchema(name: ToolName): Record<string, unknown> {
+/** Tools whose `profile` repeats one per-field schema for every field (11 to 13 times). */
+const PROFILE_FIELD_TOOLS: ReadonlySet<ToolName> = new Set(['save_persona', 'save_stakeholder', 'submit_combined_profile']);
+
+/**
+ * Writes the per-field schema of `profile` once, as `$defs.profile_field`, and points every field at it with
+ * `$ref`. Only the advertised JSON schema changes: resolved, it is the inline one, and the handlers validate
+ * with the zod schema as before. Left inline when the fields are not all the same.
+ */
+function shareProfileField(schema: Record<string, unknown>): void {
+  const profile = (schema.properties as Record<string, { properties?: Record<string, unknown> }> | undefined)?.profile;
+  const fields = Object.values(profile?.properties ?? {});
+  if (!profile?.properties || fields.length < 2 || new Set(fields.map((f) => JSON.stringify(f))).size !== 1) return;
+  schema.$defs = { profile_field: fields[0] };
+  for (const k of Object.keys(profile.properties)) profile.properties[k] = { $ref: '#/$defs/profile_field' };
+}
+
+/**
+ * Providers whose CLI was shown to accept the shared field schema (`$defs` and `$ref`) in an MCP tool's input
+ * schema and to call the tool correctly with it: one real `save_persona` call each with Claude Code 2.1.325 and
+ * Codex 0.169.0. OpenCode was not run, so its runs get the inline schema.
+ */
+export const SHARED_FIELD_SCHEMA_PROVIDERS: ReadonlySet<ProviderId> = new Set(['claude', 'codex']);
+
+/**
+ * JSON Schema of a tool's input as agents should send it (defaults shown as optional). `provider`: the CLI of
+ * the run it is advertised to; the profile tools write their field schema once only for a provider in
+ * `SHARED_FIELD_SCHEMA_PROVIDERS` (none named: inline).
+ */
+export function toolJsonSchema(name: ToolName, provider?: ProviderId): Record<string, unknown> {
   const schema = z.toJSONSchema(toolInputSchemas[name], { io: 'input', unrepresentable: 'any' }) as Record<
     string,
     unknown
   >;
   delete schema.$schema;
   if (schema.type !== 'object') schema.type = 'object';
+  if (PROFILE_FIELD_TOOLS.has(name) && provider !== undefined && SHARED_FIELD_SCHEMA_PROVIDERS.has(provider)) shareProfileField(schema);
   return schema;
 }

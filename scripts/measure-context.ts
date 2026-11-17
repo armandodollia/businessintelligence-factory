@@ -5,6 +5,7 @@
  *   npx tsx scripts/measure-context.ts                       # part A + every real run of part B
  *   npx tsx scripts/measure-context.ts --runs overhead,research   # part A + the named run groups only
  *   npx tsx scripts/measure-context.ts --reanalyze <dir>     # part B tables again from a kept capture dir
+ *   npx tsx scripts/measure-context.ts --runs research --pages 1   # only the first research page (and its reviewer)
  *
  * Run groups (part B): `overhead` (Claude: smallest tool list, worker list, worker + browser list),
  * `codex` (Codex: smallest and worker list), `research` (3 browser research runs on public pages, and one
@@ -30,7 +31,7 @@
  * data dirs (the capture dir is always kept when part B ran: it is what `--reanalyze` reads).
  */
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -42,8 +43,9 @@ import { escalationPrompt, escalationSystemPrompt } from '../src/core/escalation
 import { withSystemBlock } from '../src/core/harness/adapter.js';
 import { CodexAdapter } from '../src/core/harness/adapters/codex.js';
 import { browserPromptNote } from '../src/core/harness/browser.js';
+import { claudeFolders, claudeProjectDirName, cliSessionId } from '../src/core/harness/cliLeftovers.js';
 import { linkLogin } from '../src/core/harness/platform.js';
-import { runDirOf } from '../src/core/harness/paths.js';
+import { runCwdOf, runDirOf } from '../src/core/harness/paths.js';
 import { getRunOutputs } from '../src/core/harness/tools/handlers.js';
 import { ROLE_TOOLS, type ToolName } from '../src/core/harness/tools/registry.js';
 import { buildInterviewPrompt } from '../src/core/interview/interview.js';
@@ -57,7 +59,7 @@ import { reviewerRunInput, roleForTask, workPrompt } from '../src/core/research/
 import { reviewerSystemPrompt, workerSystemPrompt } from '../src/core/research/systemPrompts.js';
 import { PERSONA_FIELDS } from '../src/core/scoring/criteria.js';
 import type { Store } from '../src/core/store/db.js';
-import { newId } from '../src/core/store/repos.js';
+import { knowledgeRepos, newId } from '../src/core/store/repos.js';
 import type { Persona, Role, Task } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------------------------------
@@ -80,6 +82,8 @@ const CLAUDE_MODEL = process.env.BIF_MEASURE_CLAUDE_MODEL ?? 'haiku';
 const CODEX_MODEL = process.env.BIF_MEASURE_CODEX_MODEL ?? 'gpt-6.1-sol';
 const TIMEOUT_MS = Number(process.env.BIF_MEASURE_TIMEOUT_MS ?? 300_000);
 const MODELS: Record<'claude' | 'codex', string> = { claude: CLAUDE_MODEL, codex: CODEX_MODEL };
+/** `--pages 1,3`: only these research pages (1-based; the reviewer runs only with page 1). Default: all. */
+const PAGE_PICK = opt('pages')?.split(',').map(Number);
 
 /** Estimated tokens: characters / 4 (the estimate used across BIF's measurements). */
 const est = (chars: number) => Math.ceil(chars / 4);
@@ -514,6 +518,8 @@ type Call = {
   refs?: string[];
   /** save_finding: the quotes it cited (to check what a shortened browser result would have lost). */
   quotes?: string[];
+  /** A failed call: the start of its error text (refused or unknown tools show here). */
+  error?: string;
 };
 type Turn = { id: string; input: number; cacheRead: number; cacheWrite: number; output: number; context: number; outChars: number };
 type RunMeasure = {
@@ -523,6 +529,20 @@ type RunMeasure = {
   systemChars: number; promptChars: number;
   offeredTools?: string[];
   seconds: number;
+  /** Claude: the CLI's session id (from its init event), to find what it left in the person's Claude folder. */
+  sessionId?: string;
+  /** Claude: what of the run was still in the Claude folder or Claude Code's temp root after it ended (`cliLeftovers.ts`). */
+  leftovers?: string[];
+  /** The run's working directory (Claude names its project folder after it). */
+  cwd?: string;
+  /** What the run left in the store: the artifacts of its workspace and the findings of its task, with their quotes. */
+  outcome?: Outcome;
+};
+
+/** A quote is stored only after `save_finding` found it in the artifact's extracted text, so a stored quote is verified. */
+type Outcome = {
+  artifacts: Array<{ id: string; kind: string; sourceUrl?: string }>;
+  findings: Array<{ id: string; claim: string; status: string; quotes: Array<{ artifactId: string; quote: string; verified: boolean; located: boolean }> }>;
 };
 
 /** Image tokens as Claude counts them: (width × height) / 750 after fitting within 1568 px on the long edge. */
@@ -592,12 +612,13 @@ function quotesOf(name: string, input: unknown): string[] {
 
 const keepText = (name: string) => name.startsWith('mcp__browser__') || name.startsWith('browser_');
 
-function parseClaude(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usage' | 'offeredTools'> {
+function parseClaude(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usage' | 'offeredTools' | 'sessionId'> {
   const turns: Turn[] = [];
   const calls: Call[] = [];
   const byId = new Map<string, Call>();
   let usage: RunMeasure['usage'] = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
   let offeredTools: string[] | undefined;
+  let sessionId: string | undefined;
   for (const line of lines) {
     let d: Record<string, unknown>;
     try {
@@ -606,6 +627,7 @@ function parseClaude(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usa
       continue;
     }
     if (d.type === 'system' && d.subtype === 'init' && Array.isArray(d.tools)) offeredTools = d.tools as string[];
+    if (typeof d.session_id === 'string') sessionId ??= d.session_id;
     if (d.type === 'assistant') {
       const m = d.message as { id?: string; usage?: Record<string, number>; content?: Array<Record<string, unknown>> };
       const id = m.id ?? `t${turns.length}`;
@@ -643,6 +665,7 @@ function parseClaude(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usa
         call.resultChars = r.chars;
         call.imageTokens = r.images;
         call.ok = b.is_error !== true;
+        if (!call.ok) call.error = r.text.slice(0, 200);
         if (r.refs.length) call.refs = r.refs;
         if (keepText(call.name)) call.text = r.text;
       }
@@ -655,7 +678,7 @@ function parseClaude(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usa
       };
     }
   }
-  return { turns, calls, usage, ...(offeredTools ? { offeredTools } : {}) };
+  return { turns, calls, usage, ...(offeredTools ? { offeredTools } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 function parseCodex(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usage'> {
@@ -673,7 +696,13 @@ function parseCodex(lines: string[]): Pick<RunMeasure, 'turns' | 'calls' | 'usag
       if (it.type === 'mcp_tool_call') {
         const r = resultSize((it.result as { content?: unknown } | undefined)?.content);
         const name = it.server === 'bif' ? String(it.tool) : `mcp__${String(it.server)}__${String(it.tool)}`;
-        calls.push({ id: String(it.id), name, turn: 0, argChars: JSON.stringify(it.arguments ?? {}).length, resultChars: r.chars, imageTokens: r.images, ok: it.status === 'completed', ...(keepText(name) ? { text: r.text } : {}) });
+        const ok = it.status === 'completed' && !it.error;
+        const quotes = quotesOf(name, it.arguments);
+        calls.push({
+          id: String(it.id), name, turn: 0, argChars: JSON.stringify(it.arguments ?? {}).length, resultChars: r.chars, imageTokens: r.images, ok,
+          ...(keepText(name) ? { text: r.text } : {}), ...(quotes.length ? { quotes } : {}),
+          ...(ok ? {} : { error: (r.text || JSON.stringify(it.error ?? '')).slice(0, 200) }),
+        });
       }
     }
     if (d.type === 'turn.completed') {
@@ -709,10 +738,24 @@ async function realRun(s: Server, spec: RunSpec): Promise<RunMeasure> {
       prompt: spec.prompt, systemPrompt: spec.systemPrompt, needsBrowser: spec.needsBrowser, signal: abort.signal,
       ...(spec.offline ? { offline: true } : {}),
     });
-    return measureRun(dataDir, spec.workspaceId, out.agentRunId, { label: spec.label, provider: spec.provider, role: spec.role, status: out.status, reason: out.reason, seconds: (Date.now() - started) / 1000 });
+    const m = measureRun(dataDir, spec.workspaceId, out.agentRunId, { label: spec.label, provider: spec.provider, role: spec.role, status: out.status, reason: out.reason, seconds: (Date.now() - started) / 1000 });
+    m.outcome = outcomeOf(s.booted.runtime.store, spec.workspaceId, spec.taskId);
+    return m;
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The artifacts of a run's workspace and the findings of its task with their quotes (see `Outcome`). */
+function outcomeOf(store: Store, wsId: string, taskId: string | undefined): Outcome {
+  const ev = knowledgeRepos(store).findingEvidence;
+  return {
+    artifacts: store.artifacts.list({ workspaceId: wsId }).map((x) => ({ id: x.id, kind: x.kind, ...(x.sourceUrl ? { sourceUrl: x.sourceUrl } : {}) })),
+    findings: taskId === undefined ? [] : store.findings.list({ taskId }).map((f) => ({
+      id: f.id, claim: f.claim, status: f.status,
+      quotes: ev.list({ findingId: f.id }).filter((e) => e.quote).map((e) => ({ artifactId: e.artifactId, quote: e.quote!, verified: true, located: e.charStart !== undefined })),
+    })),
+  };
 }
 
 /** Reads a finished run's files (`stdout.log`, `prompt.md`) and measures it. */
@@ -725,8 +768,19 @@ function measureRun(dataDir: string, wsId: string, runId: string, meta: { label:
   const systemChars = sys >= 0 && task > sys ? task - sys - '# System prompt\n\n'.length : 0;
   const promptChars = task >= 0 ? promptMd.length - task - '\n# Task prompt\n\n'.length : 0;
   const parsed = meta.provider === 'codex' ? parseCodex(stdout) : parseClaude(stdout);
-  const m: RunMeasure = { ...meta, runId, model: MODELS[meta.provider as 'claude' | 'codex'] ?? '', ...parsed, systemChars, promptChars };
+  const m: RunMeasure = { ...meta, runId, model: MODELS[meta.provider as 'claude' | 'codex'] ?? '', ...parsed, systemChars, promptChars, cwd: runCwdOf(dataDir, wsId, runId) };
   if (meta.reason === undefined) delete m.reason;
+  if (meta.provider === 'claude') {
+    const cwd = runCwdOf(dataDir, wsId, runId);
+    const f = claudeFolders();
+    const names = [cwd, existsSync(cwd) ? realpathSync(cwd) : cwd].map(claudeProjectDirName).filter((n): n is string => n !== undefined);
+    const sids = [...new Set([m.sessionId, cliSessionId(runId, 1)].filter((x): x is string => x !== undefined))];
+    const candidates = [
+      ...names.flatMap((n) => [join(f.configDir, 'projects', n), ...(f.tmpRoot ? [join(f.tmpRoot, n)] : [])]),
+      ...sids.map((sid) => join(f.configDir, 'session-env', sid)),
+    ];
+    m.leftovers = [...new Set(candidates)].filter((p) => existsSync(p));
+  }
   return m;
 }
 
@@ -806,6 +860,7 @@ async function overheadRuns(provider: 'claude' | 'codex', smallestRole: Role, wh
 async function researchRuns(): Promise<RunMeasure[]> {
   const out: RunMeasure[] = [];
   for (const [i, page] of PAGES.entries()) {
+    if (PAGE_PICK && !PAGE_PICK.includes(i + 1)) continue;
     const s = await startServer('research');
     try {
       const { store, config } = s.booted.runtime;
@@ -990,6 +1045,23 @@ function report(runs: RunMeasure[], a: PartA | undefined, smallestRole: string):
     const bifN = r.offeredTools!.filter((t) => t.startsWith('mcp__bif__')).length;
     const brN = r.offeredTools!.filter((t) => t.startsWith('mcp__browser__')).length;
     console.log(`- ${r.label}: CLI offered ${r.offeredTools!.length} tools (${bifN} bif, ${brN} browser, ${r.offeredTools!.length - bifN - brN} built in)`);
+  }
+  for (const r of runs.filter((x) => x.leftovers)) {
+    console.log(`- ${r.label}: left in the Claude folder or temp root after it ended: ${r.leftovers!.length ? r.leftovers!.join(', ') : 'nothing'}`);
+  }
+
+  // --- what each run delivered, and every failed tool call ---
+  const outRows = runs.filter((r) => r.outcome && (r.outcome.findings.length || r.outcome.artifacts.length)).map((r) => {
+    const o = r.outcome!;
+    const quotes = o.findings.flatMap((f) => f.quotes);
+    return [r.label, r.status, o.artifacts.map((x) => x.kind).join(', ') || '-', o.findings.length, quotes.length, quotes.filter((q) => q.verified).length, o.findings.map((f) => `${f.status}: ${f.claim.slice(0, 60)}`).join(' / ')];
+  });
+  if (outRows.length) table('B0. What each run delivered (artifacts of its workspace, findings of its task, stored quotes = verified)', ['run', 'status', 'artifacts', 'findings', 'quotes', 'verified', 'claims'], outRows);
+  const failed = runs.flatMap((r) => r.calls.filter((c) => !c.ok).map((c) => [r.label, shortName(c.name), (c.error ?? '').replace(/\s+/g, ' ').slice(0, 140)]));
+  table('B0b. Failed tool calls (refused or unknown tools would show here)', ['run', 'tool', 'error'], failed.length ? failed : [['-', '-', 'none']]);
+  for (const r of runs.filter((x) => x.offeredTools)) {
+    const builtin = r.offeredTools!.filter((t) => !t.startsWith('mcp__'));
+    console.log(`- ${r.label}: built-in tools offered (${builtin.length}): ${builtin.join(', ') || 'none'}`);
   }
 
   // --- fixed overhead and tool lists ---

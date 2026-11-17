@@ -4,11 +4,22 @@
  * No test starts a real research browser server (`test/realBrowserGuard.ts`): starting one throws,
  * and a test during which one was tried fails with its own name, also when the harness turned the
  * throw into a failed run.
+ *
+ * No test reads or removes anything in the person's own Claude folder or Claude Code's temp root (the removal of
+ * a run's leftovers, `src/core/harness/cliLeftovers.ts`): each test file gets empty ones of its own
+ * (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`; a test may point them elsewhere with `vi.stubEnv`).
  */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, afterEach, beforeEach } from 'vitest';
 import { installRealBrowserGuard, setGuardedTest, takeRealBrowserAttempts } from './realBrowserGuard.js';
 
 installRealBrowserGuard();
+
+const claudeHome = mkdtempSync(join(tmpdir(), 'bif-test-claude-'));
+process.env.CLAUDE_CONFIG_DIR = join(claudeHome, 'config');
+process.env.CLAUDE_CODE_TMPDIR = join(claudeHome, 'tmp');
 
 function failOnAttempts(where: string): void {
   const attempts = takeRealBrowserAttempts();

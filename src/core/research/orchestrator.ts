@@ -894,7 +894,8 @@ export function killOrphanGroup(pid: number, startedAt?: string): boolean {
 
 /**
  * Startup recovery. AgentRuns left `running` by a dead process are marked `failed`, their tokens
- * revoked and their orphaned process groups killed (`AgentRun.pid`). Tasks in `running|reviewing`
+ * revoked, their orphaned process groups killed (`AgentRun.pid`) and what their CLIs left outside the data
+ * folder removed (`Supervisor.removeRunLeftovers`). Tasks in `running|reviewing`
  * are re-queued with the same round when their research run is still `running` (otherwise they are
  * marked `failed`: nothing would run them); tasks in `waiting_user` keep their pending request and resume
  * when it is answered. Pipelines still `running` continue their interrupted phase and remaining phases
@@ -907,6 +908,8 @@ export function resumeInterrupted(deps: ResearchDeps): ResumeReport {
   const failedRuns: string[] = [];
   for (const run of store.agentRuns.list({ status: 'running' })) {
     if (run.pid !== undefined) killOrphanGroup(run.pid, run.pidStartedAt);
+    // What its CLI left outside the data folder (docs/data-storage.md) goes too.
+    deps.supervisor.removeRunLeftovers(run);
     if (tokens) tokens.revoke(run.token);
     else if (!run.token.startsWith('revoked:')) store.agentRuns.update(run.id, { token: `revoked:${run.token}` });
     store.agentRuns.update(run.id, { status: 'failed', endedAt: now });

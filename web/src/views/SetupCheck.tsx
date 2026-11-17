@@ -20,6 +20,16 @@ export function ThisComputer({ onApplied }: { onApplied?: () => void }) {
       {info && (
         <>
           <Folders info={info} busy={s.busy !== null} onOpen={() => void s.openFolder()} />
+          {info.cliNotices && info.cliNotices.length > 0 && (
+            <div className="error">
+              Noticed while agents ran:
+              <ul>
+                {info.cliNotices.map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           {!info.available || !info.report ? (
             <p className="muted">The setup check is not available on this server.</p>
           ) : (

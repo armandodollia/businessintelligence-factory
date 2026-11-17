@@ -73,6 +73,8 @@ function toOpenCodeMcp(server: unknown): unknown {
  * - Effort (`spec.effort`): `--variant <level>` (help: "model variant (provider-specific reasoning
  *   effort, e.g., high, max, minimal)"). The level is passed as configured; which levels exist depends
  *   on the model's provider.
+ * - Withheld MCP tools (`spec.withheldTools`): `permission: { "<server>_<tool>": "deny" }` by the same
+ *   rule (not checked with a live OpenCode run).
  * - Offline runs (`spec.offline`): `permission: OPENCODE_OFFLINE_PERMISSION` in the generated config
  *   (rule order and merge checked in the 1.2.27 bundle: `PermissionNext.fromConfig`, `disabled`,
  *   agent rules = defaults, agent rules, then the config's rules).
@@ -89,10 +91,13 @@ export class OpenCodeAdapter implements CliAdapter {
       bif: { type: 'remote', url: spec.mcpUrl, enabled: true, oauth: false, timeout: BIF_TIMEOUT_MS },
     };
     for (const [name, server] of Object.entries(spec.extraMcpServers)) mcp[name] = toOpenCodeMcp(server);
+    // Withheld MCP tools: a `deny` rule on `<server>_<tool>`, after the offline rules (last match wins).
+    const withheld = Object.entries(spec.withheldTools ?? {}).flatMap(([server, tools]) => tools.map((t): [string, string] => [`${server}_${t}`, 'deny']));
+    const permission = { ...(spec.offline ? OPENCODE_OFFLINE_PERMISSION : {}), ...Object.fromEntries(withheld) };
     const config = {
       $schema: 'https://opencode.ai/config.json',
       mcp,
-      ...(spec.offline ? { permission: OPENCODE_OFFLINE_PERMISSION } : {}),
+      ...(Object.keys(permission).length ? { permission } : {}),
     };
     const path = join(spec.cwd, OPENCODE_CONFIG_FILE);
     const env: Record<string, string> = { OPENCODE_CONFIG: path, OPENCODE_DISABLE_PROJECT_CONFIG: '1' };

@@ -78,13 +78,30 @@ export function browserStartupWarnings(cfg: Pick<BifConfig, 'browser' | 'limits'
   return out;
 }
 
+/** True when browser runs share one MCP browser server (`browser_close` always fails there). */
+const sharedMcpBrowser = (cfg: BrowserCfg) => cfg.browser.backend === 'mcp' && cfg.browser.mode === 'shared';
+
+/**
+ * Browser tools not offered to browser-using runs, by MCP server name. Shared mode: `browser_close`, which the
+ * shared server always refuses ("The browser context is shared between clients and cannot be closed"); an
+ * agent closes its own tab with `browser_tabs` instead (`browserPromptNote`). Per-run mode closes the run's
+ * own browser, so it stays.
+ */
+export function withheldBrowserTools(cfg: BrowserCfg): Record<string, string[]> {
+  return sharedMcpBrowser(cfg) ? { [SHARED_BROWSER_NAME]: ['browser_close'] } : {};
+}
+
 /** Browser instructions appended to the system prompt of browser-using runs. */
 export function browserPromptNote(cfg: BrowserCfg): string {
+  const close = sharedMcpBrowser(cfg)
+    ? 'When you are done, close each tab you opened: `browser_tabs` with action "close" and the index of each tab you ' +
+      'opened (list the tabs first if you are not sure of the index). Do not close the browser itself: it stays open for the other agents.'
+    : 'close your tabs when you are done.';
   const common =
     'The browser uses a dedicated, persistent research profile that stays logged into accounts created ' +
     'for research. Other agents use the same browser at the same time: open a NEW tab for your work ' +
-    'before navigating, work only in your own tab(s), never close or reuse tabs you did not open, and ' +
-    'close your tabs when you are done.';
+    'before navigating, work only in your own tab(s), never close or reuse tabs you did not open' +
+    (sharedMcpBrowser(cfg) ? `. ${close}` : `, and ${close}`);
   if (cfg.browser.backend === 't3') {
     return `## Browser\nUse the T3 Code browser tools (not a browser MCP server) for all browsing. ${common}`;
   }

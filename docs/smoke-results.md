@@ -525,6 +525,27 @@ gpt-6-astra, read-only), privacy (Claude opus), test-value (Claude sonnet).
 
 Round 3 seated only the two members whose areas had changed since round 2.
 
+## Leaner agent runs and CLI isolation (2026-11-17)
+
+Real runs on Claude haiku and Codex `gpt-6.1-sol`, before and after the changes; the numbers and the
+method are in [context-measurements.md](context-measurements.md).
+
+| What | Result |
+|---|---|
+| First call of a Claude run (the CLI's own part plus tool lists) | 38.5k tokens before, 12.3k after |
+| Browser research run, total input | 477k before on the same page, 236k after; same deliverables: 1 page copy, 2 findings, both quotes verified, no failed tool call |
+| Agents asking for a tool that is no longer offered | none |
+| Smoke modes after the changes: `worker claude`, `browser claude`, `knowledge claude`, `worker codex` | all passed |
+| A real run killed by the idle timeout after an oversized result | nothing of the run remained outside the data folder |
+| Three further real runs, entries in the Claude projects folder before and after | unchanged |
+
+Not checked: Windows and Linux for what the CLIs leave behind; a Codex run killed mid-command; any
+OpenCode run. One of seven runs of the test suite had a single failing test that did not fail again
+in six further runs; it was not identified.
+
+The branch was reviewed with the council skill: correctness (Claude Opus), privacy (Claude Sonnet),
+acceptance (Codex CLI, `gpt-6.1-sol` at high effort). Round 1: 8, 7, 8. Round 2: 9, 9, 9.
+
 ## Notes
 
 - Claude runs inherit the user's global Claude Code hooks and plugins (no flag isolates them without

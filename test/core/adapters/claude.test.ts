@@ -1,8 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { RunEvent, SpawnSpec } from '../../../src/core/harness/adapter.js';
-import { ClaudeAdapter } from '../../../src/core/harness/adapters/claude.js';
+import {
+  builtinToolChange, CLAUDE_EXPECTED_TOOLS, CLAUDE_OFFERED_TOOLS, CLAUDE_OFFLINE_TOOLS, CLAUDE_REMOVED_TOOLS, ClaudeAdapter,
+} from '../../../src/core/harness/adapters/claude.js';
+import { cliNotices } from '../../../src/core/harness/cliNotices.js';
 
 const spec: SpawnSpec = {
   prompt: 'Walk the signup flow',
@@ -37,6 +40,80 @@ describe('ClaudeAdapter', () => {
     const mcp = JSON.parse(files[0]!.content);
     expect(mcp.mcpServers.bif).toEqual({ type: 'http', url: spec.mcpUrl });
     expect(mcp.mcpServers.playwright).toEqual(spec.extraMcpServers.playwright);
+  });
+
+  it('built-in tools: the unusable ones are named and denied (a renamed one comes back), offline runs still get none', () => {
+    const { args } = new ClaudeAdapter().buildCommand(spec);
+    // No allowlist: a tool a later release renames or adds stays offered.
+    expect(args).not.toContain('--tools');
+    expect(args.filter((a) => a === '--disallowedTools')).toHaveLength(1);
+    const at = args.indexOf('--disallowedTools');
+    expect(args[at + 1]).toBe(CLAUDE_REMOVED_TOOLS.join(','));
+    expect(args[at + 2]!.startsWith('--')).toBe(true); // variadic: another flag follows
+    expect([...CLAUDE_REMOVED_TOOLS].sort()).toEqual([
+      'Artifact', 'ArtifactComments', 'ArtifactData', 'CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'EnterWorktree',
+      'ExitWorktree', 'LSP', 'ListAgents', 'NotebookEdit', 'PushNotification', 'RemoteTrigger', 'ReportFindings',
+      'ScheduleWakeup', 'SendMessage', 'Skill', 'Workflow',
+    ]);
+    expect([...CLAUDE_OFFERED_TOOLS].sort()).toEqual(['Bash', 'Edit', 'Monitor', 'Read', 'Task', 'TaskStop', 'ToolSearch', 'WebFetch', 'WebSearch', 'Write']);
+    // 29 built-ins of 2.1.325, each sorted once.
+    expect(new Set([...CLAUDE_REMOVED_TOOLS, ...CLAUDE_OFFERED_TOOLS]).size).toBe(29);
+    for (const t of CLAUDE_EXPECTED_TOOLS) expect(CLAUDE_OFFERED_TOOLS).toContain(t);
+    const offline = new ClaudeAdapter().buildCommand({ ...spec, offline: true }).args;
+    expect(offline.filter((a) => a === '--tools')).toHaveLength(1);
+    expect(offline[offline.indexOf('--tools') + 1]).toBe(CLAUDE_OFFLINE_TOOLS);
+    expect(offline).not.toContain('--disallowedTools');
+  });
+
+  it('a built-in BIF has not sorted, or a missing one a run relies on, is reported once per server start; the run goes on', () => {
+    const init = (tools: string[]) => JSON.stringify({ type: 'system', subtype: 'init', claude_code_version: '9.9.9', tools });
+    const today = [...CLAUDE_OFFERED_TOOLS, 'mcp__bif__save_finding', 'mcp__browser__browser_tabs'];
+    expect(builtinToolChange(today)).toBeUndefined();
+    const changed = builtinToolChange(['Agent', 'Bash', 'Read', 'Teleport', 'ToolSearch', 'WebFetch', 'mcp__bif__save_finding']);
+    expect(changed).toEqual({ unsorted: ['Agent', 'Teleport'], missing: ['WebSearch'] });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const a = new ClaudeAdapter();
+      a.buildCommand(spec);
+      expect(a.parseLine(init(['Agent', 'Bash', 'Read', 'ToolSearch', 'WebFetch']))).toEqual([]);
+      // A second run of the same server: no second warning for the same change.
+      const b = new ClaudeAdapter();
+      b.buildCommand(spec);
+      b.parseLine(init(['Agent', 'Bash', 'Read', 'ToolSearch', 'WebFetch']));
+      const notes = cliNotices().filter((n) => n.includes('9.9.9'));
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toContain('Agent');
+      expect(notes[0]).toContain('WebSearch');
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('9.9.9'))).toHaveLength(1);
+      // An offline run is offered no built-in on purpose: nothing to report.
+      const off = new ClaudeAdapter();
+      off.buildCommand({ ...spec, offline: true });
+      off.parseLine(init(['mcp__bif__save_persona']).replace('9.9.9', '9.9.8'));
+      expect(cliNotices().some((n) => n.includes('9.9.8'))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('no session persistence: no transcript and no oversized-result copies kept in the person\'s Claude folder', () => {
+    for (const s of [spec, { ...spec, offline: true }]) {
+      expect(new ClaudeAdapter().buildCommand(s).args).toContain('--no-session-persistence');
+    }
+  });
+
+  it('session id: --session-id <uuid> when the run has one (its leftovers are found by it); none otherwise', () => {
+    expect(new ClaudeAdapter().buildCommand(spec).args).not.toContain('--session-id');
+    const args = new ClaudeAdapter().buildCommand({ ...spec, sessionId: '8d79edb1-3eab-447b-97f5-1a3924ecf8ca' }).args;
+    expect(args[args.indexOf('--session-id') + 1]).toBe('8d79edb1-3eab-447b-97f5-1a3924ecf8ca');
+  });
+
+  it('withheld MCP tools: --disallowedTools mcp__<server>__<tool>, followed by another flag (the option is variadic)', () => {
+    const args = new ClaudeAdapter().buildCommand({ ...spec, withheldTools: { browser: ['browser_close'] } }).args;
+    expect(args.filter((a) => a === '--disallowedTools')).toHaveLength(1);
+    const at = args.indexOf('--disallowedTools');
+    expect(args[at + 1]).toBe([...CLAUDE_REMOVED_TOOLS, 'mcp__browser__browser_close'].join(','));
+    expect(args[at + 2]!.startsWith('--')).toBe(true);
   });
 
   it('effort: --effort <level> when the run has one; the same command as before when it has none', () => {

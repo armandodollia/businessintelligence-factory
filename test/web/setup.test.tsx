@@ -109,6 +109,17 @@ describe('the Settings page: this computer', () => {
     expect(claude.textContent).toContain('It cannot tell whether the login is still accepted.');
   });
 
+  it("shows what the server noticed about an agent CLI while it ran agents; nothing when it noticed nothing", async () => {
+    const { unmount } = render(<Settings />);
+    expect((await section()).textContent).not.toContain('Noticed while agents ran');
+    unmount();
+    info = { ...info, cliNotices: ['Claude Code 9.9.9 offers built-in tools BIF has not sorted, offered to every run until they are: Teleport'] };
+    render(<Settings />);
+    const s = await section();
+    expect(s.textContent).toContain('Noticed while agents ran');
+    expect(within(s).getByText(/offered to every run until they are: Teleport/)).toBeTruthy();
+  });
+
   it('shows the version and where the data is, and opens the folder', async () => {
     render(<Settings />);
     const s = await section();

@@ -16,6 +16,22 @@ Code: `src/core/scoring/export.ts`, `src/core/internal/`, `src/api/routes.ts`.
 Uploads appear in prompts as metadata only (id, type, size, date). Agents read upload text only
 through the knowledge read tools, and every such read is logged.
 
+## What stays on the machine outside the data folder
+
+- **Claude Code** writes no transcript. A run's results too large to return inline and the output of its
+  shell commands sit in your Claude folder and Claude Code's temp folder while the run lasts; BIF removes
+  them, with the run's empty folders, when the run ends however it ended, and after a crash at the next
+  start. Until then they hold whatever the run read, upload text included. Left after a forced kill, and
+  not removed by BIF: a snapshot of your own shell settings and a session entry (session id, folder,
+  process id), neither with anything of the run.
+- **Codex** keeps nothing outside the data folder: its home is BIF's private one, and with `--ephemeral`
+  no run's prompts or results were found in it after a run.
+- **OpenCode** stores every session, including prompts, page text and upload text it was shown, in its
+  own data folder, beyond BIF's retention and the feedback-bundle rules.
+
+The full inventory, per CLI, is in
+[data-storage.md](data-storage.md#what-the-agent-clis-keep-outside-the-data-folder).
+
 ## Export and uploads
 
 The JSONL export (`GET /api/workspaces/:id/export`) leaves out by default, unless

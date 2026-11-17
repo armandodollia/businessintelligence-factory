@@ -606,6 +606,24 @@ describe('mcp server', () => {
     await worker.close();
   });
 
+  it("tools/list: save_persona's field schema is shared for Claude and Codex runs, inline for OpenCode runs (not verified there)", async () => {
+    const s = setup();
+    const tokens = new TokenRegistry(s.store);
+    const app = new Hono();
+    mountMcp(app, { tokens, handle: s.handle });
+    const schemaFor = async (provider: 'claude' | 'codex' | 'opencode') => {
+      const client = await connect(app, tokens.issue(ctx('worker', { model: { provider, model: 'm' } })));
+      const tool = (await client.listTools()).tools.find((t) => t.name === 'save_persona')!;
+      await client.close();
+      return tool.inputSchema as Record<string, unknown>;
+    };
+    expect((await schemaFor('claude')).$defs).toHaveProperty('profile_field');
+    expect((await schemaFor('codex')).$defs).toHaveProperty('profile_field');
+    const open = await schemaFor('opencode');
+    expect(open.$defs).toBeUndefined();
+    expect(JSON.stringify(open)).not.toContain('$ref');
+  });
+
   it('unknown token is rejected at the HTTP layer', async () => {
     const s = setup();
     const app = new Hono();

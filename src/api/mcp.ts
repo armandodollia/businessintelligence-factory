@@ -23,7 +23,7 @@ function toCallToolResult(r: ToolResult): CallToolResult {
 /**
  * Mounts the harness MCP server at `/mcp/:token` and at `/mcp` with a bearer token (streamable HTTP, stateless: a fresh MCP server
  * per HTTP request, bound to the run resolved from the token). `tools/list` returns only the
- * role's tools; calls go through `handle`, which re-checks the role scope. Unknown, revoked or
+ * role's tools (schemas in the form the run's CLI was verified with, `toolJsonSchema`); calls go through `handle`, which re-checks the role scope. Unknown, revoked or
  * finished-run tokens get HTTP 401 before any MCP processing.
  *
  * Long-blocking tools (`request_approval`) keep the POST open as an SSE stream with keep-alive
@@ -42,7 +42,7 @@ export function mountMcp(app: Hono, deps: McpDeps): void {
       tools: allowed.map((name) => ({
         name,
         description: TOOL_DESCRIPTIONS[name],
-        inputSchema: toolJsonSchema(name) as { type: 'object'; [k: string]: unknown },
+        inputSchema: toolJsonSchema(name, ctx.model.provider) as { type: 'object'; [k: string]: unknown },
       })),
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {

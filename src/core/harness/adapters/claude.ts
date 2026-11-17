@@ -1,4 +1,6 @@
 import { join } from 'node:path';
+import { removeClaudeRunLeftovers, type RunTrace } from '../cliLeftovers.js';
+import { noteCliChange } from '../cliNotices.js';
 import {
   harnessToolName,
   isRateLimitText,
@@ -25,14 +27,74 @@ export const CLAUDE_MCP_FILE = '.bif-mcp.json';
 export const CLAUDE_OFFLINE_TOOLS = '';
 
 /**
+ * Built-in tools no headless BIF run can use, denied in every run that is not offline with `--disallowedTools`
+ * (help: "Comma or space-separated list of tool names to deny"; checked with 2.1.325: a denied tool is absent
+ * from the init event's tool list, and a name the CLI does not know is ignored). A deny list, not an allowlist:
+ * if a later release renames one of these, it is simply offered again (it costs tokens and loses nothing),
+ * while a renamed tool a run needs is never lost. Claude Code 2.1.325 offered 29 built-ins:
+ * - scheduling and waking later: CronCreate, CronDelete, CronList, ScheduleWakeup (a run ends when it is done);
+ * - telling the person or another session: PushNotification, RemoteTrigger, ListAgents, SendMessage (a run has no
+ *   teammates; it asks the person through BIF's own request tools);
+ * - publishing to claude.ai: Artifact, ArtifactComments, ArtifactData, DesignSync (evidence goes to `save_artifact`);
+ * - code work: EnterWorktree, ExitWorktree, NotebookEdit, LSP, ReportFindings (code-review findings for the CLI's
+ *   host; BIF findings go to `save_finding`);
+ * - Workflow (scripted multi-agent workflows that a person opts into);
+ * - Skill: it has no use in a headless run and would bring the person's own skills into a BIF run.
+ */
+export const CLAUDE_REMOVED_TOOLS = [
+  'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup',
+  'PushNotification', 'RemoteTrigger', 'ListAgents', 'SendMessage',
+  'Artifact', 'ArtifactComments', 'ArtifactData', 'DesignSync',
+  'EnterWorktree', 'ExitWorktree', 'NotebookEdit', 'LSP', 'ReportFindings',
+  'Workflow', 'Skill',
+] as const;
+
+/**
+ * The other 10 built-ins of 2.1.325, offered on purpose: files and shell (Read, Write, Edit, Bash; a run needed
+ * Read and Bash to reach a page snapshot too large to return inline), the web (WebFetch, WebSearch), ToolSearch
+ * (it loads the deferred MCP tool schemas: without it they are sent in full), and the ones that may help: Task
+ * (sub-agents), Monitor and TaskStop (watching and stopping a background command).
+ */
+export const CLAUDE_OFFERED_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'ToolSearch', 'Task', 'Monitor', 'TaskStop'] as const;
+
+/** Built-ins BIF's runs rely on: a release that no longer offers one of them is reported. */
+export const CLAUDE_EXPECTED_TOOLS = ['Read', 'Bash', 'ToolSearch', 'WebFetch', 'WebSearch'] as const;
+
+/**
+ * What changed in the built-in tools a Claude Code release offers (`tools` of its init event, MCP tools
+ * included): built-ins that are neither removed nor known to be offered (`unsorted`), and expected ones that
+ * are not offered (`missing`). Undefined when nothing changed.
+ */
+export function builtinToolChange(offered: readonly string[]): { unsorted: string[]; missing: string[] } | undefined {
+  const builtins = offered.filter((t) => !t.startsWith('mcp__'));
+  const known = new Set<string>([...CLAUDE_REMOVED_TOOLS, ...CLAUDE_OFFERED_TOOLS]);
+  const unsorted = builtins.filter((t) => !known.has(t)).sort();
+  const missing = CLAUDE_EXPECTED_TOOLS.filter((t) => !builtins.includes(t));
+  return unsorted.length || missing.length ? { unsorted, missing } : undefined;
+}
+
+/**
  * Claude Code (`claude` 2.1.x) in print mode with stream-json output.
  *
  * Verified against `claude --help` (2.1.322): `-p/--print` is a boolean flag and the prompt is
  * the positional argument; `--mcp-config <configs...>` is variadic, so it is always followed by
  * another flag here. `--bare` is NOT used: it skips keychain reads and so breaks OAuth logins.
  * `MCP_TOOL_TIMEOUT` is raised so blocking harness tools (`request_approval`) do not time out.
- * Offline runs (`spec.offline`) add `--tools ""` (no built-in tools; variadic like `--mcp-config`,
- * so the empty value is one argument and is followed by another flag).
+ * Built-in tools: `--disallowedTools` with `CLAUDE_REMOVED_TOOLS` (and the withheld MCP tools, below), or
+ * `--tools ""` (none) for offline runs (`spec.offline`); both variadic like `--mcp-config`, so the value is one
+ * comma-joined argument followed by another flag. The init event's tool list is checked against the lists
+ * above (`builtinToolChange`): a change is reported once per server start (`noteCliChange`), never failing the run.
+ * `--no-session-persistence` (help: "Disable session persistence - sessions will not be saved to disk and
+ * cannot be resumed (only works with --print)"): no transcript in the person's Claude folder, and results too
+ * large to return inline are written there only while the run lasts (checked with 2.1.325: the agent can
+ * still read the file during the run; it is gone when the CLI exits). BIF never resumes a CLI session: a
+ * retry starts a new one with what the run already did (`priorAttemptSection`).
+ * `--session-id <uuid>` (help: "Use a specific session ID for the conversation (must be a valid UUID)") with
+ * `spec.sessionId`: what a run still leaves in the person's Claude folder and the temp root (empty folders, and
+ * after a kill its oversized results and shell output) is found by it and by the cwd and removed when the
+ * attempt ends, however it ended (`removeRunLeftovers`, `removeClaudeRunLeftovers`).
+ * Withheld MCP tools (`spec.withheldTools`): added to `--disallowedTools` as `mcp__<server>__<tool>`. A denied
+ * tool is not offered at all (checked with 2.1.325: absent from the init event's tool list).
  * Effort (`spec.effort`): `--effort <level>` (help: "Effort level for the current session (low, medium,
  * high, xhigh, max)"); the level is passed as configured and the CLI judges it.
  */
@@ -40,12 +102,17 @@ export class ClaudeAdapter implements CliAdapter {
   readonly id = 'claude' as const;
   readonly offline = true;
   private readonly toolNames = new Map<string, string>();
+  /** Set by `buildCommand`: an offline run is offered no built-in on purpose. */
+  private offlineRun = false;
 
   constructor(private readonly command = 'claude') {}
 
   buildCommand(spec: SpawnSpec): BuiltCommand {
     const mcpPath = join(spec.cwd, CLAUDE_MCP_FILE);
     const mcp = { mcpServers: { bif: { type: 'http', url: spec.mcpUrl }, ...spec.extraMcpServers } };
+    const withheld = Object.entries(spec.withheldTools ?? {}).flatMap(([server, tools]) => tools.map((t) => `mcp__${server}__${t}`));
+    const denied = spec.offline ? withheld : [...CLAUDE_REMOVED_TOOLS, ...withheld];
+    this.offlineRun = spec.offline === true;
     return {
       cmd: this.command,
       args: [
@@ -56,6 +123,9 @@ export class ClaudeAdapter implements CliAdapter {
         ...(spec.effort ? ['--effort', spec.effort] : []),
         '--mcp-config', mcpPath,
         '--strict-mcp-config',
+        '--no-session-persistence',
+        ...(spec.sessionId ? ['--session-id', spec.sessionId] : []),
+        ...(denied.length ? ['--disallowedTools', denied.join(',')] : []),
         ...(spec.offline ? ['--tools', CLAUDE_OFFLINE_TOOLS] : []),
         '--append-system-prompt', safePositional(spec.systemPrompt),
         '--dangerously-skip-permissions',
@@ -65,10 +135,17 @@ export class ClaudeAdapter implements CliAdapter {
     };
   }
 
+  removeRunLeftovers(run: RunTrace): void {
+    removeClaudeRunLeftovers(run);
+  }
+
   parseLine(line: string): RunEvent[] {
     const d = parseJsonObject(line);
     if (!d) return plainLineEvents(line);
     switch (d.type) {
+      case 'system':
+        if (d.subtype === 'init' && Array.isArray(d.tools) && !this.offlineRun) this.checkBuiltins(d);
+        return [];
       case 'assistant':
         return this.assistant(d);
       case 'user':
@@ -85,6 +162,18 @@ export class ClaudeAdapter implements CliAdapter {
       default:
         return [];
     }
+  }
+
+  /** Reports a change in the built-in tools this CLI offers (once per server start); the run goes on. */
+  private checkBuiltins(init: Record<string, unknown>): void {
+    const change = builtinToolChange((init.tools as unknown[]).map(String));
+    if (!change) return;
+    const version = str(init.claude_code_version) ?? 'unknown version';
+    const parts = [
+      change.unsorted.length ? `offers built-in tools BIF has not sorted, offered to every run until they are: ${change.unsorted.join(', ')}` : '',
+      change.missing.length ? `no longer offers built-in tools BIF's runs rely on: ${change.missing.join(', ')}` : '',
+    ].filter(Boolean);
+    noteCliChange(`Claude Code ${version} ${parts.join('; and ')} (see CLAUDE_REMOVED_TOOLS in src/core/harness/adapters/claude.ts).`);
   }
 
   private assistant(d: Record<string, unknown>): RunEvent[] {

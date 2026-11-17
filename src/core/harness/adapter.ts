@@ -1,4 +1,5 @@
 import type { ProviderId } from '../types.js';
+import type { RunTrace } from './cliLeftovers.js';
 
 /**
  * Normalized event emitted by every CLI adapter. `usage.costUsd` is an addition to the spec'd
@@ -38,7 +39,18 @@ export type SpawnSpec = {
   stateDir?: string;
   /** Extra MCP servers (e.g. browser), in Claude Code `mcpServers` entry format. */
   extraMcpServers: Record<string, unknown>;
+  /**
+   * Tools of `extraMcpServers` the CLI must not offer, by server name (e.g. `{ browser: ['browser_close'] }`:
+   * the shared browser refuses it). Each adapter uses its CLI's own setting; omitted, every tool is offered.
+   */
+  withheldTools?: Record<string, string[]>;
   cwd: string;
+  /**
+   * The CLI session id of this attempt (`cliSessionId`, a UUID). A CLI that names what it leaves outside the
+   * data folder after its session is started with it (Claude Code: `--session-id`), so `removeRunLeftovers`
+   * finds those files again; the other adapters ignore it.
+   */
+  sessionId?: string;
   env?: Record<string, string>;
   /**
    * Offline run (stakeholder design §6, §16: own stakeholder research): the agent must not reach the
@@ -71,6 +83,12 @@ export interface CliAdapter {
   buildCommand(spec: SpawnSpec): BuiltCommand;
   /** Parses one stdout line. Unknown or malformed lines yield `[]`. */
   parseLine(line: string): RunEvent[];
+  /**
+   * Removes what a run of this CLI left outside BIF's data folder (`cliLeftovers.ts`), found from the run itself:
+   * its working directory and the session ids of its attempts. Called when an attempt ends however it ended,
+   * and by the recovery of the next start. Absent: the CLI leaves nothing BIF removes.
+   */
+  removeRunLeftovers?(run: RunTrace): void;
 }
 
 /** Bound tool-calling client handed to in-process fake agents. */

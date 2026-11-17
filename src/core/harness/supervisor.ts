@@ -6,14 +6,15 @@ import type { BifConfig } from '../config/schema.js';
 import { AbortError, type EventBus } from '../events.js';
 import type { Store } from '../store/db.js';
 import { newId } from '../store/repos.js';
-import type { AgentRun, AgentRunAttempt, Role, TaskType } from '../types.js';
+import type { AgentRun, AgentRunAttempt, ProviderId, Role, TaskType } from '../types.js';
 import { recordUsage, resolveRunScope } from '../metrics/usage.js';
 import { recordRunPrompt } from '../prompts/store.js';
 import { usageRepos } from '../store/usageRepos.js';
 import { enforceBudget } from './budget.js';
 import { isRateLimitText, offlineRefusal, type FakeScript, type RunEvent, type ToolClient } from './adapter.js';
 import { getAdapter } from './adapters/index.js';
-import { browserServersFor, effectiveMaxBrowserRuns, SharedBrowser } from './browser.js';
+import { browserServersFor, effectiveMaxBrowserRuns, SharedBrowser, withheldBrowserTools } from './browser.js';
+import { cliSessionId } from './cliLeftovers.js';
 import { runCwdOf, runDirOf } from './paths.js';
 import { priorAttemptSection } from './priorAttempt.js';
 import { childEnv, commandFor, killTreeNow, linkLogin, signalTree, startTimeOf, stopTree, syncLoginBack, type Launch } from './platform.js';
@@ -140,8 +141,11 @@ export class Supervisor {
   private readonly dataDir: string;
   /** The shared browser MCP server browser-using runs connect to (started on first use). */
   readonly browser: SharedBrowser;
-  /** The CLI processes that are running now, by agent run. */
-  private readonly live = new Map<string, { pid: number; startedAt: string | undefined }>();
+  /**
+   * The CLI processes that are running now, by agent run, each with the removal of what it leaves outside the
+   * data folder (`CliAdapter.removeRunLeftovers`), for a shutdown that stops it.
+   */
+  private readonly live = new Map<string, { pid: number; startedAt: string | undefined; removeLeftovers: () => void }>();
   /** Set by `stopRuns`: the server is shutting down. */
   private closed = false;
   private stopping: Promise<void> | undefined;
@@ -166,6 +170,7 @@ export class Supervisor {
     this.stopping ??= Promise.all(
       [...this.live].map(async ([id, r]) => {
         await stopTree(r.pid, this.killGraceMs, r.startedAt);
+        r.removeLeftovers();
         this.live.delete(id);
       }),
     ).then(() => undefined);
@@ -184,6 +189,33 @@ export class Supervisor {
       } catch {
         // already gone
       }
+      r.removeLeftovers();
+    }
+  }
+
+  /**
+   * Crash recovery (`resumeInterrupted`): removes what the CLI of `run`, left `running` by a process that is
+   * gone, left outside the data folder, for every attempt it may have made. Never throws.
+   */
+  removeRunLeftovers(run: Pick<AgentRun, 'id' | 'workspaceId' | 'model' | 'attempts'>): void {
+    // Nothing here may throw: this runs for every interrupted run at start-up, and one bad record must not
+    // stop the recovery of the others.
+    try {
+      const recorded = usageRepos(this.deps.store).agentRunAttempts.list({ runId: run.id }).length;
+      const attempts = Math.max(run.attempts ?? 0, recorded + 1);
+      const sessionIds = Array.from({ length: attempts }, (_, i) => cliSessionId(run.id, i + 1));
+      this.removeLeftovers(run.model.provider, runCwdOf(this.dataDir, run.workspaceId, run.id), sessionIds, run.id);
+    } catch (err) {
+      console.warn(`[bif] could not work out what run ${run.id} left outside the data folder: ${(err as Error).message}`);
+    }
+  }
+
+  /** `CliAdapter.removeRunLeftovers` of the provider's adapter, logged and never thrown. */
+  private removeLeftovers(provider: ProviderId, cwd: string, sessionIds: string[], agentRunId: string): void {
+    try {
+      getAdapter(provider, this.deps.config.providers[provider]?.command).removeRunLeftovers?.({ cwd, sessionIds });
+    } catch (err) {
+      console.warn(`[bif] could not remove what run ${agentRunId} left outside the data folder: ${(err as Error).message}`);
     }
   }
 
@@ -332,7 +364,7 @@ export class Supervisor {
       if (attempt > 1) writeFileSync(join(runDir, `prompt.attempt${attempt}.md`), promptMarkdown(ctx, opts.systemPrompt, prompt, attempt));
       result = opts.fake
         ? await this.attemptFake(ctx, opts, record)
-        : await this.attemptCli(ctx, token, cwd, runDir, { ...opts, prompt }, record);
+        : await this.attemptCli(ctx, token, cwd, runDir, attempt, { ...opts, prompt }, record);
       // Shut down while an in-process script ran: nothing more is recorded for the run.
       if (this.closed) return this.halt();
       const attemptRow: AgentRunAttempt = {
@@ -507,6 +539,7 @@ export class Supervisor {
     token: string,
     cwd: string,
     runDir: string,
+    attempt: number,
     opts: RunOptions,
     record: (e: RunEvent) => void,
   ): Promise<AttemptResult> {
@@ -514,14 +547,18 @@ export class Supervisor {
     const provider = ctx.model.provider;
     const adapter = getAdapter(provider, config.providers[provider].command);
     const base = mcpBaseUrl.replace(/\/+$/, '');
+    const browser = opts.needsBrowser && !opts.offline;
+    const withheld = browser ? withheldBrowserTools(config) : {};
     const spec = {
       prompt: opts.prompt,
       systemPrompt: opts.systemPrompt,
       model: ctx.model.model,
       mcpUrl: `${base}/mcp/${token}`,
       mcpBearer: { url: `${base}/mcp`, token },
-      extraMcpServers: opts.needsBrowser && !opts.offline ? await browserServersFor(config, this.browser) : {},
+      extraMcpServers: browser ? await browserServersFor(config, this.browser) : {},
+      ...(Object.keys(withheld).length ? { withheldTools: withheld } : {}),
       cwd,
+      sessionId: cliSessionId(ctx.agentRunId, attempt),
       stateDir: join(this.dataDir, 'cli-state'),
       ...(opts.offline ? { offline: true } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
@@ -559,6 +596,10 @@ export class Supervisor {
         record(e);
       };
 
+      // What the CLI leaves outside the data folder goes when the attempt ends, however it ended (normal end,
+      // failure, timeout or abort kill: below, once the process group is gone; shutdown: `stopRuns`,
+      // `killRunsNow`; a crash: `removeRunLeftovers` at the next start).
+      const removeLeftovers = () => this.removeLeftovers(provider, cwd, [spec.sessionId], ctx.agentRunId);
       const spawnedAt = Date.now();
       const child = spawn(launch.cmd, launch.args, {
         cwd,
@@ -577,7 +618,7 @@ export class Supervisor {
         pidStartedAt = startTimeOf(pid, spawnedAt);
         this.deps.store.agentRuns.update(ctx.agentRunId, { pid, pidStartedAt });
         // Known to `stopRuns` until the attempt ends (`finish`).
-        this.live.set(ctx.agentRunId, { pid, startedAt: pidStartedAt });
+        this.live.set(ctx.agentRunId, { pid, startedAt: pidStartedAt, removeLeftovers });
       }
 
       // Kill the CLI if it ignores SIGTERM; descendants are reaped after it exits (reapGroup).
@@ -661,6 +702,7 @@ export class Supervisor {
           await reapGroup(pid, this.killGraceMs, pidStartedAt);
           // Windows: a login copied (not linked) into the private CLI home goes back to the user.
           for (const l of built.links ?? []) syncLoginBack(l.path, l.target);
+          removeLeftovers();
           // Group is dead, so stdout closes promptly; bound the wait anyway.
           if (!outClosed) {
             await new Promise<void>((r) => {

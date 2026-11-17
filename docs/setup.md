@@ -62,7 +62,11 @@ It stays logged into the throwaway accounts the agents create. The `browser` blo
 `"backend": "mcp"`, `"mode": "shared"`. The harness starts **one** browser MCP server
 (`browser.shared`) the first time a run needs a browser. Every browser-using run connects to it over
 HTTP (`http://127.0.0.1:<port>/mcp`, MCP server name `browser`). All runs share one browser on one
-persistent profile. Each agent is told to open its own tab, work only there and close it when done.
+persistent profile. Each agent is told to open its own tab, work only there and close it when done
+with `browser_tabs` (action `close`). `browser_close` is not offered in this mode: the shared server
+always refuses it ("The browser context is shared between clients and cannot be closed"). Claude Code
+gets `--disallowedTools mcp__browser__browser_close`, Codex `mcp_servers.browser.disabled_tools`, OpenCode a
+`deny` permission on `browser_browser_close` (not checked with a live OpenCode run).
 The default is a pinned Playwright MCP:
 
 ```json
@@ -135,12 +139,36 @@ Each CLI is started so that it sees only BIF's tools, as far as the CLI allows.
   `config.toml` and `auth.json` symlinked to yours (`$CODEX_HOME` or `~/.codex`). So your Codex MCP
   servers, plugins and hooks are not loaded; only `bif` (and `browser`) are passed with `-c`. Sign in
   with `codex login` as usual. The link is a symlink so a token refresh made during a run lands in
-  your own file. It is re-created before every run if missing or replaced.
+  your own file. It is re-created before every run if missing or replaced. Your own skills live
+  outside `CODEX_HOME` (`~/.agents/skills`), so every run also gets `-c skills.include_instructions=false`:
+  the model is not shown the skills list (yours or Codex's bundled ones). The skill files stay
+  readable on disk, like any other file. What still reaches a Codex run: the apps (connectors) of the
+  ChatGPT account you signed in with, which Codex offers as deferred tools (`features.apps`, on by
+  default), and, in a checkout whose data folder is inside the git repository, any `AGENTS.md` between
+  the run folder and the repository root (the repository has none today).
 - **OpenCode** reads only the generated `.bif-opencode.json` (`OPENCODE_CONFIG`), with project
   configs disabled and the global config dir redirected to `data/cli-state/opencode-config`.
   Credentials stay in OpenCode's data dir, so logins keep working.
 - **Claude Code** gets `--strict-mcp-config` (only `bif` and `browser`), but still loads your global
-  hooks and plugins (see [known-limitations.md](known-limitations.md)).
+  hooks and plugins (see [known-limitations.md](known-limitations.md)). Its built-in tools that no BIF run
+  can use are denied by name (`--disallowedTools`, `CLAUDE_REMOVED_TOOLS` in
+  `src/core/harness/adapters/claude.ts`): scheduling, notification, publishing, worktree, notebook and
+  code-review tools, and the skill tool. The skill tool is not offered, so your own skills are not listed
+  to BIF's runs. Everything else is offered: files, shell, web, ToolSearch, the sub-agent tool and the
+  background-command tools. The sub-agent tool still reads your own agents (`~/.claude/agents`) and runs
+  them with your global `CLAUDE.md`, as the main run does. A tool a later Claude Code release adds or
+  renames is offered until it is sorted; the server log and the setup check on the Settings page say so
+  (as they do when Read, Bash, ToolSearch or a web tool is missing). Offline runs get no built-in tool
+  (`--tools ""`). Every run also gets `--no-session-persistence` (no transcript) and `--session-id` with an
+  id BIF derives from the run: what a run still leaves in your Claude folder and Claude Code's temp folder
+  is removed when it ends (see
+  [data-storage.md](data-storage.md#what-the-agent-clis-keep-outside-the-data-folder)).
+- **Codex** runs with `--ephemeral`: no session files.
+- **OpenCode** still stores its sessions in its own data folder (see
+  [data-storage.md](data-storage.md#what-the-agent-clis-keep-outside-the-data-folder)). From its code
+  (1.2.27, not checked with a live run): your global `~/.claude/CLAUDE.md` and your skills in
+  `~/.claude/skills` and `~/.agents/skills` still reach an OpenCode run; your OpenCode config, plugins and
+  `AGENTS.md` do not (its config folder is BIF's), nor project instruction files (project config is off).
 - **Run tokens** (the per-run MCP credential) never go on a command line. Claude Code and OpenCode
   read them from a generated config file in the run directory; Codex from the `BIF_MCP_TOKEN`
   environment variable (sent as a bearer header to `/mcp`).

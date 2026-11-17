@@ -35,6 +35,16 @@ describe('OpenCodeAdapter', () => {
     expect(args.filter((_, i) => i !== at && i !== at + 1)).toEqual(plain);
   });
 
+  it('withheld MCP tools: permission "deny" on <server>_<tool> (OpenCode drops a tool whose last rule denies it)', () => {
+    const cfgOf = (s: SpawnSpec) => JSON.parse(new OpenCodeAdapter().buildCommand(s).files[0]!.content) as { permission?: Record<string, string> };
+    expect(cfgOf(spec).permission).toBeUndefined();
+    expect(cfgOf({ ...spec, withheldTools: { browser: ['browser_close'] } }).permission).toEqual({ browser_browser_close: 'deny' });
+    // Offline runs keep their own rules (the deny-all comes first, the allow of bif tools after it).
+    expect(cfgOf({ ...spec, offline: true, withheldTools: { browser: ['browser_close'] } }).permission).toEqual({
+      '*': 'deny', 'bif_*': 'allow', browser_browser_close: 'deny',
+    });
+  });
+
   it('command shape and generated config file', () => {
     const { cmd, args, files, env } = new OpenCodeAdapter().buildCommand(spec);
     expect(cmd).toBe('opencode');

@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SpawnSpec } from '../../../src/core/harness/adapter.js';
-import { ClaudeAdapter } from '../../../src/core/harness/adapters/claude.js';
+import { CLAUDE_REMOVED_TOOLS, ClaudeAdapter } from '../../../src/core/harness/adapters/claude.js';
 import { runEscalation } from '../../../src/core/escalation/escalation.js';
 import type { RunOptions } from '../../../src/core/harness/supervisor.js';
 import { CodexAdapter } from '../../../src/core/harness/adapters/codex.js';
@@ -50,13 +50,16 @@ describe('adapters enforce offline in the command they build', () => {
     expect(new ClaudeAdapter().offline).toBe(true);
   });
 
-  it('claude: not offline → the command is unchanged', () => {
+  it('claude: not offline → every built-in but the unusable ones (web and shell included); offline → none', () => {
     const today = new ClaudeAdapter().buildCommand(spec);
     expect(today.args).not.toContain('--tools');
+    const denied = today.args[today.args.indexOf('--disallowedTools') + 1]!.split(',');
+    for (const t of ['WebFetch', 'WebSearch', 'Bash']) expect(denied).not.toContain(t);
+    expect(denied).toEqual([...CLAUDE_REMOVED_TOOLS]);
     expect(new ClaudeAdapter().buildCommand({ ...spec, offline: false })).toEqual(today);
     const offline = new ClaudeAdapter().buildCommand({ ...spec, offline: true });
-    const at = offline.args.indexOf('--tools');
-    expect([...offline.args.slice(0, at), ...offline.args.slice(at + 2)]).toEqual(today.args);
+    expect(offline.args[offline.args.indexOf('--tools') + 1]).toBe('');
+    expect(offline.args).not.toContain('--disallowedTools');
   });
 
   it('opencode: offline config denies every tool except the bif MCP tools', () => {

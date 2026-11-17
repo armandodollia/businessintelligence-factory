@@ -388,3 +388,220 @@ Both matter for BIF's privacy promise as much as for tokens.
 
 The samples are small: 3 research runs, 1 run of each other kind, and 6 quotes in total. The numbers show
 proportions, not stable averages.
+
+## After: leaner runs and two isolation fixes (2026-11-16)
+
+Re-measured the same day with the same script, CLIs and pages, after five changes (the council's fixes
+changed items 1, 3 and 5 afterwards; the final state is in
+[the last subsection](#final-state-after-the-councils-fixes)):
+
+1. Claude Code runs that are not offline got `--tools` with 11 of the 29 built-in tools (an allowlist).
+   Final state: the 19 unusable ones are denied by name instead (`--disallowedTools`, `CLAUDE_REMOVED_TOOLS`
+   in `src/core/harness/adapters/claude.ts`), and the skill tool is one of them. ToolSearch is kept.
+2. In shared-browser mode `browser_close` is not offered, and the prompt says to close your own tab with
+   `browser_tabs` (action `close`).
+3. The three profile tools write their per-field schema once (`$defs.profile_field`). Final state: only for
+   Claude Code and Codex runs, the CLIs it was checked with; OpenCode runs get the inline schema.
+4. Codex runs get `-c skills.include_instructions=false`.
+5. Claude Code runs get `--no-session-persistence` and Codex runs `--ephemeral`. Final state: Claude Code
+   runs also get `--session-id`, and BIF removes what a run leaves outside the data folder when it ends.
+
+The script now also records what each run delivered: its artifacts, its findings with their stored
+(verified) quotes, and every failed tool call with its error. The "before" numbers below are a fresh
+baseline taken just before the changes. They match the tables above within run-to-run noise.
+
+### Results did not change
+
+| run | status before / after | page copy before / after | findings before / after | quotes verified before / after | failed tool calls before / after |
+| --- | --- | --- | --- | --- | --- |
+| research: encyclopaedia | done / done | 1 / 1 | 2 / 2 | 2 of 2 / 2 of 2 | 0 / 0 |
+| research: documentation | done / done | 1 / 1 | 2 / 2 | 2 of 2 / 3 of 3 | 3 (`save_finding` with placeholder ids) / 0 |
+| research: project page | done / done | 1 / 1 | 2 / 2 | 2 of 2 / 2 of 2 | 1 (`save_finding` with a placeholder id) / 0 |
+| worker without browser | done / done | 1 / 1 | 2 / 2 | 2 of 2 / 2 of 2 | 0 / 0 |
+| reviewer | done / done | – | – | – | 0 / 0 |
+| interviewer | done / done | – | – | – | 0 / 0 |
+| overhead (a)–(e), Codex (a)–(b) | done / done | – | – | – | 0 / 0 |
+
+- No agent called a tool that is no longer offered. No call was refused as unknown.
+- No agent tried `browser_close`. Each research agent closed its own tab with `browser_tabs`, and after
+  that only the browser's first blank tab was left.
+- The reviewer ran the same steps both times (`read_artifact`, two `expand`, `submit_review`).
+- Agents chose their own steps both times:
+  - Encyclopaedia: before, the agent took a snapshot that was too large to return inline, then read the
+    page with `browser_evaluate`. After, it used `browser_evaluate` directly.
+  - Documentation: `browser_evaluate` before; a 49k-character `browser_snapshot` after, which raised its
+    peak context to 50.9k.
+  - Project page: a snapshot both times.
+
+### Tokens per run type
+
+Total input is the sum of the context of every model call, as the CLI reports it.
+
+| run | first call before | first call after | total input before | total input after | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Claude (a): persona list | 38.5k | 21.2k | 38.5k | 21.2k | −45 % |
+| Claude (b): worker list | 38.8k | 21.5k | 38.8k | 21.5k | −45 % |
+| Claude (c): worker + browser lists | 39.2k | 21.9k | 39.2k | 21.9k | −44 % |
+| Claude (d): offline, persona list | 8.8k | 8.8k | 8.8k | 8.8k | 0 |
+| Claude (e): offline, worker list (schemas in full) | 24.5k | 22.2k | 24.5k | 22.2k | −9 % |
+| Codex (a): persona list | 14.9k | 14.1k | 14.9k | 14.1k | −5 % |
+| Codex (b): worker list | 14.9k | 14.1k | 14.9k | 14.1k | −5 % |
+| research: encyclopaedia (Claude) | 41.1k | 23.8k | 477k | 266k | −44 % |
+| research: documentation (Claude) | 41.1k | 23.8k | 439k | 329k | −25 % |
+| research: project page (Claude) | 41.0k | 23.8k | 346k | 261k | −25 % |
+| worker without browser (Claude) | 40.6k | 23.2k | 228k | 147k | −36 % |
+| reviewer (Claude) | 40.5k | 23.2k | 175k | 107k | −39 % |
+| interviewer, first message (Claude) | 40.0k | 22.7k | 125k | 71k | −43 % |
+
+What each change saved:
+
+- **Built-in tools (item 1): 17.3k tokens per Claude call.** The 11 built-ins that stayed cost 12.4k, measured
+  as run (a) against run (d); about 7.8k of that was the skill tool with its list of the person's own skills
+  (see the final state). MCP tools are still deferred: 12 tokens per BIF tool and 14 per browser tool,
+  as before.
+- **`browser_close` (item 2):** browser runs are offered 24 browser tools instead of 25. That is about 14
+  tokens per call. The point of this change is the failed call that no longer happens.
+- **Profile field schema (item 3).** The three tools shrink in `tools/list`:
+  - `save_persona`: 4,412 → 1,819 characters;
+  - `save_stakeholder`: 4,908 → 2,757 characters;
+  - `submit_combined_profile`: 7,162 → 1,961 characters.
+
+  The worker list goes from 43.2k to 38.4k characters, the retro list from 11.8k to 6.6k. Where schemas are
+  sent in full this saves 2.3k tokens per call (run e). With deferral it saves the same characters each
+  time ToolSearch loads one of these tools. Both CLIs called `save_persona` with the shared schema
+  correctly on the first try: one real run each, all 13 fields filled.
+- **Codex skills list (item 4): 0.8k tokens per Codex call** (14.9k → 14.1k measured; 0.9k in
+  `codex debug prompt-input`). Part A's earlier 3.0k estimate counted the whole developer message that
+  starts with the skills list. The rest of that message (2.2k) is still sent, now labelled "other".
+- **Session files (item 5)** change no tokens. After the change, no run left a transcript or a
+  tool-result file in the Claude folder. Codex's private home had no `sessions/` folder. Runs that ended
+  normally still left empty folders, and a killed run would have left its oversized results: see the final
+  state.
+
+The samples are as small as before: one run of each kind, 3 research runs.
+
+### Final state after the council's fixes
+
+Measured on 2026-11-16, same CLIs, after three changes made on the council's findings:
+
+- Built-in tools are denied by name instead of allowed by name. A tool a later release renames or adds is
+  then offered, never lost; BIF reports it once per server start (server log, setup check).
+- The skill tool is denied too (the owner's ruling: no use in a headless run, and it brought the person's
+  own skills into a BIF run).
+- BIF removes what a Claude run leaves outside the data folder when the run ends, however it ends
+  (inventory in [data-storage.md](data-storage.md#what-the-agent-clis-keep-outside-the-data-folder)).
+
+Runs: the fixed-overhead runs (a)–(e) and Codex (a), one browser research run (encyclopaedia) and its reviewer.
+Claude Code 2.1.325 on `haiku`, Codex 0.169.0 on `gpt-6.1-sol`.
+
+| run | first call, allowlist (earlier "after") | first call, deny list | total input, allowlist | total input, deny list |
+| --- | ---: | ---: | ---: | ---: |
+| Claude (a): persona list | 21.2k | 12.3k | 21.2k | 12.3k |
+| Claude (b): worker list | 21.5k | 12.6k | 21.5k | 12.6k |
+| Claude (c): worker + browser lists | 21.9k | 12.9k | 21.9k | 12.9k |
+| Claude (d): offline, persona list | 8.8k | 8.4k | 8.8k | 8.4k |
+| Claude (e): offline, worker list (schemas in full) | 22.2k | 21.9k | 22.2k | 21.9k |
+| Codex (a): persona list | 14.1k | 14.1k | 14.1k | 14.1k |
+| research: encyclopaedia (Claude) | 23.8k | 14.8k | 266k | 236k |
+| reviewer (Claude) | 23.2k | 14.2k | 107k | 68k |
+
+- **The switch to a deny list itself changes nothing.** Every non-offline run's init event lists the same
+  10 built-ins as the allowlist did, less the skill tool: Task, Bash, Edit, Monitor, Read, TaskStop,
+  ToolSearch, WebFetch, WebSearch, Write. The denied ones are absent.
+- **The 9k drop is the skill tool.** One extra run with the deny list but the skill tool offered (no BIF tools,
+  a one-line prompt) started at 20.0k tokens: its listing of the person's own skills cost about 7.8k
+  tokens per call on this machine. That figure depends on how many skills a person has installed.
+- **MCP tools are still deferred:** (b) − (a) = 301 tokens for 24 more BIF tools (13 per tool), (c) − (b) =
+  348 for 24 browser tools (14 per tool). With no built-in tools, so no ToolSearch, the schemas are sent
+  in full (e).
+- **Results are the same.** The research run ended `done` with its page copy, two findings and both quotes
+  verified, and no failed tool call, as in the earlier "after" run. It read the page with `browser_evaluate`
+  and closed its own tab with `browser_tabs`. No run called a tool that is no longer offered. The reviewer
+  ended `done` with `read_artifact` and `submit_review` (it called `expand` twice in the earlier run).
+- **Nothing was left behind.** After each of these Claude runs, nothing of the run was in the Claude folder
+  or Claude Code's temp root (the script now checks this).
+
+#### Smoke modes after the changes
+
+| mode | result |
+| --- | --- |
+| `worker claude` | PASS: `done`, `log_decision` and `submit_result` through the real MCP endpoint |
+| `worker codex` | PASS: the same; the Codex isolation check (only the `bif` server loaded) passed too |
+| `browser claude` | PASS: shared Playwright browser; opened its tab, navigated, screenshot saved as a PNG artifact, closed its tab with `browser_tabs` |
+| `knowledge claude` | PASS: all 7 steps (save, search, expand, verified quote, duplicate handshake, paged read, failed quote and recovery) |
+
+The kill probe (one Claude run through BIF's supervisor that wrote and edited a file, got a shell result too
+large to return inline and was then ended by the idle timeout during `sleep 120`): the run ended `failed`
+("idle timeout"), and nothing of it remained in the Claude folder, the temp root or the session list.
+
+#### The 29 built-in tools of Claude Code 2.1.325
+
+| tool | what it does | BIF runs | why |
+| --- | --- | --- | --- |
+| Bash | runs shell commands | offered | reading files too large to return inline, local work |
+| Read | reads a file | offered | a run needed it to reach an oversized page snapshot |
+| Write | writes a file | offered | notes and files in the run's folder |
+| Edit | edits a file in place | offered | as Write |
+| WebFetch | fetches a web page | offered | research |
+| WebSearch | searches the web | offered | research |
+| ToolSearch | loads the schema of a deferred tool | offered | without it every MCP schema is sent in full |
+| Task | starts a sub-agent | offered | may help a run split its work |
+| Monitor | watches a background command's output | offered | may help with long commands |
+| TaskStop | stops a background command or sub-agent | offered | goes with Monitor and Task |
+| CronCreate | schedules a prompt to run later | removed | a run ends when it is done |
+| CronDelete | deletes a scheduled prompt | removed | as CronCreate |
+| CronList | lists scheduled prompts | removed | as CronCreate |
+| ScheduleWakeup | wakes the session later | removed | as CronCreate |
+| PushNotification | sends a notification to the person | removed | runs ask through BIF's request tools |
+| RemoteTrigger | starts a remote agent run | removed | a run has no remote agents |
+| ListAgents | lists other agent sessions | removed | a run has no teammates |
+| SendMessage | sends a message to another session | removed | as ListAgents |
+| Artifact | publishes a page on claude.ai | removed | evidence goes to `save_artifact` |
+| ArtifactComments | reads and answers comments on a published page | removed | as Artifact |
+| ArtifactData | reads and writes a published page's data | removed | as Artifact |
+| DesignSync | syncs a design with claude.ai | removed | as Artifact |
+| EnterWorktree | moves the session into a git worktree | removed | code work |
+| ExitWorktree | leaves the worktree | removed | code work |
+| NotebookEdit | edits a Jupyter notebook | removed | code work |
+| LSP | code navigation through a language server | removed | code work |
+| ReportFindings | reports code-review findings to the CLI's host | removed | BIF findings go to `save_finding` |
+| Workflow | runs a scripted multi-agent workflow | removed | a person opts into those |
+| Skill | loads one of the person's skills | removed | the owner's ruling (above) |
+
+#### Codex and OpenCode built-in tools: checked, not changed
+
+- **Codex 0.169.0** (`codex debug prompt-input`, no model call): `exec` (shell), `wait`, `sleep`, `clock`,
+  `request_user_input` and `request_user_input_async`, and the sub-agent tools (`spawn_agent`,
+  `send_message`, `followup_task`, `interrupt_agent`, `list_agents`, `wait_agent`). The sub-agent tools are
+  the counterpart of Claude's Task, which BIF keeps. Only `request_user_input` asks the person through the
+  CLI; Codex has no documented setting to withhold one built-in tool (`codex features list` shows feature
+  switches, not tools), so nothing was changed.
+- **OpenCode 1.2.27** (tool definitions in its code; not run): `bash`, `read`, `write`, `edit`,
+  `apply_patch`, `glob`, `grep`, `codesearch`, `lsp`, `webfetch`, `websearch`, `task`, `todoread`,
+  `todowrite`, `batch`, `question`, `plan_exit`, `skill` (and `invalid`, its error placeholder). Candidates
+  like those removed for Claude: `lsp`, `question` (asks the person through the CLI), `plan_exit` and `skill`.
+  OpenCode has never run end to end in BIF, so a change could not be checked and none was made; its
+  `permission` setting could deny them (as BIF does for offline runs).
+
+#### OpenCode: what of the person's own setup reaches a run (from its code, 1.2.27)
+
+BIF starts OpenCode with `XDG_CONFIG_HOME` pointing at BIF's own folder and `OPENCODE_DISABLE_PROJECT_CONFIG=1`.
+
+| input | reaches a BIF run? |
+| --- | --- |
+| global config, MCP servers, plugins (`{plugin,plugins}/*.{ts,js}` in the config folder), global `AGENTS.md` | no: the config folder is BIF's |
+| project config and project instruction files (`AGENTS.md`, `CLAUDE.md`, `CONTEXT.md` found walking up) | no: project config is off |
+| the person's global `~/.claude/CLAUDE.md` | yes, unless `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` is set (it is not) |
+| skills in `~/.claude/skills` and `~/.agents/skills`, and in `.claude` or `.agents` folders between the run folder and the repository root | yes, unless `OPENCODE_DISABLE_EXTERNAL_SKILLS` is set (it is not) |
+| hooks, memories | OpenCode has none apart from plugins |
+| login, sessions | its data folder (`~/.local/share/opencode`) |
+
+Switching the two off is a question for the owner: it is not checked with a live OpenCode run.
+
+#### Not checked on Windows
+
+Windows could not be run. Not checked there: where Claude Code keeps its temp files (BIF removes nothing
+from a temp root on Windows, where Claude Code's folder is not named after a user id), whether its project
+folder is named after the same path BIF uses (BIF tries the real path and the path as given), the kill
+probe, the deny list and the init-event check, and the Codex inventory. The paths are built with
+`node:path` and `os.homedir()`, and `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` are honoured.

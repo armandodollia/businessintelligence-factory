@@ -6,7 +6,8 @@
  *   whether Chrome is there (`report`, see `core/setup/doctor.ts`), whether a configuration file
  *   exists, the app version, and where this machine keeps the data, the configuration, the logs and
  *   the research browser's profile.
- *   The check is kept between requests: asking does not start commands each time.
+ *   The check is kept between requests: asking does not start commands each time. `cliNotices`: changes of
+ *   an agent CLI this server start noticed while it ran agents (`core/harness/cliNotices.ts`).
  * - `POST /api/setup/apply` (body `{ overwrite?: boolean }`): checks again, then writes the
  *   configuration that fits what was found (`suggestConfig`, on top of the configuration in use) and
  *   uses it at once. Only when no configuration file exists; when one exists it is refused (409)
@@ -24,6 +25,7 @@ import type { Context, Hono } from 'hono';
 import { z } from 'zod';
 import { parseConfig } from '../core/config/load.js';
 import type { BifConfig } from '../core/config/schema.js';
+import { cliNotices } from '../core/harness/cliNotices.js';
 import type { RuntimePaths } from '../core/runtime/paths.js';
 import { suggestConfig, type SetupCheck } from '../core/setup/doctor.js';
 
@@ -82,7 +84,7 @@ export function mountSetupRoutes(app: Hono, deps: SetupRouteDeps): void {
   app.get('/api/setup', async (c) => {
     const refresh = ['1', 'true'].includes(c.req.query('refresh') ?? '');
     const report = setup ? await setup.report({ refresh }) : null;
-    return c.json({ available: setup !== undefined, report, configExists: configExists(), version: deps.appVersion, packaged: paths.packaged, folders: folders(), canOpenFolder: deps.openFolder !== undefined });
+    return c.json({ available: setup !== undefined, report, configExists: configExists(), version: deps.appVersion, packaged: paths.packaged, folders: folders(), canOpenFolder: deps.openFolder !== undefined, cliNotices: cliNotices() });
   });
 
   app.post('/api/setup/apply', async (c) => {

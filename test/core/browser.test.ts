@@ -13,6 +13,7 @@ import {
   browserStartupWarnings,
   effectiveMaxBrowserRuns,
   SharedBrowser,
+  withheldBrowserTools,
 } from '../../src/core/harness/browser.js';
 import { Supervisor } from '../../src/core/harness/supervisor.js';
 import { TokenRegistry } from '../../src/core/harness/tokens.js';
@@ -96,8 +97,29 @@ describe('browser config', () => {
   it('prompt note tells agents to work in their own tab and close it', () => {
     const note = browserPromptNote(defaultConfig);
     expect(note).toMatch(/open a NEW tab/);
-    expect(note).toMatch(/close your tabs/);
     expect(note).toMatch(/save_artifact/);
+  });
+
+  it('shared mode: the note says how to close your own tab (browser_tabs "close"), and that the browser itself stays open', () => {
+    const note = browserPromptNote(defaultConfig);
+    expect(defaultConfig.browser.mode).toBe('shared');
+    expect(note).toContain('`browser_tabs` with action "close" and the index of each tab you opened');
+    expect(note).toContain('Do not close the browser itself');
+    // per-run mode: the run's own browser; the general rule stays as it was.
+    const perRun = structuredClone(defaultConfig);
+    perRun.browser.mode = 'per_run';
+    expect(browserPromptNote(perRun)).toMatch(/close your tabs when you are done/);
+    expect(browserPromptNote(perRun)).not.toContain('browser_tabs');
+  });
+
+  it('withheldBrowserTools: browser_close only in shared mode (it always fails there)', () => {
+    expect(withheldBrowserTools(defaultConfig)).toEqual({ browser: ['browser_close'] });
+    const perRun = structuredClone(defaultConfig);
+    perRun.browser.mode = 'per_run';
+    expect(withheldBrowserTools(perRun)).toEqual({});
+    const t3 = structuredClone(defaultConfig);
+    t3.browser.backend = 't3';
+    expect(withheldBrowserTools(t3)).toEqual({});
   });
 });
 
@@ -196,6 +218,14 @@ describe('Supervisor + browser', () => {
     expect(m1!.browser).toEqual({ type: 'http', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/) });
     expect(m2!.browser).toEqual(m1!.browser);
     expect(Object.keys(mcpOf(plain.agentRunId))).toEqual(['bif']);
+    // The failing browser_close is not offered to browser runs; other runs get no such flag.
+    const argvOf = (id: string) => JSON.parse(readFileSync(join(dir, 'ws_a', 'runs', id, 'cwd', 'argv.json'), 'utf8')) as string[];
+    for (const r of runs) {
+      const argv = argvOf(r.agentRunId);
+      expect(argv[argv.indexOf('--disallowedTools') + 1]!.split(',')).toContain('mcp__browser__browser_close');
+    }
+    const plainArgv = argvOf(plain.agentRunId);
+    expect(plainArgv[plainArgv.indexOf('--disallowedTools') + 1]!.split(',')).not.toContain('mcp__browser__browser_close');
     expect(launches(log)).toHaveLength(1);
     // The run's process-group reaping does not kill the shared server.
     expect(alive(launches(log)[0]!.pid)).toBe(true);

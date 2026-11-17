@@ -6,10 +6,11 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApp, type AppDeps } from '../../src/api/routes.js';
 import { decodeBundle } from '../../src/core/feedbackBundle/bundle.js';
 import { listFeedback } from '../../src/core/feedback/events.js';
+import { cliNotices, noteCliChange } from '../../src/core/harness/cliNotices.js';
 import { defaultPricing } from '../../src/core/harness/pricing.js';
 import { loadPrompt } from '../../src/core/prompts/index.js';
 import { runtimePaths } from '../../src/core/runtime/paths.js';
@@ -137,6 +138,18 @@ describe('GET /api/setup', () => {
     const t = setup({ deps: { paths } });
     const res = await t.call('GET', '/api/setup');
     expect(res.body).toMatchObject({ packaged: true, folders: { app: appDir, logs: join(appDir, 'logs'), open: appDir } });
+  });
+
+  it('shows the changes of an agent CLI noticed by this server start (a built-in tool BIF has not sorted)', async () => {
+    const t = setup();
+    expect((await t.call('GET', '/api/setup')).body.cliNotices).toEqual(cliNotices());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      noteCliChange('Claude Code 0.0.1-setup-test offers built-in tools BIF has not sorted: Teleport');
+    } finally {
+      warn.mockRestore();
+    }
+    expect((await t.call('GET', '/api/setup')).body.cliNotices).toContain('Claude Code 0.0.1-setup-test offers built-in tools BIF has not sorted: Teleport');
   });
 
   it('without a check (a server started by a test): says so, runs nothing, still shows the folders', async () => {

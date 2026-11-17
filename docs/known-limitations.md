@@ -14,7 +14,20 @@
   [stakeholders.md](stakeholders.md)); the server also warns at start-up. Own-stakeholder research
   itself is not offline and runs on any provider.
 - **Claude runs inherit your global Claude Code hooks and plugins**; isolating them breaks OAuth (see
-  [setup.md](setup.md#agent-cli-isolation)).
+  [setup.md](setup.md#agent-cli-isolation)). They also see your agents (through the sub-agent tool),
+  output style and global `CLAUDE.md`. The skill tool is not offered.
+- **OpenCode keeps its sessions outside the data folder** (prompts, page and upload text included), in
+  its own data folder, beyond BIF's retention and the feedback-bundle rules (see
+  [data-storage.md](data-storage.md#what-the-agent-clis-keep-outside-the-data-folder)).
+- **What a Claude run leaves outside the data folder stays until the run ends**, or after a crash until
+  BIF starts again: results too large to return inline and shell output, in your Claude folder and
+  Claude Code's temp folder. A run stopped by force (SIGKILL without a polite stop) also leaves a snapshot
+  of your shell settings and a session entry, which BIF does not remove (see
+  [data-storage.md](data-storage.md#what-the-agent-clis-keep-outside-the-data-folder)).
+- **OpenCode runs see your global `~/.claude/CLAUDE.md` and your skills** in `~/.claude/skills` and
+  `~/.agents/skills`, and the skills in any `.claude` or `.agents` folder between a run's folder and
+  the root of a repository that contains the data folder (from its code; not checked with a live
+  run).
 - **Config changes** to worker and browser limits and the port need a restart. (`BIF_DATA_DIR` and
   `PORT` overrides are runtime-only and are not written into `bif.config.json` when you save
   settings.)

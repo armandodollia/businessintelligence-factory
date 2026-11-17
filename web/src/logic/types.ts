@@ -748,5 +748,7 @@ export type SetupInfo = {
   packaged: boolean;
   folders: { app?: string; data: string; config?: string; logs?: string; browserProfile?: string; open: string };
   canOpenFolder: boolean;
+  /** Changes of an agent CLI this server start noticed while it ran agents (absent on an older server). */
+  cliNotices?: string[];
 };
 // --- end setup check -----------------------------------------------------------------------------
