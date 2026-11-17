@@ -33,6 +33,7 @@ Technical documentation for engineers working on the Business Intelligence Facto
 | File | About |
 |---|---|
 | [smoke-results.md](smoke-results.md) | latest smoke test results |
+| [context-measurements.md](context-measurements.md) | where the input tokens of an agent run go, measured; which savings cannot affect results |
 | [superpowers/verify-log.md](superpowers/verify-log.md) | review-gate history and open items per section |
 | [superpowers/rulings-2026-11-15-persona-projects.md](superpowers/rulings-2026-11-15-persona-projects.md) | decisions taken without the owner during the persona projects |
 
