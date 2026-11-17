@@ -38,6 +38,8 @@ tool, see "Reviewing research output" at the end.
 - Spread the council over models and CLIs. Members on one model share its blind spots.
 - Never seat Claude Fable as a member (the owner's rule, 2026-11-16). Use Opus, Sonnet or a model of
   another CLI for that seat.
+- A Codex seat runs GPT Sol (`gpt-6.1-sol`) at high effort (the owner's rule, 2026-11-16), unless
+  the request names another model.
 - Start every member in parallel. Each gets: the branch and its base, the plan task and the spec
   section, its lens, the round number, this file's path, and from round 2 the list described under
   "Rounds". Never: another member's output, your own opinion of the code, or what you expect it to find.
@@ -56,7 +58,7 @@ Use what the session has.
   message to a file:
 
   ```sh
-  codex exec -s read-only -C "$REPO" -m "$MODEL" -c model_reasoning_effort="high" \
+  codex exec -s read-only -C "$REPO" -m gpt-6.1-sol -c model_reasoning_effort="high" \
     -o "$OUT/$MEMBER.md" - < "$OUT/$MEMBER.prompt.md"
   ```
 
