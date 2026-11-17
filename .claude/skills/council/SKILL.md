@@ -36,6 +36,8 @@ tool, see "Reviewing research output" at the end.
   high effort. A small branch can sit fewer; say in the report which lenses were left out.
 - Settings, unless the request says otherwise: `rounds` 3, pass score 9, `blockOn` `any`.
 - Spread the council over models and CLIs. Members on one model share its blind spots.
+- Never seat Claude Fable as a member (the owner's rule, 2026-11-16). Use Opus, Sonnet or a model of
+  another CLI for that seat.
 - Start every member in parallel. Each gets: the branch and its base, the plan task and the spec
   section, its lens, the round number, this file's path, and from round 2 the list described under
   "Rounds". Never: another member's output, your own opinion of the code, or what you expect it to find.
