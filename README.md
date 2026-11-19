@@ -173,4 +173,14 @@ beta. See [docs/beta-testers.md](docs/beta-testers.md).
 - [docs/feedback-bundle.md](docs/feedback-bundle.md): the feedback file a tester can send.
 - [docs/known-limitations.md](docs/known-limitations.md): what does not work yet.
 
+## Author
+
+Built by Armando Dollia ([@armandodollia](https://github.com/armandodollia)). Questions, ideas and
+bug reports are welcome as GitHub issues.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). If you redistribute BIF or a work based
+on it, keep the [NOTICE](NOTICE) file with it.
+
 Created in [T3 Code](https://t3.codes).
